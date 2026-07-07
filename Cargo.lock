@@ -275,6 +275,8 @@ name = "client"
 version = "0.1.0"
 dependencies = [
  "raylib",
+ "serde",
+ "serde_json",
  "spacetimedb-sdk",
 ]
 

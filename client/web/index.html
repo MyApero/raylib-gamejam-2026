@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <title>hexmerge — raylib 6.0 + SpacetimeDB</title>
+    <meta name="viewport" content="width=device-width">
+    <style>
+      body { margin: 0; overflow: hidden; background-color: black; }
+      canvas#canvas {
+        border: 0 none;
+        background-color: black;
+        display: block;
+        margin: 0 auto;
+      }
+      #output {
+        color: #9a9a9a;
+        font-family: monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        max-height: 15vh;
+        overflow-y: auto;
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    <pre id="output"></pre>
+    <script>
+      var Module = {
+        canvas: document.getElementById('canvas'),
+        print: (function () {
+          var el = document.getElementById('output');
+          return function (text) {
+            if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
+            console.log(text);
+            el.textContent += text + '\n';
+            el.scrollTop = el.scrollHeight;
+          };
+        })(),
+      };
+      Module.printErr = Module.print;
+    </script>
+    <!-- Built by: cargo build -p client --bin web --target wasm32-unknown-emscripten --release -->
+    <script src="web.js"></script>
+  </body>
+</html>

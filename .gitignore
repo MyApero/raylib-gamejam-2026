@@ -78,6 +78,7 @@ android.*
 *.js
 !src/minshell.html
 !src/shell.html
+!client/web/index.html
 
 # Rust
 /target/
