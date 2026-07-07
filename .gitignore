@@ -84,3 +84,5 @@ android.*
 /target/
 server/target/
 client/target/
+
+raylib
