@@ -5,4 +5,7 @@ edition = "2024"
 
 [dependencies]
 raylib = "6.0"
-spacetimedb-sdk = "2.6"
+# Pinned to a local checkout of SpacetimeDB (2.7.0) because crates.io only
+# publishes up to 2.6.1, which is missing APIs our generated bindings need.
+# Switch back to a plain version once 2.7.0 lands on crates.io. See WORK.md.
+spacetimedb-sdk = { path = "/home/antoine/delivery/perso/SpacetimeDB/sdks/rust" }

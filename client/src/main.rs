@@ -29,7 +29,7 @@ fn main() {
             std::process::exit(0);
         })
         .with_token(creds_store().load().expect("Error loading credentials"))
-        .with_module_name(DB_NAME)
+        .with_database_name(DB_NAME)
         .with_uri(HOST)
         .build()
         .expect("Failed to connect");

@@ -1,2 +1,2 @@
 #!/bin/sh
-spacetime publish -s local --project-path server hexmerge
+spacetime publish -s local --module-path server hexmerge
