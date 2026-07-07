@@ -19,6 +19,7 @@
 
 use raylib::prelude::*;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 
@@ -68,16 +69,39 @@ struct UserRow {
     last_seen_micros: i64,
 }
 
+/// Other players only get a fresh position every POLL_INTERVAL over the
+/// network, which reads as choppy motion if drawn directly. We interpolate
+/// from the position we were at when the last poll landed (`prev`) towards
+/// the newly polled one (`target`) over the following POLL_INTERVAL, so
+/// rendering stays smooth every frame regardless of the real poll rate.
+struct PlayerVisual {
+    prev: Vector2,
+    target: Vector2,
+    updated_at: f64,
+    last_seen_micros: i64,
+}
+
+impl PlayerVisual {
+    fn render_pos(&self, now: f64) -> Vector2 {
+        let t = ((now - self.updated_at) / POLL_INTERVAL).clamp(0.0, 1.0) as f32;
+        Vector2::new(
+            self.prev.x + (self.target.x - self.prev.x) * t,
+            self.prev.y + (self.target.y - self.prev.y) * t,
+        )
+    }
+}
+
 struct State {
     rl: RaylibHandle,
     thread: RaylibThread,
     /// None until the identity bootstrap succeeds; nothing else can happen
     /// without it (every /call and /sql needs the Bearer token).
     identity: Option<(String, String)>,
-    users: Vec<UserRow>,
+    players: HashMap<String, PlayerVisual>,
     last_send: f64,
     last_poll: f64,
     last_bootstrap_attempt: f64,
+    last_poll_latency_ms: f64,
 }
 
 fn run_js(js: &str) -> String {
@@ -236,14 +260,32 @@ fn frame(state: &mut State) {
 
         if t - state.last_poll >= POLL_INTERVAL {
             state.last_poll = t;
+            let call_start = now_secs();
             let resp = http_post(
                 &database_url("/sql"),
                 "SELECT * FROM user",
                 "text/plain",
                 Some(&token),
             );
+            state.last_poll_latency_ms = (now_secs() - call_start) * 1000.0;
             if !resp.body.is_empty() {
-                state.users = parse_users(&resp.body);
+                for row in parse_users(&resp.body) {
+                    let new_target = Vector2::new(row.x, row.y);
+                    let prev = state
+                        .players
+                        .get(&row.identity_hex)
+                        .map(|p| p.render_pos(t))
+                        .unwrap_or(new_target);
+                    state.players.insert(
+                        row.identity_hex.clone(),
+                        PlayerVisual {
+                            prev,
+                            target: new_target,
+                            updated_at: t,
+                            last_seen_micros: row.last_seen_micros,
+                        },
+                    );
+                }
             }
         }
     }
@@ -253,14 +295,14 @@ fn frame(state: &mut State) {
 
     let mut d = state.rl.begin_drawing(&state.thread);
     d.clear_background(Color::RAYWHITE);
-    for user in state
-        .users
+    for (identity_hex, player) in state
+        .players
         .iter()
-        .filter(|u| is_present(u.last_seen_micros, now_micros))
-        .filter(|u| Some(u.identity_hex.as_str()) != my_identity)
+        .filter(|(_, p)| is_present(p.last_seen_micros, now_micros))
+        .filter(|(id, _)| Some(id.as_str()) != my_identity)
     {
-        let center = Vector2::new(user.x, user.y);
-        d.draw_poly(center, 6, HEX_RADIUS, 0.0, color_for(&user.identity_hex));
+        let center = player.render_pos(t);
+        d.draw_poly(center, 6, HEX_RADIUS, 0.0, color_for(identity_hex));
     }
     // Drawn from the live mouse position rather than the polled table, so
     // our own hexagon tracks the cursor every frame instead of snapping
@@ -271,6 +313,13 @@ fn frame(state: &mut State) {
         d.draw_poly_lines_ex(center, 6, HEX_RADIUS, 0.0, 3.0, Color::BLACK);
     }
     d.draw_text("hex + merge — PoC (web)", 10, 10, 20, Color::DARKGRAY);
+    d.draw_text(
+        &format!("poll latency: {:.0}ms", state.last_poll_latency_ms),
+        10,
+        35,
+        16,
+        Color::GRAY,
+    );
     d.draw_fps(640, 10);
 }
 
@@ -284,10 +333,11 @@ fn main() {
         rl,
         thread,
         identity: None,
-        users: Vec::new(),
+        players: HashMap::new(),
         last_send: -SEND_INTERVAL,
         last_poll: -POLL_INTERVAL,
         last_bootstrap_attempt: -BOOTSTRAP_RETRY_INTERVAL,
+        last_poll_latency_ms: 0.0,
     });
     let arg = Box::into_raw(state) as *mut c_void;
     unsafe {
