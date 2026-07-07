@@ -23,10 +23,13 @@ use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 
-/// SpacetimeDB host. Point this at your deployed instance before shipping
-/// the web build — "localhost" only works when the browser and the
-/// SpacetimeDB instance are on the same machine.
-const HOST: &str = "http://localhost:3000";
+/// SpacetimeDB's port. The host is resolved at runtime from the page's own
+/// origin (see `resolve_host`), so this build works whether it's opened as
+/// localhost:8080 or over LAN as e.g. 192.168.1.23:8080 — as long as
+/// SpacetimeDB is reachable on this port at that same address. Point this
+/// at your deployed instance's port before shipping the web build if it
+/// differs.
+const SPACETIMEDB_PORT: u16 = 3000;
 const DB_NAME: &str = "hexmerge";
 const HEX_RADIUS: f32 = 28.0;
 /// Minimum time between set_pos calls (also our presence heartbeat).
@@ -94,6 +97,8 @@ impl PlayerVisual {
 struct State {
     rl: RaylibHandle,
     thread: RaylibThread,
+    /// http://<hostname of the page we were loaded from>:SPACETIMEDB_PORT
+    host: String,
     /// None until the identity bootstrap succeeds; nothing else can happen
     /// without it (every /call and /sql needs the Bearer token).
     identity: Option<(String, String)>,
@@ -147,8 +152,18 @@ fn http_post(url: &str, body: &str, content_type: &str, token: Option<&str>) -> 
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
-fn database_url(path: &str) -> String {
-    format!("{HOST}/v1/database/{DB_NAME}{path}")
+/// Resolves SpacetimeDB's address from the page's own hostname rather than
+/// hardcoding "localhost" — "localhost" in a browser always means the
+/// device the browser is running on, so a hardcoded value would silently
+/// point a phone at itself instead of the dev machine when this page is
+/// loaded over LAN.
+fn resolve_host() -> String {
+    let hostname = run_js("window.location.hostname");
+    format!("http://{hostname}:{SPACETIMEDB_PORT}")
+}
+
+fn database_url(host: &str, path: &str) -> String {
+    format!("{host}/v1/database/{DB_NAME}{path}")
 }
 
 /// Strips the "0x" prefix /sql rows use, to match the plain hex string
@@ -158,8 +173,8 @@ fn normalize_identity(hex: &str) -> String {
     hex.strip_prefix("0x").unwrap_or(hex).to_lowercase()
 }
 
-fn bootstrap_identity() -> Option<(String, String)> {
-    let resp = http_post(&format!("{HOST}/v1/identity"), "", "application/json", None);
+fn bootstrap_identity(host: &str) -> Option<(String, String)> {
+    let resp = http_post(&format!("{host}/v1/identity"), "", "application/json", None);
     let parsed: IdentityResponse = serde_json::from_str(&resp.body).ok()?;
     Some((normalize_identity(&parsed.identity), parsed.token))
 }
@@ -240,7 +255,7 @@ fn frame(state: &mut State) {
 
     if state.identity.is_none() && t - state.last_bootstrap_attempt >= BOOTSTRAP_RETRY_INTERVAL {
         state.last_bootstrap_attempt = t;
-        state.identity = bootstrap_identity();
+        state.identity = bootstrap_identity(&state.host);
     }
 
     let mouse = state.rl.get_mouse_position();
@@ -251,7 +266,7 @@ fn frame(state: &mut State) {
             state.last_send = t;
             let body = format!("[{}, {}]", mouse.x, mouse.y);
             http_post(
-                &database_url("/call/set_pos"),
+                &database_url(&state.host, "/call/set_pos"),
                 &body,
                 "application/json",
                 Some(&token),
@@ -262,7 +277,7 @@ fn frame(state: &mut State) {
             state.last_poll = t;
             let call_start = now_secs();
             let resp = http_post(
-                &database_url("/sql"),
+                &database_url(&state.host, "/sql"),
                 "SELECT * FROM user",
                 "text/plain",
                 Some(&token),
@@ -332,6 +347,7 @@ fn main() {
     let state = Box::new(State {
         rl,
         thread,
+        host: resolve_host(),
         identity: None,
         players: HashMap::new(),
         last_send: -SEND_INTERVAL,

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <title>hexmerge — raylib 6.0 + SpacetimeDB</title>
-    <meta name="viewport" content="width=device-width">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
       body { margin: 0; overflow: hidden; background-color: black; }
       canvas#canvas {
@@ -11,6 +11,12 @@
         background-color: black;
         display: block;
         margin: 0 auto;
+        /* Keep the 720x720 game square and fully on-screen (no scroll/zoom
+           needed) on any viewport, phones included; the internal render
+           resolution stays 720x720 regardless of this CSS size. */
+        width: 100vmin;
+        height: 100vmin;
+        touch-action: none;
       }
       #output {
         color: #9a9a9a;

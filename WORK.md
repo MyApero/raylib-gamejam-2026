@@ -46,6 +46,18 @@ The web client polls SpacetimeDB's HTTP API instead of holding a WebSocket
 (raylib's web target is emscripten; spacetimedb-sdk's browser feature needs
 wasm-bindgen, which doesn't support emscripten). See `client/src/bin/web.rs`.
 
+### Testing on your phone (same Wi-Fi)
+
+Both `http.server` and `spacetime start` bind all interfaces by default, so
+they're already reachable from other devices on the same network — no
+firewall/config changes needed on a typical setup. Find your machine's LAN
+IP (`ip -4 addr` or similar) and open `http://<lan-ip>:8080` on the phone.
+The web client resolves SpacetimeDB's address from the page's own hostname
+at runtime, so this works without editing any code. Single-finger touch
+drags move your hexagon (raylib translates single-touch to mouse position
+on the web platform); the canvas is CSS-scaled to fit the screen without
+zooming.
+
 ## VPS setup (SpacetimeDB 2.7, for later)
 
 ```bash
@@ -60,6 +72,8 @@ spacetime publish -s <vps-host>:3000 --module-path server hexmerge
 spacetime generate --lang rust --out-dir client/src/module_bindings --module-path server
 ```
 
-And update `HOST` to `http://<vps-host>:3000` (or `https://...` behind TLS,
-required once this is served from itch.io) in both `client/src/main.rs` and
-`client/src/bin/web.rs`.
+And update `HOST` in `client/src/main.rs` to `http://<vps-host>:3000` (or
+`https://...` behind TLS, required once this is served from itch.io).
+`client/src/bin/web.rs` needs no change — it resolves SpacetimeDB's host
+from the page's own hostname at runtime — but if the VPS's SpacetimeDB
+port ever differs from 3000, update `SPACETIMEDB_PORT` there.
