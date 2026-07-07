@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["server", "client"]
+
+# Fast dev iteration (same setup as albert)
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
