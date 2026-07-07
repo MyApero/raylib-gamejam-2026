@@ -42,9 +42,12 @@ Then open http://localhost:8080 in a browser. Debug builds crash the
 emscripten linker (binaryen assertion), so the script always builds
 `--release`.
 
-The web client polls SpacetimeDB's HTTP API instead of holding a WebSocket
-(raylib's web target is emscripten; spacetimedb-sdk's browser feature needs
-wasm-bindgen, which doesn't support emscripten). See `client/src/bin/web.rs`.
+The web client can't use spacetimedb-sdk (raylib's web target is
+emscripten; the SDK's browser feature needs wasm-bindgen, which doesn't
+support emscripten), so it speaks SpacetimeDB's `v1.json.spacetimedb`
+WebSocket protocol directly: the socket lives in JS (`client/web/index.html`)
+and the game drains its pushed messages once per frame. See
+`client/src/bin/web.rs`.
 
 ### Testing on your phone (same Wi-Fi)
 
