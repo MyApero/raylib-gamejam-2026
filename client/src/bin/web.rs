@@ -5,7 +5,17 @@
 //! can't live in one binary. So instead of a live WebSocket subscription,
 //! this binary polls SpacetimeDB's plain HTTP API (POST /call, POST /sql)
 //! via a synchronous XMLHttpRequest injected through
-//! emscripten_run_script_string. See README.web.md.
+//! emscripten_run_script_string. See WORK.md.
+//!
+//! Identity/token bootstrap uses POST /v1/identity, whose response body
+//! carries {identity, token} — deliberately not the spacetime-identity /
+//! spacetime-identity-token response *headers* that /call and /sql also
+//! return, because SpacetimeDB's CORS layer doesn't call
+//! `.expose_headers(...)`, so browsers hide those headers from JS on
+//! cross-origin requests (curl, which ignores CORS entirely, will still
+//! show them — that's a trap). The bootstrapped token is then reused as a
+//! Bearer token on every subsequent request so the server sees one stable
+//! identity instead of minting a new one per call.
 
 use raylib::prelude::*;
 use serde::Deserialize;
@@ -21,7 +31,9 @@ const HEX_RADIUS: f32 = 28.0;
 /// Minimum time between set_pos calls (also our presence heartbeat).
 const SEND_INTERVAL: f64 = 0.15;
 /// Minimum time between full user-list polls.
-const POLL_INTERVAL: f64 = 0.3;
+const POLL_INTERVAL: f64 = 0.15;
+/// Retry the identity bootstrap this often until it succeeds.
+const BOOTSTRAP_RETRY_INTERVAL: f64 = 1.0;
 /// Mirrors server/src/lib.rs's PRESENCE_TIMEOUT.
 const PRESENCE_TIMEOUT_SECS: i64 = 3;
 
@@ -39,11 +51,13 @@ unsafe extern "C" {
 #[derive(Deserialize, Default)]
 struct HttpResponse {
     #[serde(default)]
-    token: String,
-    #[serde(default)]
-    identity: String,
-    #[serde(default)]
     body: String,
+}
+
+#[derive(Deserialize)]
+struct IdentityResponse {
+    identity: String,
+    token: String,
 }
 
 #[derive(Clone)]
@@ -57,11 +71,13 @@ struct UserRow {
 struct State {
     rl: RaylibHandle,
     thread: RaylibThread,
-    token: Option<String>,
-    my_identity: Option<String>,
+    /// None until the identity bootstrap succeeds; nothing else can happen
+    /// without it (every /call and /sql needs the Bearer token).
+    identity: Option<(String, String)>,
     users: Vec<UserRow>,
     last_send: f64,
     last_poll: f64,
+    last_bootstrap_attempt: f64,
 }
 
 fn run_js(js: &str) -> String {
@@ -80,9 +96,8 @@ fn run_js(js: &str) -> String {
 /// Synchronous HTTP POST via a browser XMLHttpRequest, run to completion
 /// before returning. Simple and reliable for a jam PoC, at the cost of
 /// blocking the render loop for the duration of the round trip.
-fn http_post(path: &str, body: &str, content_type: &str, token: &Option<String>) -> HttpResponse {
-    let url = format!("{HOST}/v1/database/{DB_NAME}{path}");
-    let js_url = serde_json::to_string(&url).unwrap_or_default();
+fn http_post(url: &str, body: &str, content_type: &str, token: Option<&str>) -> HttpResponse {
+    let js_url = serde_json::to_string(url).unwrap_or_default();
     let js_body = serde_json::to_string(body).unwrap_or_default();
     let js_ct = serde_json::to_string(content_type).unwrap_or_default();
     let js_token = match token {
@@ -98,18 +113,31 @@ fn http_post(path: &str, body: &str, content_type: &str, token: &Option<String>)
                 var tok = {js_token};
                 if (tok) xhr.setRequestHeader('Authorization', 'Bearer ' + tok);
                 xhr.send({js_body});
-                return JSON.stringify({{
-                    token: xhr.getResponseHeader('spacetime-identity-token') || '',
-                    identity: xhr.getResponseHeader('spacetime-identity') || '',
-                    body: xhr.responseText
-                }});
+                return JSON.stringify({{ body: xhr.responseText }});
             }} catch (e) {{
-                return JSON.stringify({{token: '', identity: '', body: ''}});
+                return JSON.stringify({{ body: '' }});
             }}
         }})()"#
     );
     let raw = run_js(&script);
     serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn database_url(path: &str) -> String {
+    format!("{HOST}/v1/database/{DB_NAME}{path}")
+}
+
+/// Strips the "0x" prefix /sql rows use, to match the plain hex string
+/// POST /v1/identity returns — the two endpoints format identities
+/// differently even though they're the same underlying bytes.
+fn normalize_identity(hex: &str) -> String {
+    hex.strip_prefix("0x").unwrap_or(hex).to_lowercase()
+}
+
+fn bootstrap_identity() -> Option<(String, String)> {
+    let resp = http_post(&format!("{HOST}/v1/identity"), "", "application/json", None);
+    let parsed: IdentityResponse = serde_json::from_str(&resp.body).ok()?;
+    Some((normalize_identity(&parsed.identity), parsed.token))
 }
 
 /// Parses the SATS-JSON response of `SELECT * FROM user`. Row shape is a
@@ -134,8 +162,8 @@ fn parse_users(sql_body: &str) -> Vec<UserRow> {
             .and_then(|v| v.as_array())
             .and_then(|a| a.get(0))
             .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
+            .map(normalize_identity)
+            .unwrap_or_default();
         let x = arr.get(3).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
         let y = arr.get(4).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
         let last_seen_micros = arr
@@ -164,9 +192,7 @@ fn now_secs() -> f64 {
 fn now_micros_since_unix_epoch() -> i64 {
     // The XHR round trip gives us no server clock directly, so fall back to
     // the browser's wall clock — good enough for a few-seconds presence window.
-    run_js("Date.now() * 1000")
-        .parse::<i64>()
-        .unwrap_or(0)
+    run_js("Date.now() * 1000").parse::<i64>().unwrap_or(0)
 }
 
 fn is_present(last_seen_micros: i64, now_micros: i64) -> bool {
@@ -187,41 +213,62 @@ extern "C" fn on_frame(arg: *mut c_void) {
 
 fn frame(state: &mut State) {
     let t = now_secs();
-    let mouse = state.rl.get_mouse_position();
 
-    if t - state.last_send >= SEND_INTERVAL {
-        state.last_send = t;
-        let body = format!("[{}, {}]", mouse.x, mouse.y);
-        let resp = http_post("/call/set_pos", &body, "application/json", &state.token);
-        if !resp.token.is_empty() {
-            state.token = Some(resp.token);
-        }
-        if !resp.identity.is_empty() {
-            state.my_identity = Some(resp.identity);
-        }
+    if state.identity.is_none() && t - state.last_bootstrap_attempt >= BOOTSTRAP_RETRY_INTERVAL {
+        state.last_bootstrap_attempt = t;
+        state.identity = bootstrap_identity();
     }
 
-    if t - state.last_poll >= POLL_INTERVAL {
-        state.last_poll = t;
-        let resp = http_post("/sql", "SELECT * FROM user", "text/plain", &state.token);
-        if !resp.body.is_empty() {
-            state.users = parse_users(&resp.body);
+    let mouse = state.rl.get_mouse_position();
+
+    if let Some((_, token)) = &state.identity {
+        let token = token.clone();
+        if t - state.last_send >= SEND_INTERVAL {
+            state.last_send = t;
+            let body = format!("[{}, {}]", mouse.x, mouse.y);
+            http_post(
+                &database_url("/call/set_pos"),
+                &body,
+                "application/json",
+                Some(&token),
+            );
+        }
+
+        if t - state.last_poll >= POLL_INTERVAL {
+            state.last_poll = t;
+            let resp = http_post(
+                &database_url("/sql"),
+                "SELECT * FROM user",
+                "text/plain",
+                Some(&token),
+            );
+            if !resp.body.is_empty() {
+                state.users = parse_users(&resp.body);
+            }
         }
     }
 
     let now_micros = now_micros_since_unix_epoch();
+    let my_identity = state.identity.as_ref().map(|(id, _)| id.as_str());
+
     let mut d = state.rl.begin_drawing(&state.thread);
     d.clear_background(Color::RAYWHITE);
     for user in state
         .users
         .iter()
         .filter(|u| is_present(u.last_seen_micros, now_micros))
+        .filter(|u| Some(u.identity_hex.as_str()) != my_identity)
     {
         let center = Vector2::new(user.x, user.y);
         d.draw_poly(center, 6, HEX_RADIUS, 0.0, color_for(&user.identity_hex));
-        if Some(&user.identity_hex) == state.my_identity.as_ref() {
-            d.draw_poly_lines_ex(center, 6, HEX_RADIUS, 0.0, 3.0, Color::BLACK);
-        }
+    }
+    // Drawn from the live mouse position rather than the polled table, so
+    // our own hexagon tracks the cursor every frame instead of snapping
+    // once per POLL_INTERVAL like everyone else's.
+    if let Some(id) = my_identity {
+        let center = Vector2::new(mouse.x, mouse.y);
+        d.draw_poly(center, 6, HEX_RADIUS, 0.0, color_for(id));
+        d.draw_poly_lines_ex(center, 6, HEX_RADIUS, 0.0, 3.0, Color::BLACK);
     }
     d.draw_text("hex + merge — PoC (web)", 10, 10, 20, Color::DARKGRAY);
     d.draw_fps(640, 10);
@@ -236,11 +283,11 @@ fn main() {
     let state = Box::new(State {
         rl,
         thread,
-        token: None,
-        my_identity: None,
+        identity: None,
         users: Vec::new(),
         last_send: -SEND_INTERVAL,
         last_poll: -POLL_INTERVAL,
+        last_bootstrap_attempt: -BOOTSTRAP_RETRY_INTERVAL,
     });
     let arg = Box::into_raw(state) as *mut c_void;
     unsafe {
