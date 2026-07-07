@@ -12,6 +12,7 @@ pub struct User {
     pub online: bool,
     pub x: f32,
     pub y: f32,
+    pub last_seen: __sdk::Timestamp,
 }
 
 impl __sdk::InModule for User {
@@ -27,6 +28,7 @@ pub struct UserCols {
     pub online: __sdk::__query_builder::Col<User, bool>,
     pub x: __sdk::__query_builder::Col<User, f32>,
     pub y: __sdk::__query_builder::Col<User, f32>,
+    pub last_seen: __sdk::__query_builder::Col<User, __sdk::Timestamp>,
 }
 
 impl __sdk::__query_builder::HasCols for User {
@@ -38,6 +40,7 @@ impl __sdk::__query_builder::HasCols for User {
             online: __sdk::__query_builder::Col::new(table_name, "online"),
             x: __sdk::__query_builder::Col::new(table_name, "x"),
             y: __sdk::__query_builder::Col::new(table_name, "y"),
+            last_seen: __sdk::__query_builder::Col::new(table_name, "last_seen"),
         }
     }
 }

@@ -1,4 +1,4 @@
-use spacetimedb::{Identity, ReducerContext, Table};
+use spacetimedb::{Identity, ReducerContext, Table, Timestamp};
 
 #[spacetimedb::table(accessor = user, public)]
 pub struct User {
@@ -8,12 +8,18 @@ pub struct User {
     online: bool,
     x: f32,
     y: f32,
+    last_seen: Timestamp,
 }
 
 #[spacetimedb::reducer]
 pub fn set_pos(ctx: &ReducerContext, x: f32, y: f32) -> Result<(), String> {
     if let Some(user) = ctx.db.user().identity().find(ctx.sender()) {
-        ctx.db.user().identity().update(User { x, y, ..user });
+        ctx.db.user().identity().update(User {
+            x,
+            y,
+            last_seen: ctx.timestamp,
+            ..user
+        });
         Ok(())
     } else {
         Err("Cannot set pos for unknown user".to_string())
@@ -44,6 +50,7 @@ pub fn client_connected(ctx: &ReducerContext) {
             online: true,
             x: 360.0,
             y: 360.0,
+            last_seen: ctx.timestamp,
         });
     }
 }
