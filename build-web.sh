@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Builds the web client (client/src/bin/web.rs) to wasm32-unknown-emscripten
 # and stages it next to client/web/index.html, ready to serve.
 set -e

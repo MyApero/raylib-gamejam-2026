@@ -6,6 +6,38 @@ Welcome to the **raylib game template**!
 This template provides a base structure to start developing a small raylib game in plain C. The repo is also pre-configured with a default `LICENSE` (zlib/libpng) and a `README.md` (this one) to be properly filled by users. Feel free to change the LICENSE as required.
 
 All the sections defined by `$(Data to Fill)` are expected to be edited and filled properly. It's recommended to delete this disclaimer message after editing this `README.md` file.
+------------------------------------
+
+## Installation
+
+### raylib
+
+```sh
+git clone --depth 1 --branch 6.0 https://github.com/raysan5/raylib
+
+# Ubuntu
+sudo apt install libasound2-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxcursor-dev libxinerama-dev libwayland-dev libxkbcommon-dev
+
+# Fedora
+sudo dnf5 install alsa-lib-devel mesa-libGL-devel libX11-devel libXrandr-devel libXi-devel libXcursor-devel libXinerama-devel libatomic
+
+# Asahi
+sudo dnf5 install libX11-devel libXrandr-devel libXi-devel libXcursor-devel mesa-libGL-devel pulseaudio-libs-devel libdrm-devel libXinerama-devel
+
+make -C raylib/src
+```
+
+### EMSDK
+```sh
+git clone https://github.com/emscripten-core/emsdk.git
+./emsdk install latest
+
+# Make the "latest" SDK "active" for the current user. (writes .emscripten file)
+./emsdk activate latest
+
+# Activate PATH and other environment variables in the current terminal
+source ./emsdk_env.sh
+```
 
 ## Getting Started with this template
 

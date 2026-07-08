@@ -54,7 +54,7 @@
       // emscripten code can't own a browser WebSocket directly. Protocol
       // shapes must match what client/src/bin/web.rs parses.
       window.stdb = (function () {
-        var PORT = 3000;
+        var HOST = 'spacetime.mister-esman.uk';
         var DB = 'hexmerge';
         var PROTOCOL = 'v1.json.spacetimedb';
 
@@ -72,7 +72,7 @@
           // demoing multiplayer from one machine.
           var token = sessionStorage.getItem('stdb_token');
           var scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-          var url = scheme + '://' + window.location.hostname + ':' + PORT
+          var url = scheme + '://' + HOST
                   + '/v1/database/' + DB + '/subscribe'
                   + (token ? '?token=' + encodeURIComponent(token) : '');
           var opened = false;

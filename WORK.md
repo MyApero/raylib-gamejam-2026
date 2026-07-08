@@ -4,7 +4,7 @@
 
 ```bash
 curl -sSf https://install.spacetimedb.com | sh
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32-unknown-emscripten
 ```
 
 ## Terminal 1 — SpacetimeDB
