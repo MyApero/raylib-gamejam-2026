@@ -88,6 +88,23 @@ And update `HOST` in `client/src/main.rs` to `http://<vps-host>:3000` (or
 from the page's own hostname at runtime — but if the VPS's SpacetimeDB
 port ever differs from 3000, update `SPACETIMEDB_PORT` there.
 
+## Frontend deployment (`raylib.mister-esman.uk`)
+
+This repo is cloned on the VPS at `~/raylib-gamejam-2026`, and Caddy's site
+root for `raylib.mister-esman.uk` points directly at
+`~/raylib-gamejam-2026/client/web` — no separate deploy/copy step. To ship
+a frontend update:
+
+```bash
+# on the VPS
+cd ~/raylib-gamejam-2026
+git pull
+./build-web.sh   # rebuilds web.wasm/web.js and copies them into client/web/ in place
+```
+
+Caddy serves the updated static files immediately — no reload needed (that
+hot-reload gotcha only applies to editing the Caddyfile itself, see above).
+
 ## Connection logging
 
 Player connect/disconnect events are logged in two places:

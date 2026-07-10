@@ -40,18 +40,6 @@ impl CellTableAccess for super::RemoteTables {
 pub struct CellInsertCallbackId(__sdk::CallbackId);
 pub struct CellDeleteCallbackId(__sdk::CallbackId);
 
-impl<'ctx> __sdk::TableLike for CellTableHandle<'ctx> {
-    type Row = Cell;
-    type EventContext = super::EventContext;
-
-    fn count(&self) -> u64 {
-        self.imp.count()
-    }
-    fn iter(&self) -> impl Iterator<Item = Cell> + '_ {
-        self.imp.iter()
-    }
-}
-
 impl<'ctx> __sdk::Table for CellTableHandle<'ctx> {
     type Row = Cell;
     type EventContext = super::EventContext;
@@ -90,54 +78,9 @@ impl<'ctx> __sdk::Table for CellTableHandle<'ctx> {
     }
 }
 
-impl<'ctx> __sdk::WithInsert for CellTableHandle<'ctx> {
-    type InsertCallbackId = CellInsertCallbackId;
-
-    fn on_insert(
-        &self,
-        callback: impl FnMut(&Self::EventContext, &Self::Row) + Send + 'static,
-    ) -> CellInsertCallbackId {
-        CellInsertCallbackId(self.imp.on_insert(Box::new(callback)))
-    }
-
-    fn remove_on_insert(&self, callback: CellInsertCallbackId) {
-        self.imp.remove_on_insert(callback.0)
-    }
-}
-
-impl<'ctx> __sdk::WithDelete for CellTableHandle<'ctx> {
-    type DeleteCallbackId = CellDeleteCallbackId;
-
-    fn on_delete(
-        &self,
-        callback: impl FnMut(&Self::EventContext, &Self::Row) + Send + 'static,
-    ) -> CellDeleteCallbackId {
-        CellDeleteCallbackId(self.imp.on_delete(Box::new(callback)))
-    }
-
-    fn remove_on_delete(&self, callback: CellDeleteCallbackId) {
-        self.imp.remove_on_delete(callback.0)
-    }
-}
-
 pub struct CellUpdateCallbackId(__sdk::CallbackId);
 
 impl<'ctx> __sdk::TableWithPrimaryKey for CellTableHandle<'ctx> {
-    type UpdateCallbackId = CellUpdateCallbackId;
-
-    fn on_update(
-        &self,
-        callback: impl FnMut(&Self::EventContext, &Self::Row, &Self::Row) + Send + 'static,
-    ) -> CellUpdateCallbackId {
-        CellUpdateCallbackId(self.imp.on_update(Box::new(callback)))
-    }
-
-    fn remove_on_update(&self, callback: CellUpdateCallbackId) {
-        self.imp.remove_on_update(callback.0)
-    }
-}
-
-impl<'ctx> __sdk::WithUpdate for CellTableHandle<'ctx> {
     type UpdateCallbackId = CellUpdateCallbackId;
 
     fn on_update(

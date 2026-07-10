@@ -40,18 +40,6 @@ impl UserTableAccess for super::RemoteTables {
 pub struct UserInsertCallbackId(__sdk::CallbackId);
 pub struct UserDeleteCallbackId(__sdk::CallbackId);
 
-impl<'ctx> __sdk::TableLike for UserTableHandle<'ctx> {
-    type Row = User;
-    type EventContext = super::EventContext;
-
-    fn count(&self) -> u64 {
-        self.imp.count()
-    }
-    fn iter(&self) -> impl Iterator<Item = User> + '_ {
-        self.imp.iter()
-    }
-}
-
 impl<'ctx> __sdk::Table for UserTableHandle<'ctx> {
     type Row = User;
     type EventContext = super::EventContext;
@@ -90,54 +78,9 @@ impl<'ctx> __sdk::Table for UserTableHandle<'ctx> {
     }
 }
 
-impl<'ctx> __sdk::WithInsert for UserTableHandle<'ctx> {
-    type InsertCallbackId = UserInsertCallbackId;
-
-    fn on_insert(
-        &self,
-        callback: impl FnMut(&Self::EventContext, &Self::Row) + Send + 'static,
-    ) -> UserInsertCallbackId {
-        UserInsertCallbackId(self.imp.on_insert(Box::new(callback)))
-    }
-
-    fn remove_on_insert(&self, callback: UserInsertCallbackId) {
-        self.imp.remove_on_insert(callback.0)
-    }
-}
-
-impl<'ctx> __sdk::WithDelete for UserTableHandle<'ctx> {
-    type DeleteCallbackId = UserDeleteCallbackId;
-
-    fn on_delete(
-        &self,
-        callback: impl FnMut(&Self::EventContext, &Self::Row) + Send + 'static,
-    ) -> UserDeleteCallbackId {
-        UserDeleteCallbackId(self.imp.on_delete(Box::new(callback)))
-    }
-
-    fn remove_on_delete(&self, callback: UserDeleteCallbackId) {
-        self.imp.remove_on_delete(callback.0)
-    }
-}
-
 pub struct UserUpdateCallbackId(__sdk::CallbackId);
 
 impl<'ctx> __sdk::TableWithPrimaryKey for UserTableHandle<'ctx> {
-    type UpdateCallbackId = UserUpdateCallbackId;
-
-    fn on_update(
-        &self,
-        callback: impl FnMut(&Self::EventContext, &Self::Row, &Self::Row) + Send + 'static,
-    ) -> UserUpdateCallbackId {
-        UserUpdateCallbackId(self.imp.on_update(Box::new(callback)))
-    }
-
-    fn remove_on_update(&self, callback: UserUpdateCallbackId) {
-        self.imp.remove_on_update(callback.0)
-    }
-}
-
-impl<'ctx> __sdk::WithUpdate for UserTableHandle<'ctx> {
     type UpdateCallbackId = UserUpdateCallbackId;
 
     fn on_update(

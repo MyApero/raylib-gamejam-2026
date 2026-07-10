@@ -61,6 +61,12 @@
         // any non-local hostname.
         var LOCAL_PORT = 3000;
         var LOCAL_HOST_RE = /^(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$/;
+        // Production serves this page from raylib.mister-esman.uk, a
+        // separate Caddy site (static file_server) from the SpacetimeDB
+        // backend at spacetime.mister-esman.uk (reverse-proxied). They are
+        // not the same origin, so the public deploy can't reuse the page's
+        // own hostname the way local/LAN dev does.
+        var PUBLIC_HOST = 'spacetime.mister-esman.uk';
         var DB = 'hexmerge';
         var PROTOCOL = 'v1.json.spacetimedb';
 
@@ -78,8 +84,9 @@
           // demoing multiplayer from one machine.
           var token = sessionStorage.getItem('stdb_token');
           var scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-          var host = window.location.hostname;
-          var port = LOCAL_HOST_RE.test(host) ? ':' + LOCAL_PORT : '';
+          var isLocal = LOCAL_HOST_RE.test(window.location.hostname);
+          var host = isLocal ? window.location.hostname : PUBLIC_HOST;
+          var port = isLocal ? ':' + LOCAL_PORT : '';
           var url = scheme + '://' + host + port
                   + '/v1/database/' + DB + '/subscribe'
                   + (token ? '?token=' + encodeURIComponent(token) : '');
