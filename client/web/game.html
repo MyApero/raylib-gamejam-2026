@@ -54,7 +54,13 @@
       // emscripten code can't own a browser WebSocket directly. Protocol
       // shapes must match what client/src/bin/web.rs parses.
       window.stdb = (function () {
-        var HOST = 'spacetime.mister-esman.uk';
+        // Local/LAN dev talks to `spacetime start` directly on :3000 (see
+        // WORK.md). The public deploy sits behind Caddy, which reverse-
+        // proxies SpacetimeDB through the default TLS port instead — 3000
+        // isn't publicly reachable there, so the port must be omitted for
+        // any non-local hostname.
+        var LOCAL_PORT = 3000;
+        var LOCAL_HOST_RE = /^(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$/;
         var DB = 'hexmerge';
         var PROTOCOL = 'v1.json.spacetimedb';
 
@@ -72,7 +78,9 @@
           // demoing multiplayer from one machine.
           var token = sessionStorage.getItem('stdb_token');
           var scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-          var url = scheme + '://' + HOST
+          var host = window.location.hostname;
+          var port = LOCAL_HOST_RE.test(host) ? ':' + LOCAL_PORT : '';
+          var url = scheme + '://' + host + port
                   + '/v1/database/' + DB + '/subscribe'
                   + (token ? '?token=' + encodeURIComponent(token) : '');
           var opened = false;
