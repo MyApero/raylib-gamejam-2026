@@ -91,7 +91,7 @@
             failedBeforeOpen = 0;
             status = 'open';
             ws.send(JSON.stringify({
-              Subscribe: { query_strings: ['SELECT * FROM user'], request_id: 1 },
+              Subscribe: { query_strings: ['SELECT * FROM user', 'SELECT * FROM cell'], request_id: 1 },
             }));
           };
           ws.onmessage = function (ev) {

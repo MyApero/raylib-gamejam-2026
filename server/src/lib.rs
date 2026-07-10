@@ -11,6 +11,43 @@ pub struct User {
     last_seen: Timestamp,
 }
 
+#[spacetimedb::table(accessor = cell, public)]
+pub struct Cell {
+    #[primary_key]
+    id: u32, // (col << 16) | row
+    col: u32,
+    row: u32,
+    color: u32,
+    painted_by: Identity,
+    painted_at: Timestamp,
+}
+
+#[spacetimedb::reducer]
+pub fn paint_cell(ctx: &ReducerContext, col: u32, row: u32, color: u32) -> Result<(), String> {
+    if col >= 21 || row >= 17 {
+        return Err("Cell out of bounds".to_string());
+    }
+    let id = (col << 16) | row;
+    if let Some(cell) = ctx.db.cell().id().find(id) {
+        ctx.db.cell().id().update(Cell {
+            color,
+            painted_by: ctx.sender(),
+            painted_at: ctx.timestamp,
+            ..cell
+        });
+    } else {
+        ctx.db.cell().insert(Cell {
+            id,
+            col,
+            row,
+            color,
+            painted_by: ctx.sender(),
+            painted_at: ctx.timestamp,
+        });
+    }
+    Ok(())
+}
+
 #[spacetimedb::reducer]
 pub fn set_pos(ctx: &ReducerContext, x: f32, y: f32) -> Result<(), String> {
     if let Some(user) = ctx.db.user().identity().find(ctx.sender()) {
