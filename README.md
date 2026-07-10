@@ -10,7 +10,6 @@ clients see all hexagons in real time.
 
 - [INSTALLATION.md](INSTALLATION.md) — one-time dependency setup
 - [WORK.md](WORK.md) — running the project (local, web build, VPS deploy, bots)
-- [CONVENTIONS.md](CONVENTIONS.md) — code style
 
 ## License
 
