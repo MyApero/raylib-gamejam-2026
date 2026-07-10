@@ -7,12 +7,10 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F1 + F2 re-verified against spacetime 2.6.1 (author
-reinstalled it; see resolved CLI note below). Whole-workspace build check
-now done every batch (server, client native bin, bot bin; web bin has a
-documented, author-approved exception until F5).
-**Blockers:** none. Runtime two-instance hand-test is next (author-driven,
-per protocol).
+**Current batch:** F1 + F2 hand-tested by the author (two-instance: islands,
+cursors, painting, rate limit, hover highlight) and committed. Ready to
+start F3.
+**Blockers:** none.
 
 ---
 
