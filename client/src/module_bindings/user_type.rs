@@ -10,9 +10,16 @@ pub struct User {
     pub identity: __sdk::Identity,
     pub name: Option<String>,
     pub online: bool,
-    pub x: f32,
-    pub y: f32,
+    pub cx: f32,
+    pub cy: f32,
     pub last_seen: __sdk::Timestamp,
+    pub hue: u16,
+    pub sat: u8,
+    pub val: u8,
+    pub locked: bool,
+    pub xp: u64,
+    pub paint_tokens: f32,
+    pub tokens_at: __sdk::Timestamp,
 }
 
 impl __sdk::InModule for User {
@@ -26,9 +33,16 @@ pub struct UserCols {
     pub identity: __sdk::__query_builder::Col<User, __sdk::Identity>,
     pub name: __sdk::__query_builder::Col<User, Option<String>>,
     pub online: __sdk::__query_builder::Col<User, bool>,
-    pub x: __sdk::__query_builder::Col<User, f32>,
-    pub y: __sdk::__query_builder::Col<User, f32>,
+    pub cx: __sdk::__query_builder::Col<User, f32>,
+    pub cy: __sdk::__query_builder::Col<User, f32>,
     pub last_seen: __sdk::__query_builder::Col<User, __sdk::Timestamp>,
+    pub hue: __sdk::__query_builder::Col<User, u16>,
+    pub sat: __sdk::__query_builder::Col<User, u8>,
+    pub val: __sdk::__query_builder::Col<User, u8>,
+    pub locked: __sdk::__query_builder::Col<User, bool>,
+    pub xp: __sdk::__query_builder::Col<User, u64>,
+    pub paint_tokens: __sdk::__query_builder::Col<User, f32>,
+    pub tokens_at: __sdk::__query_builder::Col<User, __sdk::Timestamp>,
 }
 
 impl __sdk::__query_builder::HasCols for User {
@@ -38,9 +52,16 @@ impl __sdk::__query_builder::HasCols for User {
             identity: __sdk::__query_builder::Col::new(table_name, "identity"),
             name: __sdk::__query_builder::Col::new(table_name, "name"),
             online: __sdk::__query_builder::Col::new(table_name, "online"),
-            x: __sdk::__query_builder::Col::new(table_name, "x"),
-            y: __sdk::__query_builder::Col::new(table_name, "y"),
+            cx: __sdk::__query_builder::Col::new(table_name, "cx"),
+            cy: __sdk::__query_builder::Col::new(table_name, "cy"),
             last_seen: __sdk::__query_builder::Col::new(table_name, "last_seen"),
+            hue: __sdk::__query_builder::Col::new(table_name, "hue"),
+            sat: __sdk::__query_builder::Col::new(table_name, "sat"),
+            val: __sdk::__query_builder::Col::new(table_name, "val"),
+            locked: __sdk::__query_builder::Col::new(table_name, "locked"),
+            xp: __sdk::__query_builder::Col::new(table_name, "xp"),
+            paint_tokens: __sdk::__query_builder::Col::new(table_name, "paint_tokens"),
+            tokens_at: __sdk::__query_builder::Col::new(table_name, "tokens_at"),
         }
     }
 }

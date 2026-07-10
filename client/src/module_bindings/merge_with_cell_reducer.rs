@@ -6,49 +6,49 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-pub(super) struct SetPosArgs {
-    pub cx: f32,
-    pub cy: f32,
+pub(super) struct MergeWithCellArgs {
+    pub cell_kind: u8,
+    pub cell_id: u32,
 }
 
-impl From<SetPosArgs> for super::Reducer {
-    fn from(args: SetPosArgs) -> Self {
-        Self::SetPos {
-            cx: args.cx,
-            cy: args.cy,
+impl From<MergeWithCellArgs> for super::Reducer {
+    fn from(args: MergeWithCellArgs) -> Self {
+        Self::MergeWithCell {
+            cell_kind: args.cell_kind,
+            cell_id: args.cell_id,
         }
     }
 }
 
-impl __sdk::InModule for SetPosArgs {
+impl __sdk::InModule for MergeWithCellArgs {
     type Module = super::RemoteModule;
 }
 
 #[allow(non_camel_case_types)]
-/// Extension trait for access to the reducer `set_pos`.
+/// Extension trait for access to the reducer `merge_with_cell`.
 ///
 /// Implemented for [`super::RemoteReducers`].
-pub trait set_pos {
-    /// Request that the remote module invoke the reducer `set_pos` to run as soon as possible.
+pub trait merge_with_cell {
+    /// Request that the remote module invoke the reducer `merge_with_cell` to run as soon as possible.
     ///
     /// This method returns immediately, and errors only if we are unable to send the request.
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
-    /// /// Use [`set_pos:set_pos_then`] to run a callback after the reducer completes.
-    fn set_pos(&self, cx: f32, cy: f32) -> __sdk::Result<()> {
-        self.set_pos_then(cx, cy, |_, _| {})
+    /// /// Use [`merge_with_cell:merge_with_cell_then`] to run a callback after the reducer completes.
+    fn merge_with_cell(&self, cell_kind: u8, cell_id: u32) -> __sdk::Result<()> {
+        self.merge_with_cell_then(cell_kind, cell_id, |_, _| {})
     }
 
-    /// Request that the remote module invoke the reducer `set_pos` to run as soon as possible,
+    /// Request that the remote module invoke the reducer `merge_with_cell` to run as soon as possible,
     /// registering `callback` to run when we are notified that the reducer completed.
     ///
     /// This method returns immediately, and errors only if we are unable to send the request.
     /// The reducer will run asynchronously in the future,
     ///  and its status can be observed with the `callback`.
-    fn set_pos_then(
+    fn merge_with_cell_then(
         &self,
-        cx: f32,
-        cy: f32,
+        cell_kind: u8,
+        cell_id: u32,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
@@ -56,17 +56,17 @@ pub trait set_pos {
     ) -> __sdk::Result<()>;
 }
 
-impl set_pos for super::RemoteReducers {
-    fn set_pos_then(
+impl merge_with_cell for super::RemoteReducers {
+    fn merge_with_cell_then(
         &self,
-        cx: f32,
-        cy: f32,
+        cell_kind: u8,
+        cell_id: u32,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
             + 'static,
     ) -> __sdk::Result<()> {
         self.imp
-            .invoke_reducer_with_callback(SetPosArgs { cx, cy }, callback)
+            .invoke_reducer_with_callback(MergeWithCellArgs { cell_kind, cell_id }, callback)
     }
 }

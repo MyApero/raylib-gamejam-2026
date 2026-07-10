@@ -6,38 +6,38 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-pub struct Cell {
+pub struct MarginCell {
     pub id: u32,
-    pub col: u32,
-    pub row: u32,
+    pub q: i32,
+    pub r: i32,
     pub color: u32,
     pub painted_by: __sdk::Identity,
     pub painted_at: __sdk::Timestamp,
 }
 
-impl __sdk::InModule for Cell {
+impl __sdk::InModule for MarginCell {
     type Module = super::RemoteModule;
 }
 
-/// Column accessor struct for the table `Cell`.
+/// Column accessor struct for the table `MarginCell`.
 ///
 /// Provides typed access to columns for query building.
-pub struct CellCols {
-    pub id: __sdk::__query_builder::Col<Cell, u32>,
-    pub col: __sdk::__query_builder::Col<Cell, u32>,
-    pub row: __sdk::__query_builder::Col<Cell, u32>,
-    pub color: __sdk::__query_builder::Col<Cell, u32>,
-    pub painted_by: __sdk::__query_builder::Col<Cell, __sdk::Identity>,
-    pub painted_at: __sdk::__query_builder::Col<Cell, __sdk::Timestamp>,
+pub struct MarginCellCols {
+    pub id: __sdk::__query_builder::Col<MarginCell, u32>,
+    pub q: __sdk::__query_builder::Col<MarginCell, i32>,
+    pub r: __sdk::__query_builder::Col<MarginCell, i32>,
+    pub color: __sdk::__query_builder::Col<MarginCell, u32>,
+    pub painted_by: __sdk::__query_builder::Col<MarginCell, __sdk::Identity>,
+    pub painted_at: __sdk::__query_builder::Col<MarginCell, __sdk::Timestamp>,
 }
 
-impl __sdk::__query_builder::HasCols for Cell {
-    type Cols = CellCols;
+impl __sdk::__query_builder::HasCols for MarginCell {
+    type Cols = MarginCellCols;
     fn cols(table_name: &'static str) -> Self::Cols {
-        CellCols {
+        MarginCellCols {
             id: __sdk::__query_builder::Col::new(table_name, "id"),
-            col: __sdk::__query_builder::Col::new(table_name, "col"),
-            row: __sdk::__query_builder::Col::new(table_name, "row"),
+            q: __sdk::__query_builder::Col::new(table_name, "q"),
+            r: __sdk::__query_builder::Col::new(table_name, "r"),
             color: __sdk::__query_builder::Col::new(table_name, "color"),
             painted_by: __sdk::__query_builder::Col::new(table_name, "painted_by"),
             painted_at: __sdk::__query_builder::Col::new(table_name, "painted_at"),
@@ -45,20 +45,20 @@ impl __sdk::__query_builder::HasCols for Cell {
     }
 }
 
-/// Indexed column accessor struct for the table `Cell`.
+/// Indexed column accessor struct for the table `MarginCell`.
 ///
 /// Provides typed access to indexed columns for query building.
-pub struct CellIxCols {
-    pub id: __sdk::__query_builder::IxCol<Cell, u32>,
+pub struct MarginCellIxCols {
+    pub id: __sdk::__query_builder::IxCol<MarginCell, u32>,
 }
 
-impl __sdk::__query_builder::HasIxCols for Cell {
-    type IxCols = CellIxCols;
+impl __sdk::__query_builder::HasIxCols for MarginCell {
+    type IxCols = MarginCellIxCols;
     fn ix_cols(table_name: &'static str) -> Self::IxCols {
-        CellIxCols {
+        MarginCellIxCols {
             id: __sdk::__query_builder::IxCol::new(table_name, "id"),
         }
     }
 }
 
-impl __sdk::__query_builder::CanBeLookupTable for Cell {}
+impl __sdk::__query_builder::CanBeLookupTable for MarginCell {}

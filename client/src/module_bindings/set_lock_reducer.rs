@@ -6,49 +6,46 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-pub(super) struct SetPosArgs {
-    pub cx: f32,
-    pub cy: f32,
+pub(super) struct SetLockArgs {
+    pub locked: bool,
 }
 
-impl From<SetPosArgs> for super::Reducer {
-    fn from(args: SetPosArgs) -> Self {
-        Self::SetPos {
-            cx: args.cx,
-            cy: args.cy,
+impl From<SetLockArgs> for super::Reducer {
+    fn from(args: SetLockArgs) -> Self {
+        Self::SetLock {
+            locked: args.locked,
         }
     }
 }
 
-impl __sdk::InModule for SetPosArgs {
+impl __sdk::InModule for SetLockArgs {
     type Module = super::RemoteModule;
 }
 
 #[allow(non_camel_case_types)]
-/// Extension trait for access to the reducer `set_pos`.
+/// Extension trait for access to the reducer `set_lock`.
 ///
 /// Implemented for [`super::RemoteReducers`].
-pub trait set_pos {
-    /// Request that the remote module invoke the reducer `set_pos` to run as soon as possible.
+pub trait set_lock {
+    /// Request that the remote module invoke the reducer `set_lock` to run as soon as possible.
     ///
     /// This method returns immediately, and errors only if we are unable to send the request.
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
-    /// /// Use [`set_pos:set_pos_then`] to run a callback after the reducer completes.
-    fn set_pos(&self, cx: f32, cy: f32) -> __sdk::Result<()> {
-        self.set_pos_then(cx, cy, |_, _| {})
+    /// /// Use [`set_lock:set_lock_then`] to run a callback after the reducer completes.
+    fn set_lock(&self, locked: bool) -> __sdk::Result<()> {
+        self.set_lock_then(locked, |_, _| {})
     }
 
-    /// Request that the remote module invoke the reducer `set_pos` to run as soon as possible,
+    /// Request that the remote module invoke the reducer `set_lock` to run as soon as possible,
     /// registering `callback` to run when we are notified that the reducer completed.
     ///
     /// This method returns immediately, and errors only if we are unable to send the request.
     /// The reducer will run asynchronously in the future,
     ///  and its status can be observed with the `callback`.
-    fn set_pos_then(
+    fn set_lock_then(
         &self,
-        cx: f32,
-        cy: f32,
+        locked: bool,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
@@ -56,17 +53,16 @@ pub trait set_pos {
     ) -> __sdk::Result<()>;
 }
 
-impl set_pos for super::RemoteReducers {
-    fn set_pos_then(
+impl set_lock for super::RemoteReducers {
+    fn set_lock_then(
         &self,
-        cx: f32,
-        cy: f32,
+        locked: bool,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
             + 'static,
     ) -> __sdk::Result<()> {
         self.imp
-            .invoke_reducer_with_callback(SetPosArgs { cx, cy }, callback)
+            .invoke_reducer_with_callback(SetLockArgs { locked }, callback)
     }
 }

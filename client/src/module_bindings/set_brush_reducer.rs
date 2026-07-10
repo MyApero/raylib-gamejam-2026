@@ -6,49 +6,52 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-pub(super) struct SetPosArgs {
-    pub cx: f32,
-    pub cy: f32,
+pub(super) struct SetBrushArgs {
+    pub hue: u16,
+    pub sat: u8,
+    pub val: u8,
 }
 
-impl From<SetPosArgs> for super::Reducer {
-    fn from(args: SetPosArgs) -> Self {
-        Self::SetPos {
-            cx: args.cx,
-            cy: args.cy,
+impl From<SetBrushArgs> for super::Reducer {
+    fn from(args: SetBrushArgs) -> Self {
+        Self::SetBrush {
+            hue: args.hue,
+            sat: args.sat,
+            val: args.val,
         }
     }
 }
 
-impl __sdk::InModule for SetPosArgs {
+impl __sdk::InModule for SetBrushArgs {
     type Module = super::RemoteModule;
 }
 
 #[allow(non_camel_case_types)]
-/// Extension trait for access to the reducer `set_pos`.
+/// Extension trait for access to the reducer `set_brush`.
 ///
 /// Implemented for [`super::RemoteReducers`].
-pub trait set_pos {
-    /// Request that the remote module invoke the reducer `set_pos` to run as soon as possible.
+pub trait set_brush {
+    /// Request that the remote module invoke the reducer `set_brush` to run as soon as possible.
     ///
     /// This method returns immediately, and errors only if we are unable to send the request.
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
-    /// /// Use [`set_pos:set_pos_then`] to run a callback after the reducer completes.
-    fn set_pos(&self, cx: f32, cy: f32) -> __sdk::Result<()> {
-        self.set_pos_then(cx, cy, |_, _| {})
+    /// /// Use [`set_brush:set_brush_then`] to run a callback after the reducer completes.
+    fn set_brush(&self, hue: u16, sat: u8, val: u8) -> __sdk::Result<()> {
+        self.set_brush_then(hue, sat, val, |_, _| {})
     }
 
-    /// Request that the remote module invoke the reducer `set_pos` to run as soon as possible,
+    /// Request that the remote module invoke the reducer `set_brush` to run as soon as possible,
     /// registering `callback` to run when we are notified that the reducer completed.
     ///
     /// This method returns immediately, and errors only if we are unable to send the request.
     /// The reducer will run asynchronously in the future,
     ///  and its status can be observed with the `callback`.
-    fn set_pos_then(
+    fn set_brush_then(
         &self,
-        cx: f32,
-        cy: f32,
+        hue: u16,
+        sat: u8,
+        val: u8,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
@@ -56,17 +59,18 @@ pub trait set_pos {
     ) -> __sdk::Result<()>;
 }
 
-impl set_pos for super::RemoteReducers {
-    fn set_pos_then(
+impl set_brush for super::RemoteReducers {
+    fn set_brush_then(
         &self,
-        cx: f32,
-        cy: f32,
+        hue: u16,
+        sat: u8,
+        val: u8,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
             + 'static,
     ) -> __sdk::Result<()> {
         self.imp
-            .invoke_reducer_with_callback(SetPosArgs { cx, cy }, callback)
+            .invoke_reducer_with_callback(SetBrushArgs { hue, sat, val }, callback)
     }
 }

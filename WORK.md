@@ -26,7 +26,16 @@ Keep this running. First time only (and again any time `server/src/lib.rs` chang
 cargo run -p client
 ```
 
-Run this command in extra terminals to spawn more players.
+Running this in extra terminals unmodified will NOT spawn distinct players —
+`credentials::File` stores its token at a single fixed path per key
+(`~/.spacetimedb_client_credentials/hexmerge`), shared by every process on
+the machine. Set `HEXMERGE_PLAYER` to a different value per terminal to test
+as separate players locally:
+
+```bash
+HEXMERGE_PLAYER=p1 cargo run -p client --bin client   # terminal 2
+HEXMERGE_PLAYER=p2 cargo run -p client --bin client   # terminal 3
+```
 
 ## Terminal 3 — web build (optional)
 

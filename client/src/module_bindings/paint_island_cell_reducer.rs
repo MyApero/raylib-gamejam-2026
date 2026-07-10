@@ -6,52 +6,49 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-pub(super) struct PaintCellArgs {
-    pub col: u32,
-    pub row: u32,
-    pub color: u32,
+pub(super) struct PaintIslandCellArgs {
+    pub q_local: i32,
+    pub r_local: i32,
 }
 
-impl From<PaintCellArgs> for super::Reducer {
-    fn from(args: PaintCellArgs) -> Self {
-        Self::PaintCell {
-            col: args.col,
-            row: args.row,
-            color: args.color,
+impl From<PaintIslandCellArgs> for super::Reducer {
+    fn from(args: PaintIslandCellArgs) -> Self {
+        Self::PaintIslandCell {
+            q_local: args.q_local,
+            r_local: args.r_local,
         }
     }
 }
 
-impl __sdk::InModule for PaintCellArgs {
+impl __sdk::InModule for PaintIslandCellArgs {
     type Module = super::RemoteModule;
 }
 
 #[allow(non_camel_case_types)]
-/// Extension trait for access to the reducer `paint_cell`.
+/// Extension trait for access to the reducer `paint_island_cell`.
 ///
 /// Implemented for [`super::RemoteReducers`].
-pub trait paint_cell {
-    /// Request that the remote module invoke the reducer `paint_cell` to run as soon as possible.
+pub trait paint_island_cell {
+    /// Request that the remote module invoke the reducer `paint_island_cell` to run as soon as possible.
     ///
     /// This method returns immediately, and errors only if we are unable to send the request.
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
-    /// /// Use [`paint_cell:paint_cell_then`] to run a callback after the reducer completes.
-    fn paint_cell(&self, col: u32, row: u32, color: u32) -> __sdk::Result<()> {
-        self.paint_cell_then(col, row, color, |_, _| {})
+    /// /// Use [`paint_island_cell:paint_island_cell_then`] to run a callback after the reducer completes.
+    fn paint_island_cell(&self, q_local: i32, r_local: i32) -> __sdk::Result<()> {
+        self.paint_island_cell_then(q_local, r_local, |_, _| {})
     }
 
-    /// Request that the remote module invoke the reducer `paint_cell` to run as soon as possible,
+    /// Request that the remote module invoke the reducer `paint_island_cell` to run as soon as possible,
     /// registering `callback` to run when we are notified that the reducer completed.
     ///
     /// This method returns immediately, and errors only if we are unable to send the request.
     /// The reducer will run asynchronously in the future,
     ///  and its status can be observed with the `callback`.
-    fn paint_cell_then(
+    fn paint_island_cell_then(
         &self,
-        col: u32,
-        row: u32,
-        color: u32,
+        q_local: i32,
+        r_local: i32,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
@@ -59,18 +56,17 @@ pub trait paint_cell {
     ) -> __sdk::Result<()>;
 }
 
-impl paint_cell for super::RemoteReducers {
-    fn paint_cell_then(
+impl paint_island_cell for super::RemoteReducers {
+    fn paint_island_cell_then(
         &self,
-        col: u32,
-        row: u32,
-        color: u32,
+        q_local: i32,
+        r_local: i32,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
             + 'static,
     ) -> __sdk::Result<()> {
         self.imp
-            .invoke_reducer_with_callback(PaintCellArgs { col, row, color }, callback)
+            .invoke_reducer_with_callback(PaintIslandCellArgs { q_local, r_local }, callback)
     }
 }
