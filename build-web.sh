@@ -3,7 +3,7 @@
 # and stages it next to client/web/index.html, ready to serve.
 set -e
 
-EMSDK_DIR="${EMSDK_DIR:-../emsdk}"
+EMSDK_DIR="${EMSDK_DIR:-./emsdk}"
 # shellcheck disable=SC1091
 . "$EMSDK_DIR/emsdk_env.sh"
 
