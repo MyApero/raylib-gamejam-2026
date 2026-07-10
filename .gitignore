@@ -79,6 +79,7 @@ android.*
 !src/minshell.html
 !src/shell.html
 !client/web/index.html
+!client/web/game.html
 
 # Rust
 /target/

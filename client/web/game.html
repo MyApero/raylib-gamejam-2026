@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <title>hexmerge — raylib 6.0 + SpacetimeDB</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <style>
+      body { margin: 0; overflow: hidden; background-color: black; }
+      canvas#canvas {
+        border: 0 none;
+        background-color: black;
+        display: block;
+        margin: 0 auto;
+        /* Keep the 720x720 game square and fully on-screen (no scroll/zoom
+           needed) on any viewport, phones included; the internal render
+           resolution stays 720x720 regardless of this CSS size. */
+        width: 100vmin;
+        height: 100vmin;
+        touch-action: none;
+      }
+      #output {
+        color: #9a9a9a;
+        font-family: monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        max-height: 15vh;
+        overflow-y: auto;
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    <pre id="output"></pre>
+    <script>
+      var Module = {
+        canvas: document.getElementById('canvas'),
+        print: (function () {
+          var el = document.getElementById('output');
+          return function (text) {
+            if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
+            console.log(text);
+            el.textContent += text + '\n';
+            el.scrollTop = el.scrollHeight;
+          };
+        })(),
+      };
+      Module.printErr = Module.print;
+    </script>
+    <script>
+      // SpacetimeDB WebSocket client (v1.json.spacetimedb). The socket and
+      // its event handlers live here in JS; the wasm game loop pulls
+      // everything through stdb.frame() once per frame (a mailbox), because
+      // emscripten code can't own a browser WebSocket directly. Protocol
+      // shapes must match what client/src/bin/web.rs parses.
+      window.stdb = (function () {
+        var HOST = 'spacetime.mister-esman.uk';
+        var DB = 'hexmerge';
+        var PROTOCOL = 'v1.json.spacetimedb';
+
+        var queue = [];
+        var status = 'connecting';
+        var identity = null;
+        var ws = null;
+        var requestId = 10;
+        var failedBeforeOpen = 0;
+
+        function connect() {
+          // sessionStorage (not localStorage) so each tab is its own
+          // player — reloading a tab keeps its identity, but opening a
+          // second tab mints a fresh one, which is what you want when
+          // demoing multiplayer from one machine.
+          var token = sessionStorage.getItem('stdb_token');
+          var scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+          var url = scheme + '://' + HOST
+                  + '/v1/database/' + DB + '/subscribe'
+                  + (token ? '?token=' + encodeURIComponent(token) : '');
+          var opened = false;
+          status = 'connecting';
+          ws = new WebSocket(url, PROTOCOL);
+          ws.onopen = function () {
+            opened = true;
+            failedBeforeOpen = 0;
+            status = 'open';
+            ws.send(JSON.stringify({
+              Subscribe: { query_strings: ['SELECT * FROM user'], request_id: 1 },
+            }));
+          };
+          ws.onmessage = function (ev) {
+            if (typeof ev.data !== 'string') return;
+            // Persist the token here rather than in wasm so it survives
+            // even if the game hasn't finished loading yet.
+            if (ev.data.lastIndexOf('{"IdentityToken"', 0) === 0) {
+              try {
+                var m = JSON.parse(ev.data).IdentityToken;
+                identity = m.identity.__identity__;
+                sessionStorage.setItem('stdb_token', m.token);
+              } catch (e) { /* wasm side will still see the raw message */ }
+            }
+            queue.push(ev.data);
+          };
+          ws.onclose = function () {
+            status = 'closed';
+            if (!opened) {
+              failedBeforeOpen++;
+              // A stored token the server keeps rejecting (expired, or the
+              // server was wiped) would otherwise loop forever — drop it
+              // and reconnect anonymously.
+              if (failedBeforeOpen >= 2 && token) {
+                sessionStorage.removeItem('stdb_token');
+                failedBeforeOpen = 0;
+              }
+            }
+            setTimeout(connect, 1000);
+          };
+        }
+
+        connect();
+        return {
+          // One call per frame: connection state, our identity, the
+          // browser clock (for presence checks), and every server message
+          // received since the previous frame.
+          frame: function () {
+            return JSON.stringify({
+              status: status,
+              identity: identity,
+              now_micros: Date.now() * 1000,
+              msgs: queue.splice(0),
+            });
+          },
+          callReducer: function (name, argsJson) {
+            if (ws && ws.readyState === 1) {
+              ws.send(JSON.stringify({
+                CallReducer: { reducer: name, args: argsJson, request_id: requestId++, flags: 0 },
+              }));
+            }
+          },
+        };
+      })();
+    </script>
+    <!-- Built by: cargo build -p client --bin web --target wasm32-unknown-emscripten --release -->
+    <script src="web.js"></script>
+  </body>
+</html>
