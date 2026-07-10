@@ -4,7 +4,7 @@
 //! needs wasm-bindgen, which only targets wasm32-unknown-unknown — the two
 //! can't live in one binary. So this binary speaks SpacetimeDB's
 //! `v1.json.spacetimedb` WebSocket protocol by hand instead: a JS-side
-//! socket (see client/web/index.html) subscribes to the user table once,
+//! socket (see client/web/game.html) subscribes to the user table once,
 //! the server *pushes* a TransactionUpdate on every commit, and each frame
 //! we drain those pushed messages from a JS mailbox via
 //! emscripten_run_script_string — no polling, no blocking the render loop.
@@ -58,7 +58,7 @@ unsafe extern "C" {
 }
 
 /// Everything the JS side hands us once per frame — see stdb.frame() in
-/// client/web/index.html.
+/// client/web/game.html.
 #[derive(Deserialize, Default)]
 struct FrameData {
     #[serde(default)]

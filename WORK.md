@@ -42,10 +42,17 @@ Then open http://localhost:8080 in a browser. Debug builds crash the
 emscripten linker (binaryen assertion), so the script always builds
 `--release`.
 
+`index.html` is a thin wrapper that embeds two independent copies of the
+game (`game.html?slot=1` / `?slot=2`) in iframes, side by side in landscape
+and stacked in portrait, so two players can play on one screen. Open
+`game.html` directly for a single instance (e.g. while debugging). The
+`slot` query param namespaces the SpacetimeDB session token in
+`sessionStorage` so the two iframes don't collide on one identity.
+
 The web client can't use spacetimedb-sdk (raylib's web target is
 emscripten; the SDK's browser feature needs wasm-bindgen, which doesn't
 support emscripten), so it speaks SpacetimeDB's `v1.json.spacetimedb`
-WebSocket protocol directly: the socket lives in JS (`client/web/index.html`)
+WebSocket protocol directly: the socket lives in JS (`client/web/game.html`)
 and the game drains its pushed messages once per frame. See
 `client/src/bin/web.rs`.
 
@@ -80,3 +87,42 @@ And update `HOST` in `client/src/main.rs` to `http://<vps-host>:3000` (or
 `client/src/bin/web.rs` needs no change — it resolves SpacetimeDB's host
 from the page's own hostname at runtime — but if the VPS's SpacetimeDB
 port ever differs from 3000, update `SPACETIMEDB_PORT` there.
+
+## Connection logging
+
+Player connect/disconnect events are logged in two places:
+- Identity-level, from the module itself: `spacetime logs hexmerge -s local`
+  (see the `client_connected`/`identity_disconnected` reducers in
+  `server/src/lib.rs`). No IP available here — reducers never see it.
+- IP-level, from Caddy's access log on `spacetime.mister-esman.uk`
+  (`~/caddy/logs/spacetime.log`, root-owned, JSON lines, one per WebSocket
+  session). The site is behind Cloudflare, so `client_ip` only resolves to
+  the real visitor (rather than Cloudflare's edge) because of the
+  `trusted_proxies static <cloudflare ranges>` global option in
+  `~/caddy/Caddyfile`. Note: editing `~/caddy/Caddyfile` in place doesn't
+  hot-reload via `caddy reload` if the edit was done by rewriting the file
+  (new inode) — the container's bind mount stays pinned to the old file
+  until `docker compose restart caddy` (or `up -d`) in `~/caddy`.
+
+## Trajectory bots
+
+Two always-on bots (`client/src/bin/bot.rs`) hold the board's `heart-bot`
+and `hexagon-bot` players, tracing a parametric heart curve and a hexagon
+outline respectively, so it never looks empty. Each keeps its own
+persisted identity (`~/.spacetimedb_client_credentials/hexmerge-bot-{heart,hexagon}`)
+independent of the human client's.
+
+Running 24/7 via systemd (`/etc/systemd/system/hexmerge-bot@.service`,
+`Restart=always`, enabled at boot):
+
+```bash
+systemctl status hexmerge-bot@heart.service hexmerge-bot@hexagon.service
+journalctl -u hexmerge-bot@heart -f
+```
+
+After changing `server/src/lib.rs` or `bot.rs`, rebuild and restart:
+
+```bash
+cargo build -p client --bin bot --release
+sudo systemctl restart hexmerge-bot@heart.service hexmerge-bot@hexagon.service
+```

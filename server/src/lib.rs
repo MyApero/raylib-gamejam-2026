@@ -41,6 +41,14 @@ pub fn set_name(ctx: &ReducerContext, name: String) -> Result<(), String> {
 
 #[spacetimedb::reducer(client_connected)]
 pub fn client_connected(ctx: &ReducerContext) {
+    // No client IP here — the module only ever sees identity/connection_id;
+    // the real IP is visible one layer up, in Caddy's access log for
+    // spacetime.mister-esman.uk.
+    log::info!(
+        "client connected: identity={:?} connection={:?}",
+        ctx.sender(),
+        ctx.connection_id()
+    );
     if let Some(user) = ctx.db.user().identity().find(ctx.sender()) {
         ctx.db.user().identity().update(User { online: true, ..user });
     } else {
@@ -57,6 +65,11 @@ pub fn client_connected(ctx: &ReducerContext) {
 
 #[spacetimedb::reducer(client_disconnected)]
 pub fn identity_disconnected(ctx: &ReducerContext) {
+    log::info!(
+        "client disconnected: identity={:?} connection={:?}",
+        ctx.sender(),
+        ctx.connection_id()
+    );
     if let Some(user) = ctx.db.user().identity().find(ctx.sender()) {
         ctx.db.user().identity().update(User { online: false, ..user });
     } else {
