@@ -1,12 +1,25 @@
 //! Web (wasm32-unknown-emscripten) client — top-down 2D POC.
 //!
-//! Movement: ZQSD, world-space (no camera — the world is the 720x720
-//! canvas). Two rooms connected by a corridor: a small lit room on the
-//! left, a large dark room on the right that needs the flashlight (F) to
-//! see anything in it. Colored hexagon resources are scattered in the dark
-//! room and can be picked up while the flashlight is on; they're generated
-//! and collected purely client-side (no server sync — see WORK.md if that
-//! changes).
+//! Movement: ZQSD, in a single dark room (1200x1200) bigger than the
+//! 720x720 window, followed by a `Camera2D` clamped to the room's bounds.
+//! Without the flashlight the player only sees a faint halo around
+//! themselves; holding F extends vision into a fading cone pointed in the
+//! last direction moved. Six triangles of random (possibly repeated)
+//! colors are scattered in the room and picked up by walking over them —
+//! no flashlight required. Opening the merge table (E) shows an
+//! incomplete hexagon; dragging carried triangles from the inventory onto
+//! their matching-colored slot fills the hexagon, unlocking the door on
+//! the right so the player can walk through and escape. Triangles are
+//! generated and collected purely client-side (no server sync — see
+//! WORK.md if that changes).
+//!
+//! Lighting is a lightmap: an offscreen `RenderTexture2D` is cleared to a
+//! near-black ambient color, the halo/cone/door-glow are drawn into it
+//! additively using the *same* camera as the world, then that texture is
+//! blitted over the fully-drawn scene with `BLEND_MULTIPLIED` — darkness
+//! masks what's already there rather than the renderer deciding what to
+//! draw. (Render textures come out vertically flipped, hence the
+//! negative-height source rect when sampling it back.)
 //!
 //! Multiplayer positions still ride the same `user` table / `set_pos`
 //! reducer as before, just carrying world coordinates instead of mouse
@@ -41,22 +54,57 @@ use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 
+const WINDOW_SIZE: f32 = 720.0; // jam hard constraint
 const PLAYER_RADIUS: f32 = 16.0;
 const MOVE_SPEED: f32 = 220.0;
 
-/// World rects (world space == canvas space, 720x720, no camera). The
-/// corridor overlaps each room by 40px (more than the player's 32px
-/// diameter) so movement never gets stuck at the seams.
-const LEFT_ROOM: Rect = Rect { x: 40.0, y: 200.0, w: 200.0, h: 320.0 };
-const CORRIDOR: Rect = Rect { x: 200.0, y: 320.0, w: 200.0, h: 80.0 };
-const DARK_ROOM: Rect = Rect { x: 360.0, y: 40.0, w: 320.0, h: 640.0 };
-const ROOMS: [Rect; 3] = [LEFT_ROOM, CORRIDOR, DARK_ROOM];
+/// The one room (world space, camera-followed — bigger than the window).
+const ROOM: Rect = Rect { x: 0.0, y: 0.0, w: 1200.0, h: 1200.0 };
+const SPAWN_X: f32 = 600.0;
+const SPAWN_Y: f32 = 600.0;
 
-const FLASHLIGHT_RADIUS: f32 = 150.0;
-const RESOURCE_RADIUS: f32 = 14.0;
-const RESOURCE_COUNT: usize = 8;
-/// Margin kept between resource spawn points and the dark room's walls.
-const RESOURCE_MARGIN: f32 = 30.0;
+/// Door opening in the right wall. Overlaps `ROOM` by more than the
+/// player's 32px diameter (mirrors the old corridor-overlap trick) so
+/// walking through never gets stuck at the seam.
+const DOOR_WIDTH: f32 = 100.0;
+const DOOR_DEPTH: f32 = 120.0;
+const DOOR_OVERLAP: f32 = 40.0;
+const DOOR: Rect = Rect {
+    x: ROOM.w - DOOR_OVERLAP,
+    y: (ROOM.h - DOOR_WIDTH) / 2.0,
+    w: DOOR_DEPTH,
+    h: DOOR_WIDTH,
+};
+/// Player x-position past which they're considered through the door.
+const ESCAPE_X: f32 = ROOM.w + 60.0;
+
+const TRIANGLE_COUNT: usize = 6;
+const TRIANGLE_RADIUS: f32 = 16.0;
+/// Margin kept between triangle spawn points and the room's walls.
+const TRIANGLE_MARGIN: f32 = 60.0;
+/// Minimum distance kept between triangles and from the player's spawn.
+const TRIANGLE_MIN_SEPARATION: f32 = 130.0;
+
+/// Faint vision radius even without the flashlight.
+const AMBIENT_GLOW_RADIUS: f32 = 90.0;
+/// Flashlight cone reach — well short of the room's size, so it never
+/// lights the whole map.
+const FLASHLIGHT_RANGE: f32 = 300.0;
+const CONE_HALF_ANGLE_DEG: f32 = 28.0;
+const CONE_SEGMENTS: i32 = 16;
+/// Stacked-sector fade: N concentric sectors at the same low alpha —
+/// centre accumulates every layer, the rim only the outermost one.
+const CONE_FADE_STEPS: usize = 10;
+const CONE_LAYER_ALPHA: u8 = 16;
+/// Small always-on beacon glow once the door is unlocked.
+const DOOR_GLOW_RADIUS: f32 = 150.0;
+
+const PANEL_W: f32 = 520.0;
+const PANEL_H: f32 = 440.0;
+const HEX_RADIUS: f32 = 110.0;
+const INV_ITEM_RADIUS: f32 = 20.0;
+const INV_HIT_RADIUS: f32 = 26.0;
+const INV_SPACING: f32 = 56.0;
 
 /// Max rate at which we push our own position (each send commits a
 /// transaction that's broadcast to every subscriber, so keep it sane).
@@ -93,7 +141,7 @@ impl Rect {
     }
 }
 
-/// Tiny xorshift32 PRNG — just for scattering resources client-side, no
+/// Tiny xorshift32 PRNG — just for scattering triangles client-side, no
 /// need to pull in the `rand` crate for this.
 struct Rng(u32);
 
@@ -118,30 +166,54 @@ impl Rng {
     }
 }
 
-/// (display label, color) palette resources are drawn from.
-const PALETTE: [(&str, Color); 5] = [
+/// (display label, color) palette triangles are drawn from.
+const PALETTE: [(&str, Color); 6] = [
     ("red", Color::RED),
     ("orange", Color::ORANGE),
     ("green", Color::LIME),
     ("blue", Color::SKYBLUE),
     ("purple", Color::PURPLE),
+    ("yellow", Color::GOLD),
 ];
 
-struct Resource {
+struct Triangle {
     pos: Vector2,
     palette_index: usize,
 }
 
-fn spawn_resources(rng: &mut Rng) -> Vec<Resource> {
-    (0..RESOURCE_COUNT)
-        .map(|_| Resource {
-            pos: Vector2::new(
-                rng.range(DARK_ROOM.x + RESOURCE_MARGIN, DARK_ROOM.x + DARK_ROOM.w - RESOURCE_MARGIN),
-                rng.range(DARK_ROOM.y + RESOURCE_MARGIN, DARK_ROOM.y + DARK_ROOM.h - RESOURCE_MARGIN),
-            ),
-            palette_index: (rng.next_u32() as usize) % PALETTE.len(),
-        })
-        .collect()
+/// Scatters `TRIANGLE_COUNT` triangles with independently-random colors
+/// (duplicates allowed) via rejection sampling, kept apart from each
+/// other and from the player's spawn point.
+fn spawn_triangles(rng: &mut Rng) -> Vec<Triangle> {
+    let mut triangles: Vec<Triangle> = Vec::with_capacity(TRIANGLE_COUNT);
+    while triangles.len() < TRIANGLE_COUNT {
+        let candidate = Vector2::new(
+            rng.range(ROOM.x + TRIANGLE_MARGIN, ROOM.x + ROOM.w - TRIANGLE_MARGIN),
+            rng.range(ROOM.y + TRIANGLE_MARGIN, ROOM.y + ROOM.h - TRIANGLE_MARGIN),
+        );
+        let far_from_spawn =
+            distance(candidate, Vector2::new(SPAWN_X, SPAWN_Y)) >= TRIANGLE_MIN_SEPARATION;
+        let far_from_others = triangles
+            .iter()
+            .all(|t| distance(t.pos, candidate) >= TRIANGLE_MIN_SEPARATION);
+        if far_from_spawn && far_from_others {
+            triangles.push(Triangle {
+                pos: candidate,
+                palette_index: (rng.next_u32() as usize) % PALETTE.len(),
+            });
+        }
+    }
+    triangles
+}
+
+/// Fisher-Yates shuffle so the merge table's target layout is a
+/// permutation of the colors actually spawned (always completable, even
+/// with duplicate colors).
+fn shuffle6(rng: &mut Rng, arr: &mut [usize; 6]) {
+    for i in (1..arr.len()).rev() {
+        let j = (rng.next_u32() as usize) % (i + 1);
+        arr.swap(i, j);
+    }
 }
 
 unsafe extern "C" {
@@ -203,6 +275,9 @@ impl PlayerVisual {
 struct State {
     rl: RaylibHandle,
     thread: RaylibThread,
+    /// Offscreen lightmap: cleared near-black each frame, lit additively
+    /// by the halo/cone/door-glow, then multiplied over the drawn scene.
+    lightmap: RenderTexture2D,
     /// Our identity (lowercase hex, no 0x), from the IdentityToken message.
     my_identity: Option<String>,
     players: HashMap<String, PlayerVisual>,
@@ -211,9 +286,21 @@ struct State {
     last_send: f64,
     last_sent_pos: Option<(f32, f32)>,
     pos: Vector2,
+    /// Last non-zero movement direction (normalized) — the flashlight
+    /// cone points here, and it holds steady once the player stops.
+    facing: Vector2,
     flashlight_on: bool,
-    resources: Vec<Resource>,
-    collected: [u32; PALETTE.len()],
+    triangles: Vec<Triangle>,
+    /// Palette indices of triangles carried but not yet placed.
+    inventory: Vec<usize>,
+    /// target_slots[i] = palette index required at hexagon slot i.
+    target_slots: [usize; 6],
+    placed: [bool; 6],
+    merge_open: bool,
+    /// Index into `inventory` currently being dragged, if any.
+    dragging: Option<usize>,
+    door_unlocked: bool,
+    escaped: bool,
 }
 
 fn run_js(js: &str) -> String {
@@ -378,18 +465,155 @@ fn distance(a: Vector2, b: Vector2) -> f32 {
 }
 
 /// Moves `pos` by `delta`, one axis at a time (so sliding along a wall
-/// works), rejecting any axis whose result would leave every room rect.
-fn move_with_collision(pos: Vector2, delta: Vector2) -> Vector2 {
+/// works), rejecting any axis whose result would leave the room (and, once
+/// the door is unlocked, the door opening too).
+fn move_with_collision(pos: Vector2, delta: Vector2, door_unlocked: bool) -> Vector2 {
     let mut p = pos;
     let stepped_x = Vector2::new(p.x + delta.x, p.y);
-    if ROOMS.iter().any(|r| r.contains_circle(stepped_x, PLAYER_RADIUS)) {
+    if ROOM.contains_circle(stepped_x, PLAYER_RADIUS)
+        || (door_unlocked && DOOR.contains_circle(stepped_x, PLAYER_RADIUS))
+    {
         p.x = stepped_x.x;
     }
     let stepped_y = Vector2::new(p.x, p.y + delta.y);
-    if ROOMS.iter().any(|r| r.contains_circle(stepped_y, PLAYER_RADIUS)) {
+    if ROOM.contains_circle(stepped_y, PLAYER_RADIUS)
+        || (door_unlocked && DOOR.contains_circle(stepped_y, PLAYER_RADIUS))
+    {
         p.y = stepped_y.y;
     }
     p
+}
+
+/// Camera centered on the player, clamped so the viewport never shows
+/// anything outside the room.
+fn camera_for(pos: Vector2) -> Camera2D {
+    let half = WINDOW_SIZE / 2.0;
+    let cam_x = pos.x.clamp(ROOM.x + half, ROOM.x + ROOM.w - half);
+    let cam_y = pos.y.clamp(ROOM.y + half, ROOM.y + ROOM.h - half);
+    Camera2D {
+        offset: Vector2::new(half, half),
+        target: Vector2::new(cam_x, cam_y),
+        rotation: 0.0,
+        zoom: 1.0,
+    }
+}
+
+fn with_alpha(c: Color, a: u8) -> Color {
+    Color::new(c.r, c.g, c.b, a)
+}
+
+/// Faint always-on vision — the "we see a little without the flashlight" halo.
+fn draw_ambient_glow<D: RaylibDraw>(d: &mut D, pos: Vector2) {
+    d.draw_circle_gradient(
+        pos.x as i32,
+        pos.y as i32,
+        AMBIENT_GLOW_RADIUS,
+        Color::new(255, 244, 200, 90),
+        Color::new(255, 244, 200, 0),
+    );
+}
+
+/// Flashlight cone pointed at `facing`, faded via stacked concentric
+/// sectors: the centre accumulates every layer, the rim only the last.
+fn draw_light_cone<D: RaylibDraw>(d: &mut D, pos: Vector2, facing: Vector2) {
+    let center_deg = facing.y.atan2(facing.x).to_degrees();
+    let start = center_deg - CONE_HALF_ANGLE_DEG;
+    let end = center_deg + CONE_HALF_ANGLE_DEG;
+    let light = Color::new(255, 244, 200, CONE_LAYER_ALPHA);
+    for step in 1..=CONE_FADE_STEPS {
+        let r = FLASHLIGHT_RANGE * step as f32 / CONE_FADE_STEPS as f32;
+        d.draw_circle_sector(pos, r, start, end, CONE_SEGMENTS, light);
+    }
+}
+
+/// Small beacon glow marking the door once it's unlocked.
+fn draw_door_glow<D: RaylibDraw>(d: &mut D) {
+    let center = Vector2::new(DOOR.x + DOOR.w / 2.0, DOOR.y + DOOR.h / 2.0);
+    d.draw_circle_gradient(
+        center.x as i32,
+        center.y as i32,
+        DOOR_GLOW_RADIUS,
+        Color::new(140, 255, 170, 70),
+        Color::new(140, 255, 170, 0),
+    );
+}
+
+fn panel_rect() -> Rectangle {
+    Rectangle::new((WINDOW_SIZE - PANEL_W) / 2.0, (WINDOW_SIZE - PANEL_H) / 2.0, PANEL_W, PANEL_H)
+}
+
+fn hex_center() -> Vector2 {
+    let panel = panel_rect();
+    Vector2::new(panel.x + PANEL_W / 2.0, panel.y + 190.0)
+}
+
+/// The three points (apex + two rim points) of hexagon slot `i`, used both
+/// for drawing that wedge and for drag-and-drop hit-testing. Returned
+/// counter-clockwise (raylib's `DrawTriangle` culls the fill otherwise).
+fn hex_slot_points(i: usize) -> (Vector2, Vector2, Vector2) {
+    let hc = hex_center();
+    let a0 = (i as f32 * 60.0 - 90.0).to_radians();
+    let a1 = ((i as f32 + 1.0) * 60.0 - 90.0).to_radians();
+    let p1 = Vector2::new(hc.x + HEX_RADIUS * a1.cos(), hc.y + HEX_RADIUS * a1.sin());
+    let p2 = Vector2::new(hc.x + HEX_RADIUS * a0.cos(), hc.y + HEX_RADIUS * a0.sin());
+    (hc, p1, p2)
+}
+
+fn inventory_slot_pos(i: usize, count: usize) -> Vector2 {
+    let panel = panel_rect();
+    let y = panel.y + PANEL_H - 55.0;
+    let total_w = INV_SPACING * (count.max(1) as f32 - 1.0);
+    let start_x = panel.x + PANEL_W / 2.0 - total_w / 2.0;
+    Vector2::new(start_x + i as f32 * INV_SPACING, y)
+}
+
+/// Sign/cross-product point-in-triangle test, used to hit-test which
+/// hexagon wedge a dropped triangle landed on.
+fn point_in_triangle(p: Vector2, a: Vector2, b: Vector2, c: Vector2) -> bool {
+    fn sign(p1: Vector2, p2: Vector2, p3: Vector2) -> f32 {
+        (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y)
+    }
+    let d1 = sign(p, a, b);
+    let d2 = sign(p, b, c);
+    let d3 = sign(p, c, a);
+    let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(has_neg && has_pos)
+}
+
+/// Mouse-driven drag & drop between the inventory row and the hexagon
+/// slots — only called while the merge table is open.
+fn handle_merge_input(state: &mut State) {
+    let mouse = state.rl.get_mouse_position();
+
+    if state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
+        for i in 0..state.inventory.len() {
+            let p = inventory_slot_pos(i, state.inventory.len());
+            if distance(mouse, p) <= INV_HIT_RADIUS {
+                state.dragging = Some(i);
+                break;
+            }
+        }
+    }
+
+    if state.rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
+        if let Some(idx) = state.dragging.take() {
+            if idx < state.inventory.len() {
+                let palette_index = state.inventory[idx];
+                for slot in 0..6 {
+                    if state.placed[slot] {
+                        continue;
+                    }
+                    let (a, b, c) = hex_slot_points(slot);
+                    if state.target_slots[slot] == palette_index && point_in_triangle(mouse, a, b, c) {
+                        state.placed[slot] = true;
+                        state.inventory.remove(idx);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 extern "C" fn on_frame(arg: *mut c_void) {
@@ -413,43 +637,58 @@ fn frame(state: &mut State) {
         handle_message(state, msg, t);
     }
 
-    // --- Input: ZQSD movement + flashlight toggle ---
-    let mut dir = Vector2::new(0.0, 0.0);
-    if state.rl.is_key_down(KeyboardKey::KEY_Z) {
-        dir.y -= 1.0;
-    }
-    if state.rl.is_key_down(KeyboardKey::KEY_S) {
-        dir.y += 1.0;
-    }
-    if state.rl.is_key_down(KeyboardKey::KEY_Q) {
-        dir.x -= 1.0;
-    }
-    if state.rl.is_key_down(KeyboardKey::KEY_D) {
-        dir.x += 1.0;
-    }
-    if dir.x != 0.0 || dir.y != 0.0 {
-        let len = (dir.x * dir.x + dir.y * dir.y).sqrt();
-        let delta = Vector2::new(dir.x / len * MOVE_SPEED * dt, dir.y / len * MOVE_SPEED * dt);
-        state.pos = move_with_collision(state.pos, delta);
-    }
-    if state.rl.is_key_pressed(KeyboardKey::KEY_F) {
-        state.flashlight_on = !state.flashlight_on;
+    if !state.escaped && state.rl.is_key_pressed(KeyboardKey::KEY_E) {
+        state.merge_open = !state.merge_open;
+        state.dragging = None;
     }
 
-    // Pickup: only while the flashlight is on (can't grab what you can't see).
-    if state.flashlight_on {
+    if state.merge_open {
+        handle_merge_input(state);
+    } else if !state.escaped {
+        // --- Input: ZQSD movement (also updates facing) + flashlight toggle ---
+        let mut dir = Vector2::new(0.0, 0.0);
+        if state.rl.is_key_down(KeyboardKey::KEY_Z) {
+            dir.y -= 1.0;
+        }
+        if state.rl.is_key_down(KeyboardKey::KEY_S) {
+            dir.y += 1.0;
+        }
+        if state.rl.is_key_down(KeyboardKey::KEY_Q) {
+            dir.x -= 1.0;
+        }
+        if state.rl.is_key_down(KeyboardKey::KEY_D) {
+            dir.x += 1.0;
+        }
+        if dir.x != 0.0 || dir.y != 0.0 {
+            let len = (dir.x * dir.x + dir.y * dir.y).sqrt();
+            let norm = Vector2::new(dir.x / len, dir.y / len);
+            state.facing = norm;
+            let delta = Vector2::new(norm.x * MOVE_SPEED * dt, norm.y * MOVE_SPEED * dt);
+            state.pos = move_with_collision(state.pos, delta, state.door_unlocked);
+        }
+        if state.rl.is_key_pressed(KeyboardKey::KEY_F) {
+            state.flashlight_on = !state.flashlight_on;
+        }
+
+        // Pickup: walking over a triangle grabs it, no flashlight needed.
         let pos = state.pos;
         let mut i = 0;
-        while i < state.resources.len() {
-            if distance(pos, state.resources[i].pos) <= PLAYER_RADIUS + RESOURCE_RADIUS {
-                let idx = state.resources[i].palette_index;
-                state.collected[idx] += 1;
-                state.resources.swap_remove(i);
+        while i < state.triangles.len() {
+            if distance(pos, state.triangles[i].pos) <= PLAYER_RADIUS + TRIANGLE_RADIUS {
+                let idx = state.triangles[i].palette_index;
+                state.inventory.push(idx);
+                state.triangles.swap_remove(i);
             } else {
                 i += 1;
             }
         }
+
+        if state.door_unlocked && state.pos.x >= ESCAPE_X {
+            state.escaped = true;
+        }
     }
+
+    state.door_unlocked = state.placed.iter().all(|&p| p);
 
     // --- Network send: throttled position updates + idle heartbeat ---
     if state.my_identity.is_some() {
@@ -471,67 +710,128 @@ fn frame(state: &mut State) {
     render(state, t);
 }
 
+fn render_merge_panel(
+    d: &mut RaylibDrawHandle,
+    inventory: &[usize],
+    placed: &[bool; 6],
+    target_slots: &[usize; 6],
+    dragging: Option<usize>,
+    mouse_pos: Vector2,
+) {
+    let panel = panel_rect();
+    d.draw_rectangle_rec(panel, Color::new(15, 15, 20, 235));
+    d.draw_rectangle_lines_ex(panel, 2.0, Color::new(90, 90, 100, 255));
+    d.draw_text("Table de merge", panel.x as i32 + 16, panel.y as i32 + 14, 20, Color::RAYWHITE);
+    d.draw_text(
+        "Glissez un triangle sur son emplacement",
+        panel.x as i32 + 16,
+        panel.y as i32 + 38,
+        14,
+        Color::LIGHTGRAY,
+    );
+
+    let dragged_palette = dragging.and_then(|i| inventory.get(i).copied());
+
+    for slot in 0..6 {
+        let (hc, p1, p2) = hex_slot_points(slot);
+        let (_, color) = PALETTE[target_slots[slot]];
+        let fill = if placed[slot] { color } else { with_alpha(color, 60) };
+        d.draw_triangle(hc, p1, p2, fill);
+
+        let hovered = dragged_palette.is_some() && !placed[slot] && point_in_triangle(mouse_pos, hc, p1, p2);
+        let outline = if !hovered {
+            Color::new(90, 90, 100, 255)
+        } else if dragged_palette == Some(target_slots[slot]) {
+            Color::WHITE
+        } else {
+            Color::RED
+        };
+        d.draw_triangle_lines(hc, p1, p2, outline);
+    }
+
+    if placed.iter().all(|&p| p) {
+        d.draw_text(
+            "Hexagone complet -- porte deverrouillee",
+            panel.x as i32 + 16,
+            panel.y as i32 + 310,
+            18,
+            Color::LIME,
+        );
+    }
+
+    for (i, &idx) in inventory.iter().enumerate() {
+        if dragging == Some(i) {
+            continue;
+        }
+        let p = inventory_slot_pos(i, inventory.len());
+        let (_, color) = PALETTE[idx];
+        d.draw_poly(p, 3, INV_ITEM_RADIUS, 0.0, color);
+    }
+
+    if let Some(idx) = dragging.and_then(|i| inventory.get(i).copied()) {
+        let (_, color) = PALETTE[idx];
+        d.draw_poly(mouse_pos, 3, INV_ITEM_RADIUS, 0.0, color);
+    }
+}
+
 fn render(state: &mut State, t: f64) {
     let now_micros = state.now_micros;
     let my_identity = state.my_identity.clone();
     let local_pos = state.pos;
+    let facing = state.facing;
     let flashlight_on = state.flashlight_on;
-    let in_dark_room = DARK_ROOM.contains_circle(local_pos, 0.0);
+    let door_unlocked = state.door_unlocked;
+    let merge_open = state.merge_open;
+    let escaped = state.escaped;
+    let mouse_pos = state.rl.get_mouse_position();
+    let camera = camera_for(local_pos);
+
+    // --- Lightmap pass: ambient halo + flashlight cone + door beacon,
+    // drawn additively in world space using the same camera as below. ---
+    {
+        let mut tm = state.rl.begin_texture_mode(&state.thread, &mut state.lightmap);
+        tm.clear_background(Color::new(10, 10, 14, 255));
+        {
+            let mut m2 = tm.begin_mode2D(camera);
+            let mut b = m2.begin_blend_mode(BlendMode::BLEND_ADDITIVE);
+            draw_ambient_glow(&mut b, local_pos);
+            if flashlight_on {
+                draw_light_cone(&mut b, local_pos, facing);
+            }
+            if door_unlocked {
+                draw_door_glow(&mut b);
+            }
+        }
+    }
 
     let mut d = state.rl.begin_drawing(&state.thread);
     d.clear_background(Color::new(18, 18, 20, 255));
 
-    // Lit areas: left room + corridor.
-    for r in [LEFT_ROOM, CORRIDOR] {
-        d.draw_rectangle_rec(
-            Rectangle::new(r.x, r.y, r.w, r.h),
-            Color::new(226, 220, 200, 255),
-        );
-        d.draw_rectangle_lines_ex(Rectangle::new(r.x, r.y, r.w, r.h), 2.0, Color::new(120, 110, 90, 255));
-    }
-
-    // Dark room: near-black base; only brightened where the flashlight reaches.
-    d.draw_rectangle_rec(
-        Rectangle::new(DARK_ROOM.x, DARK_ROOM.y, DARK_ROOM.w, DARK_ROOM.h),
-        Color::new(8, 8, 12, 255),
-    );
-    d.draw_rectangle_lines_ex(
-        Rectangle::new(DARK_ROOM.x, DARK_ROOM.y, DARK_ROOM.w, DARK_ROOM.h),
-        2.0,
-        Color::new(40, 40, 50, 255),
-    );
-
-    // Other players in the lit areas — always visible.
-    for (identity_hex, player) in state
-        .players
-        .iter()
-        .filter(|(_, p)| is_present(p.last_seen_micros, now_micros))
-        .filter(|(id, _)| Some(id.as_str()) != my_identity.as_deref())
+    // --- World, in camera space ---
     {
-        let center = player.render_pos(t);
-        if !DARK_ROOM.contains_circle(center, 0.0) {
-            d.draw_circle(center.x as i32, center.y as i32, PLAYER_RADIUS, color_for(identity_hex));
-        }
-    }
+        let mut m2 = d.begin_mode2D(camera);
 
-    // Flashlight glow + anything it reveals inside the dark room.
-    if flashlight_on && in_dark_room {
-        {
-            let mut b = d.begin_blend_mode(BlendMode::BLEND_ADDITIVE);
-            b.draw_circle_gradient(
-                local_pos.x as i32,
-                local_pos.y as i32,
-                FLASHLIGHT_RADIUS,
-                Color::new(255, 244, 200, 160),
-                Color::new(255, 244, 200, 0),
-            );
-        }
-        for res in &state.resources {
-            if distance(local_pos, res.pos) <= FLASHLIGHT_RADIUS {
-                let (_, color) = PALETTE[res.palette_index];
-                d.draw_poly(res.pos, 6, RESOURCE_RADIUS, 0.0, color);
+        m2.draw_rectangle_rec(Rectangle::new(ROOM.x, ROOM.y, ROOM.w, ROOM.h), Color::new(28, 26, 30, 255));
+        m2.draw_rectangle_lines_ex(Rectangle::new(ROOM.x, ROOM.y, ROOM.w, ROOM.h), 4.0, Color::new(50, 48, 55, 255));
+
+        let door_rect = Rectangle::new(DOOR.x, DOOR.y, DOOR.w, DOOR.h);
+        if door_unlocked {
+            m2.draw_rectangle_rec(door_rect, Color::new(20, 60, 30, 255));
+            m2.draw_rectangle_lines_ex(door_rect, 3.0, Color::new(120, 255, 160, 255));
+        } else {
+            m2.draw_rectangle_rec(door_rect, Color::new(50, 15, 15, 255));
+            m2.draw_rectangle_lines_ex(door_rect, 3.0, Color::new(150, 40, 40, 255));
+            for i in 0..3 {
+                let y = DOOR.y + DOOR.h * (i as f32 + 1.0) / 4.0 - 2.0;
+                m2.draw_rectangle_rec(Rectangle::new(DOOR.x, y, DOOR.w, 4.0), Color::new(90, 30, 30, 255));
             }
         }
+
+        for tri in &state.triangles {
+            let (_, color) = PALETTE[tri.palette_index];
+            m2.draw_poly(tri.pos, 3, TRIANGLE_RADIUS, 0.0, color);
+        }
+
         for (identity_hex, player) in state
             .players
             .iter()
@@ -539,31 +839,47 @@ fn render(state: &mut State, t: f64) {
             .filter(|(id, _)| Some(id.as_str()) != my_identity.as_deref())
         {
             let center = player.render_pos(t);
-            if DARK_ROOM.contains_circle(center, 0.0) && distance(local_pos, center) <= FLASHLIGHT_RADIUS {
-                d.draw_circle(center.x as i32, center.y as i32, PLAYER_RADIUS, color_for(identity_hex));
-            }
+            m2.draw_circle(center.x as i32, center.y as i32, PLAYER_RADIUS, color_for(identity_hex));
         }
+
+        // Local player — always visible to themselves.
+        m2.draw_circle(local_pos.x as i32, local_pos.y as i32, PLAYER_RADIUS, Color::WHITE);
+        m2.draw_circle_lines(local_pos.x as i32, local_pos.y as i32, PLAYER_RADIUS, Color::BLACK);
     }
 
-    // Local player — always visible to themselves.
-    d.draw_circle(local_pos.x as i32, local_pos.y as i32, PLAYER_RADIUS, Color::WHITE);
-    d.draw_circle_lines(local_pos.x as i32, local_pos.y as i32, PLAYER_RADIUS, Color::BLACK);
+    // --- Darkness: multiply the lightmap over the fully-drawn scene ---
+    {
+        let mut b = d.begin_blend_mode(BlendMode::BLEND_MULTIPLIED);
+        b.draw_texture_rec(
+            state.lightmap.texture(),
+            Rectangle::new(0.0, 0.0, WINDOW_SIZE, -WINDOW_SIZE),
+            Vector2::new(0.0, 0.0),
+            Color::WHITE,
+        );
+    }
 
-    d.draw_text("hex + merge — 2D POC (web)", 10, 10, 20, Color::RAYWHITE);
-    d.draw_text("ZQSD move, F flashlight", 10, 33, 16, Color::LIGHTGRAY);
+    // --- HUD ---
+    d.draw_text("hexmerge -- 2D POC (web)", 10, 10, 20, Color::RAYWHITE);
+    d.draw_text("ZQSD bouger . F lampe . E table de merge", 10, 33, 16, Color::LIGHTGRAY);
     d.draw_text(&format!("ws: {}", state.ws_status), 10, 52, 16, Color::LIGHTGRAY);
 
-    let mut y = 74;
-    for (i, (label, color)) in PALETTE.iter().enumerate() {
-        d.draw_poly(Vector2::new(20.0, y as f32 + 8.0), 6, 8.0, 0.0, *color);
-        d.draw_text(
-            &format!("{}: {}", label, state.collected[i]),
-            34,
-            y,
-            16,
-            Color::RAYWHITE,
-        );
-        y += 20;
+    let collected = TRIANGLE_COUNT - state.triangles.len();
+    d.draw_text(&format!("Triangles: {}/{}", collected, TRIANGLE_COUNT), 10, 76, 18, Color::RAYWHITE);
+    for (i, &idx) in state.inventory.iter().enumerate() {
+        let (_, color) = PALETTE[idx];
+        d.draw_poly(Vector2::new(20.0 + i as f32 * 24.0, 108.0), 3, 10.0, 0.0, color);
+    }
+
+    if merge_open {
+        render_merge_panel(&mut d, &state.inventory, &state.placed, &state.target_slots, state.dragging, mouse_pos);
+    }
+
+    if escaped {
+        d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, WINDOW_SIZE, WINDOW_SIZE), Color::new(0, 0, 0, 160));
+        let text = "Echappe !";
+        let size = 48;
+        let w = d.measure_text(text, size);
+        d.draw_text(text, (WINDOW_SIZE as i32 - w) / 2, WINDOW_SIZE as i32 / 2 - size / 2, size, Color::RAYWHITE);
     }
 
     d.draw_fps(640, 10);
@@ -577,28 +893,42 @@ fn color_for(identity_hex: &str) -> Color {
 }
 
 fn main() {
-    let (rl, thread) = raylib::init()
-        .size(720, 720) // jam hard constraint
+    let (mut rl, thread) = raylib::init()
+        .size(WINDOW_SIZE as i32, WINDOW_SIZE as i32)
         .title("hexmerge — raylib 6.0 + SpacetimeDB (web)")
         .build();
 
     let seed = (unsafe { emscripten_get_now() } as u32) | 1;
     let mut rng = Rng::new(seed);
-    let resources = spawn_resources(&mut rng);
+    let triangles = spawn_triangles(&mut rng);
+    let mut target_slots: [usize; 6] = std::array::from_fn(|i| triangles[i].palette_index);
+    shuffle6(&mut rng, &mut target_slots);
+
+    let lightmap = rl
+        .load_render_texture(&thread, WINDOW_SIZE as u32, WINDOW_SIZE as u32)
+        .expect("failed to create lightmap render texture");
 
     let state = Box::new(State {
         rl,
         thread,
+        lightmap,
         my_identity: None,
         players: HashMap::new(),
         ws_status: "connecting".to_string(),
         now_micros: 0,
         last_send: f64::NEG_INFINITY,
         last_sent_pos: None,
-        pos: Vector2::new(LEFT_ROOM.x + LEFT_ROOM.w / 2.0, LEFT_ROOM.y + LEFT_ROOM.h / 2.0),
+        pos: Vector2::new(SPAWN_X, SPAWN_Y),
+        facing: Vector2::new(1.0, 0.0),
         flashlight_on: false,
-        resources,
-        collected: [0; PALETTE.len()],
+        triangles,
+        inventory: Vec::new(),
+        target_slots,
+        placed: [false; 6],
+        merge_open: false,
+        dragging: None,
+        door_unlocked: false,
+        escaped: false,
     });
     let arg = Box::into_raw(state) as *mut c_void;
     unsafe {

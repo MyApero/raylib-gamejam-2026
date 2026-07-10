@@ -1,8 +1,12 @@
 # Running the project
 
 hexmerge — a multiplayer raylib-rs + SpacetimeDB gamejam entry, playable in
-the browser. Each connected client is a hexagon that follows that client's
-mouse cursor; all clients see all hexagons in real time.
+the browser. Each client wakes up in a single dark room (bigger than the
+window, followed by a camera), can only half-see without the flashlight, and
+must collect 6 randomly-colored triangles scattered around the room, drag
+them onto a merge table's hexagon (matching colors to slots) to unlock the
+door and escape. Player positions are synced live over SpacetimeDB; all
+clients see each other move in real time.
 
 One-time dependency setup lives in [INSTALLATION.md](INSTALLATION.md).
 
@@ -49,10 +53,26 @@ game drains its pushed messages once per frame. See
 1. `spacetime logs hexmerge` shows a `client_connected` line after a client starts.
 2. `spacetime sql hexmerge "SELECT * FROM user"` shows one row per connected client with
    live `x`/`y`.
-3. Open `index.html` (or two `game.html` tabs): each pane shows **two
-   hexagons**; moving the mouse in one pane moves that hexagon in *both*
-   panes (your own hexagon has a black outline).
-4. Close one tab → its hexagon disappears from the other pane (filtered on presence timeout).
+3. **Camera**: the room is bigger than the 720x720 window; walking (ZQSD) pans the
+   camera, clamped so no area outside the room is ever visible.
+4. **Lighting**: without the flashlight, only a faint halo around the player is
+   visible. Holding `F` extends vision into a fading cone pointed in the last
+   movement direction, well short of lighting the whole room; the cone rotates
+   as the movement direction changes and holds steady when idle.
+5. **Triangles**: walking over one picks it up (no flashlight required); the HUD
+   counter goes up to 6/6.
+6. **Merge table**: `E` toggles it; the hexagon shows 6 slots tinted with their
+   required color (duplicates possible); dragging an inventory triangle onto a
+   slot of the matching color places it (wrong color / already-filled slot
+   rejects the drop, shown via a red outline while hovering); completing all 6
+   unlocks the door.
+7. **Door + escape**: locked beforehand (blocks movement into it); once unlocked,
+   walking through triggers an "Échappé !" overlay.
+8. Open `index.html` (or two `game.html` tabs): each pane shows **two
+   players**; moving in one pane moves that player in *both* panes when
+   within the other player's lit range (your own player is always visible to
+   yourself, drawn in white).
+9. Close one tab → its player disappears from the other pane (filtered on presence timeout).
 
 ## Useful SpacetimeDB commands
 
