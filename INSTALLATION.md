@@ -1,23 +1,12 @@
 # Installation
 
 One-time setup for building and running this project (hexmerge — raylib-rs +
-SpacetimeDB gamejam entry). Rust/Cargo is assumed to already be installed.
+SpacetimeDB gamejam entry, browser-only). Rust/Cargo is assumed to already
+be installed.
 
-## System dependencies (raylib)
-
-`raylib-rs` builds raylib from source via `raylib-sys`, so the usual raylib
-system packages are required:
-
-```sh
-# Ubuntu
-sudo apt install libasound2-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxcursor-dev libxinerama-dev libwayland-dev libxkbcommon-dev
-
-# Fedora
-sudo dnf5 install alsa-lib-devel mesa-libGL-devel libX11-devel libXrandr-devel libXi-devel libXcursor-devel libXinerama-devel libatomic
-
-# Asahi Linux
-sudo dnf5 install libX11-devel libXrandr-devel libXi-devel libXcursor-devel mesa-libGL-devel pulseaudio-libs-devel libdrm-devel libXinerama-devel
-```
+This project only ships a web client: `raylib-rs` is built through
+`raylib-sys` for the `wasm32-unknown-emscripten` target via emsdk (see
+below), so no host GL/X11/Wayland dev packages are needed.
 
 ## SpacetimeDB CLI
 

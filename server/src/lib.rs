@@ -56,7 +56,11 @@ pub fn client_connected(ctx: &ReducerContext) {
             identity: ctx.sender(),
             name: None,
             online: true,
-            x: 360.0,
+            // Center of the lit left room (see LEFT_ROOM in
+            // client/src/bin/web.rs) — spawning in the dark room would
+            // make a brand-new player invisible to everyone else until
+            // they move into the flashlight's reach.
+            x: 140.0,
             y: 360.0,
             last_seen: ctx.timestamp,
         });

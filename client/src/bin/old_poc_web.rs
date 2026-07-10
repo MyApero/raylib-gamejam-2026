@@ -1,16 +1,4 @@
-//! Web (wasm32-unknown-emscripten) client — top-down 2D POC.
-//!
-//! Movement: ZQSD, world-space (no camera — the world is the 720x720
-//! canvas). Two rooms connected by a corridor: a small lit room on the
-//! left, a large dark room on the right that needs the flashlight (F) to
-//! see anything in it. Colored hexagon resources are scattered in the dark
-//! room and can be picked up while the flashlight is on; they're generated
-//! and collected purely client-side (no server sync — see WORK.md if that
-//! changes).
-//!
-//! Multiplayer positions still ride the same `user` table / `set_pos`
-//! reducer as before, just carrying world coordinates instead of mouse
-//! coordinates — the network layer below is unchanged.
+//! Web (wasm32-unknown-emscripten) client.
 //!
 //! raylib's web target is emscripten, but spacetimedb-sdk's browser support
 //! needs wasm-bindgen, which only targets wasm32-unknown-unknown — the two
@@ -41,31 +29,15 @@ use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 
-const PLAYER_RADIUS: f32 = 16.0;
-const MOVE_SPEED: f32 = 220.0;
-
-/// World rects (world space == canvas space, 720x720, no camera). The
-/// corridor overlaps each room by 40px (more than the player's 32px
-/// diameter) so movement never gets stuck at the seams.
-const LEFT_ROOM: Rect = Rect { x: 40.0, y: 200.0, w: 200.0, h: 320.0 };
-const CORRIDOR: Rect = Rect { x: 200.0, y: 320.0, w: 200.0, h: 80.0 };
-const DARK_ROOM: Rect = Rect { x: 360.0, y: 40.0, w: 320.0, h: 640.0 };
-const ROOMS: [Rect; 3] = [LEFT_ROOM, CORRIDOR, DARK_ROOM];
-
-const FLASHLIGHT_RADIUS: f32 = 150.0;
-const RESOURCE_RADIUS: f32 = 14.0;
-const RESOURCE_COUNT: usize = 8;
-/// Margin kept between resource spawn points and the dark room's walls.
-const RESOURCE_MARGIN: f32 = 30.0;
-
-/// Max rate at which we push our own position (each send commits a
+const HEX_RADIUS: f32 = 28.0;
+/// Max rate at which we push our own cursor position (each send commits a
 /// transaction that's broadcast to every subscriber, so keep it sane).
 const SEND_INTERVAL: f64 = 1.0 / 30.0;
 /// Send set_pos at least this often even when idle so last_seen stays
-/// fresh — guards against ghost players when a socket dies without a
+/// fresh — guards against ghost hexagons when a socket dies without a
 /// clean close (phone lock, wifi drop).
 const HEARTBEAT_INTERVAL: f64 = 1.0;
-/// Mirrors the server's presence window over user.last_seen.
+/// Mirrors the native client's presence window over user.last_seen.
 const PRESENCE_TIMEOUT_SECS: i64 = 3;
 /// Bounds on the interpolation window measured from real update arrival
 /// gaps: floor keeps near-simultaneous updates from snapping, ceiling
@@ -73,76 +45,6 @@ const PRESENCE_TIMEOUT_SECS: i64 = 3;
 /// move across a full second.
 const MIN_LERP_WINDOW: f64 = 0.02;
 const MAX_LERP_WINDOW: f64 = 0.25;
-
-#[derive(Clone, Copy)]
-struct Rect {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-}
-
-impl Rect {
-    /// Whether a circle of the given radius, centered at `p`, fits
-    /// entirely within this rect.
-    fn contains_circle(&self, p: Vector2, radius: f32) -> bool {
-        p.x - radius >= self.x
-            && p.x + radius <= self.x + self.w
-            && p.y - radius >= self.y
-            && p.y + radius <= self.y + self.h
-    }
-}
-
-/// Tiny xorshift32 PRNG — just for scattering resources client-side, no
-/// need to pull in the `rand` crate for this.
-struct Rng(u32);
-
-impl Rng {
-    fn new(seed: u32) -> Self {
-        Self(if seed == 0 { 0x9e3779b9 } else { seed })
-    }
-
-    fn next_u32(&mut self) -> u32 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 17;
-        self.0 ^= self.0 << 5;
-        self.0
-    }
-
-    fn next_f32(&mut self) -> f32 {
-        (self.next_u32() as f64 / u32::MAX as f64) as f32
-    }
-
-    fn range(&mut self, lo: f32, hi: f32) -> f32 {
-        lo + self.next_f32() * (hi - lo)
-    }
-}
-
-/// (display label, color) palette resources are drawn from.
-const PALETTE: [(&str, Color); 5] = [
-    ("red", Color::RED),
-    ("orange", Color::ORANGE),
-    ("green", Color::LIME),
-    ("blue", Color::SKYBLUE),
-    ("purple", Color::PURPLE),
-];
-
-struct Resource {
-    pos: Vector2,
-    palette_index: usize,
-}
-
-fn spawn_resources(rng: &mut Rng) -> Vec<Resource> {
-    (0..RESOURCE_COUNT)
-        .map(|_| Resource {
-            pos: Vector2::new(
-                rng.range(DARK_ROOM.x + RESOURCE_MARGIN, DARK_ROOM.x + DARK_ROOM.w - RESOURCE_MARGIN),
-                rng.range(DARK_ROOM.y + RESOURCE_MARGIN, DARK_ROOM.y + DARK_ROOM.h - RESOURCE_MARGIN),
-            ),
-            palette_index: (rng.next_u32() as usize) % PALETTE.len(),
-        })
-        .collect()
-}
 
 unsafe extern "C" {
     fn emscripten_run_script_string(script: *const c_char) -> *const c_char;
@@ -210,10 +112,6 @@ struct State {
     now_micros: i64,
     last_send: f64,
     last_sent_pos: Option<(f32, f32)>,
-    pos: Vector2,
-    flashlight_on: bool,
-    resources: Vec<Resource>,
-    collected: [u32; PALETTE.len()],
 }
 
 fn run_js(js: &str) -> String {
@@ -373,23 +271,11 @@ fn is_present(last_seen_micros: i64, now_micros: i64) -> bool {
     now_micros.saturating_sub(last_seen_micros) < PRESENCE_TIMEOUT_SECS * 1_000_000
 }
 
-fn distance(a: Vector2, b: Vector2) -> f32 {
-    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
-}
-
-/// Moves `pos` by `delta`, one axis at a time (so sliding along a wall
-/// works), rejecting any axis whose result would leave every room rect.
-fn move_with_collision(pos: Vector2, delta: Vector2) -> Vector2 {
-    let mut p = pos;
-    let stepped_x = Vector2::new(p.x + delta.x, p.y);
-    if ROOMS.iter().any(|r| r.contains_circle(stepped_x, PLAYER_RADIUS)) {
-        p.x = stepped_x.x;
-    }
-    let stepped_y = Vector2::new(p.x, p.y + delta.y);
-    if ROOMS.iter().any(|r| r.contains_circle(stepped_y, PLAYER_RADIUS)) {
-        p.y = stepped_y.y;
-    }
-    p
+fn color_for(identity_hex: &str) -> Color {
+    let h = identity_hex
+        .bytes()
+        .fold(7u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    Color::color_from_hsv((h % 360) as f32, 0.7, 0.9)
 }
 
 extern "C" fn on_frame(arg: *mut c_void) {
@@ -399,7 +285,6 @@ extern "C" fn on_frame(arg: *mut c_void) {
 
 fn frame(state: &mut State) {
     let t = now_secs();
-    let dt = state.rl.get_frame_time();
 
     // One JS call pulls in everything the socket received since last frame.
     let raw = run_js("window.stdb ? window.stdb.frame() : '{}'");
@@ -413,167 +298,54 @@ fn frame(state: &mut State) {
         handle_message(state, msg, t);
     }
 
-    // --- Input: ZQSD movement + flashlight toggle ---
-    let mut dir = Vector2::new(0.0, 0.0);
-    if state.rl.is_key_down(KeyboardKey::KEY_Z) {
-        dir.y -= 1.0;
-    }
-    if state.rl.is_key_down(KeyboardKey::KEY_S) {
-        dir.y += 1.0;
-    }
-    if state.rl.is_key_down(KeyboardKey::KEY_Q) {
-        dir.x -= 1.0;
-    }
-    if state.rl.is_key_down(KeyboardKey::KEY_D) {
-        dir.x += 1.0;
-    }
-    if dir.x != 0.0 || dir.y != 0.0 {
-        let len = (dir.x * dir.x + dir.y * dir.y).sqrt();
-        let delta = Vector2::new(dir.x / len * MOVE_SPEED * dt, dir.y / len * MOVE_SPEED * dt);
-        state.pos = move_with_collision(state.pos, delta);
-    }
-    if state.rl.is_key_pressed(KeyboardKey::KEY_F) {
-        state.flashlight_on = !state.flashlight_on;
-    }
+    let mouse = state.rl.get_mouse_position();
 
-    // Pickup: only while the flashlight is on (can't grab what you can't see).
-    if state.flashlight_on {
-        let pos = state.pos;
-        let mut i = 0;
-        while i < state.resources.len() {
-            if distance(pos, state.resources[i].pos) <= PLAYER_RADIUS + RESOURCE_RADIUS {
-                let idx = state.resources[i].palette_index;
-                state.collected[idx] += 1;
-                state.resources.swap_remove(i);
-            } else {
-                i += 1;
-            }
-        }
-    }
-
-    // --- Network send: throttled position updates + idle heartbeat ---
     if state.my_identity.is_some() {
         let moved = state
             .last_sent_pos
-            .is_none_or(|(x, y)| (x - state.pos.x).abs() > 0.5 || (y - state.pos.y).abs() > 0.5);
+            .is_none_or(|(x, y)| (x - mouse.x).abs() > 0.5 || (y - mouse.y).abs() > 0.5);
         let due_move = moved && t - state.last_send >= SEND_INTERVAL;
         let due_heartbeat = t - state.last_send >= HEARTBEAT_INTERVAL;
         if due_move || due_heartbeat {
             state.last_send = t;
-            state.last_sent_pos = Some((state.pos.x, state.pos.y));
+            state.last_sent_pos = Some((mouse.x, mouse.y));
             run_js(&format!(
                 "window.stdb && window.stdb.callReducer('set_pos', '[{}, {}]')",
-                state.pos.x, state.pos.y
+                mouse.x, mouse.y
             ));
         }
     }
 
-    render(state, t);
-}
-
-fn render(state: &mut State, t: f64) {
     let now_micros = state.now_micros;
-    let my_identity = state.my_identity.clone();
-    let local_pos = state.pos;
-    let flashlight_on = state.flashlight_on;
-    let in_dark_room = DARK_ROOM.contains_circle(local_pos, 0.0);
+    let my_identity = state.my_identity.as_deref();
 
     let mut d = state.rl.begin_drawing(&state.thread);
-    d.clear_background(Color::new(18, 18, 20, 255));
-
-    // Lit areas: left room + corridor.
-    for r in [LEFT_ROOM, CORRIDOR] {
-        d.draw_rectangle_rec(
-            Rectangle::new(r.x, r.y, r.w, r.h),
-            Color::new(226, 220, 200, 255),
-        );
-        d.draw_rectangle_lines_ex(Rectangle::new(r.x, r.y, r.w, r.h), 2.0, Color::new(120, 110, 90, 255));
-    }
-
-    // Dark room: near-black base; only brightened where the flashlight reaches.
-    d.draw_rectangle_rec(
-        Rectangle::new(DARK_ROOM.x, DARK_ROOM.y, DARK_ROOM.w, DARK_ROOM.h),
-        Color::new(8, 8, 12, 255),
-    );
-    d.draw_rectangle_lines_ex(
-        Rectangle::new(DARK_ROOM.x, DARK_ROOM.y, DARK_ROOM.w, DARK_ROOM.h),
-        2.0,
-        Color::new(40, 40, 50, 255),
-    );
-
-    // Other players in the lit areas — always visible.
+    d.clear_background(Color::RAYWHITE);
     for (identity_hex, player) in state
         .players
         .iter()
         .filter(|(_, p)| is_present(p.last_seen_micros, now_micros))
-        .filter(|(id, _)| Some(id.as_str()) != my_identity.as_deref())
+        .filter(|(id, _)| Some(id.as_str()) != my_identity)
     {
         let center = player.render_pos(t);
-        if !DARK_ROOM.contains_circle(center, 0.0) {
-            d.draw_circle(center.x as i32, center.y as i32, PLAYER_RADIUS, color_for(identity_hex));
-        }
+        d.draw_poly(center, 6, HEX_RADIUS, 0.0, color_for(identity_hex));
     }
-
-    // Flashlight glow + anything it reveals inside the dark room.
-    if flashlight_on && in_dark_room {
-        {
-            let mut b = d.begin_blend_mode(BlendMode::BLEND_ADDITIVE);
-            b.draw_circle_gradient(
-                local_pos.x as i32,
-                local_pos.y as i32,
-                FLASHLIGHT_RADIUS,
-                Color::new(255, 244, 200, 160),
-                Color::new(255, 244, 200, 0),
-            );
-        }
-        for res in &state.resources {
-            if distance(local_pos, res.pos) <= FLASHLIGHT_RADIUS {
-                let (_, color) = PALETTE[res.palette_index];
-                d.draw_poly(res.pos, 6, RESOURCE_RADIUS, 0.0, color);
-            }
-        }
-        for (identity_hex, player) in state
-            .players
-            .iter()
-            .filter(|(_, p)| is_present(p.last_seen_micros, now_micros))
-            .filter(|(id, _)| Some(id.as_str()) != my_identity.as_deref())
-        {
-            let center = player.render_pos(t);
-            if DARK_ROOM.contains_circle(center, 0.0) && distance(local_pos, center) <= FLASHLIGHT_RADIUS {
-                d.draw_circle(center.x as i32, center.y as i32, PLAYER_RADIUS, color_for(identity_hex));
-            }
-        }
+    // Drawn from the live mouse position rather than the subscribed row,
+    // so our own hexagon tracks the cursor with zero round-trip delay.
+    if let Some(id) = my_identity {
+        let center = Vector2::new(mouse.x, mouse.y);
+        d.draw_poly(center, 6, HEX_RADIUS, 0.0, color_for(id));
+        d.draw_poly_lines_ex(center, 6, HEX_RADIUS, 0.0, 3.0, Color::BLACK);
     }
-
-    // Local player — always visible to themselves.
-    d.draw_circle(local_pos.x as i32, local_pos.y as i32, PLAYER_RADIUS, Color::WHITE);
-    d.draw_circle_lines(local_pos.x as i32, local_pos.y as i32, PLAYER_RADIUS, Color::BLACK);
-
-    d.draw_text("hex + merge — 2D POC (web)", 10, 10, 20, Color::RAYWHITE);
-    d.draw_text("ZQSD move, F flashlight", 10, 33, 16, Color::LIGHTGRAY);
-    d.draw_text(&format!("ws: {}", state.ws_status), 10, 52, 16, Color::LIGHTGRAY);
-
-    let mut y = 74;
-    for (i, (label, color)) in PALETTE.iter().enumerate() {
-        d.draw_poly(Vector2::new(20.0, y as f32 + 8.0), 6, 8.0, 0.0, *color);
-        d.draw_text(
-            &format!("{}: {}", label, state.collected[i]),
-            34,
-            y,
-            16,
-            Color::RAYWHITE,
-        );
-        y += 20;
-    }
-
+    d.draw_text("hex + merge — PoC (web)", 10, 10, 20, Color::DARKGRAY);
+    d.draw_text(
+        &format!("ws: {}", state.ws_status),
+        10,
+        35,
+        16,
+        Color::GRAY,
+    );
     d.draw_fps(640, 10);
-}
-
-fn color_for(identity_hex: &str) -> Color {
-    let h = identity_hex
-        .bytes()
-        .fold(7u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-    Color::color_from_hsv((h % 360) as f32, 0.7, 0.9)
 }
 
 fn main() {
@@ -581,10 +353,6 @@ fn main() {
         .size(720, 720) // jam hard constraint
         .title("hexmerge — raylib 6.0 + SpacetimeDB (web)")
         .build();
-
-    let seed = (unsafe { emscripten_get_now() } as u32) | 1;
-    let mut rng = Rng::new(seed);
-    let resources = spawn_resources(&mut rng);
 
     let state = Box::new(State {
         rl,
@@ -595,10 +363,6 @@ fn main() {
         now_micros: 0,
         last_send: f64::NEG_INFINITY,
         last_sent_pos: None,
-        pos: Vector2::new(LEFT_ROOM.x + LEFT_ROOM.w / 2.0, LEFT_ROOM.y + LEFT_ROOM.h / 2.0),
-        flashlight_on: false,
-        resources,
-        collected: [0; PALETTE.len()],
     });
     let arg = Box::into_raw(state) as *mut c_void;
     unsafe {
