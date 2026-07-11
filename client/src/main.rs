@@ -355,8 +355,15 @@ fn main() {
         // held afterward. Cleared on release so ordinary map input resumes
         // for the NEXT press.
         if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
-            suppress_map_until_release =
-                ui_state.overlay_open || ui_state.account_open || ui_state.island_popup.is_some();
+            // F9.5 item 7 follow-up: only the OWN-island popup is a real
+            // modal now (backdrop, close button, link edit field) — a
+            // foreign island's hover tooltip has no interactive chrome to
+            // click-through onto, and blocking map input while it's up would
+            // break double-click-to-like/long-press-merge on the very
+            // island it's showing info for.
+            suppress_map_until_release = ui_state.overlay_open
+                || ui_state.account_open
+                || ui_state.island_popup.as_ref().is_some_and(|p| p.is_own);
         }
         if rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
             suppress_map_until_release = false;
@@ -483,10 +490,14 @@ fn main() {
                 }
             }
         }
+        // F9.5 item 7 follow-up: mirrors the latch above — only an OWN-
+        // island popup blocks map input; a foreign tooltip must not, or
+        // hovering it would disable the very double-click/long-press
+        // gestures it's showing info for.
         let map_input_allowed = !suppress_map_until_release
             && !ui_state.overlay_open
             && !ui_state.account_open
-            && ui_state.island_popup.is_none();
+            && !ui_state.island_popup.as_ref().is_some_and(|p| p.is_own);
 
         // Zoom toward the cursor (official raylib recipe): re-anchor
         // offset/target at the mouse before changing zoom so the world
@@ -647,6 +658,19 @@ fn main() {
                 if let Some(me) = me {
                     open_island_info(&ctx, &mut ui_state, island_id, me, now);
                 }
+                // F9.5 item 7 follow-up (author-requested): the hover
+                // tooltip that replaced this click's old popup-opening role
+                // is non-interactive, so a resolved single (non-double)
+                // click on a foreign island now directly opens its itch.io
+                // link (if set) instead — the same click still opens the
+                // info tooltip too (touch has no hover, so this is also
+                // decision 17's "tap opens" path for it).
+                if let Some(island) = ctx.db.island().id().find(&island_id) {
+                    if let Some(rate_id) = island.itch_rate_id {
+                        open_url(&format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"));
+                        let _ = ctx.reducers.click_link(island_id);
+                    }
+                }
                 pending_info_click = None;
             }
         }
@@ -656,10 +680,23 @@ fn main() {
         // block above, which is left untouched for double-click-to-like and
         // touch (tap opens, double-tap likes; raylib-web aliases a single
         // touch to ordinary mouse events, so that path already covers touch).
-        let currently_hovered_foreign = me.and_then(|me| {
-            let (hq, hr) = world::world_to_axial(mouse_world);
-            island_at(&ctx, hq, hr).filter(|(island, _, _)| island.owner != me).map(|(island, _, _)| island.id)
-        });
+        // Author-caught: the header/footer bands sit ON TOP of the map, but
+        // the screen coordinate underneath still maps to SOME world tile via
+        // the camera transform — without this guard, clicking a footer
+        // button (e.g. "My Isle", itself over foreign territory at the
+        // camera's current framing) could immediately have the hover logic
+        // reinterpret that same resting mouse position as hovering a
+        // DIFFERENT foreign island and overwrite the just-opened own-island
+        // popup with that one.
+        let over_map_area = mouse_screen.y > ui::HEADER_H && mouse_screen.y < (720.0 - ui::FOOTER_H);
+        let currently_hovered_foreign = over_map_area
+            .then(|| {
+                me.and_then(|me| {
+                    let (hq, hr) = world::world_to_axial(mouse_world);
+                    island_at(&ctx, hq, hr).filter(|(island, _, _)| island.owner != me).map(|(island, _, _)| island.id)
+                })
+            })
+            .flatten();
         match currently_hovered_foreign {
             Some(id) => {
                 if hover_target.map(|(hid, _)| hid) != Some(id) {
@@ -685,9 +722,13 @@ fn main() {
         }
         // Closes on hover-out, regardless of how the popup was opened
         // (hover or the click/double-click path above) — moving off the
-        // island it's about should always dismiss it.
+        // island it's about should always dismiss it. Own-island popups
+        // (opened via the "My Isle" footer button) are exempt: they're
+        // never a hover target in the first place (`currently_hovered_foreign`
+        // only ever names FOREIGN islands), so this check would otherwise
+        // slam that popup shut the very next frame after opening it.
         if let Some(popup) = &ui_state.island_popup {
-            if currently_hovered_foreign != Some(popup.island_id) {
+            if !popup.is_own && currently_hovered_foreign != Some(popup.island_id) {
                 ui_state.island_popup = None;
             }
         }
@@ -881,7 +922,7 @@ fn main() {
                 show_token_import: false,
                 rerank_secs,
             };
-            ui::draw(&mut d, &ui_state, &info);
+            ui::draw(&mut d, &ui_state, &info, mouse_screen);
 
             let (hue, sat, val) = brush;
             world::draw_cursor(&mut d, mouse_screen, world::hsv_color(hue, sat, val));

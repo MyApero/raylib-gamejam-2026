@@ -7,7 +7,77 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9.5 item 8 — Safari (macOS) trackpad scroll zooms in
+**Current batch:** F9.5 item 7 redesign (author feedback, same day as the
+original batch) — the F8-style big centered modal (backdrop dim, close
+button, Like/Unlike button, clickable link row) was too heavy for something
+that now opens on mere hover; author asked for "way simpler... glue to the
+mouse and smaller... without closing button... looking like a tooltip".
+
+**Redesign** (`ui.rs`): the two very different popup UIs that shared
+`island_popup` are now visually split by `is_own`:
+- Own island (via the deliberate "My Isle" footer click) keeps the original
+  full modal — backdrop, close button, link edit field/Set button — since
+  it's a real form, not a fleeting hover artifact.
+- A foreign island's hover popup is now `draw_island_tooltip`: a small box
+  glued near the cursor (offset so it doesn't sit under it, flipped to the
+  other side near screen edges), no backdrop, no close button (closes
+  itself on hover-out, unchanged from the original batch), and — this is
+  the important behavioral change, not just visual — NO buttons at all.
+  Reasoned through why: a box that re-centers on the mouse every frame can
+  never contain a clickable target, because moving the mouse toward the
+  button moves the button the same distance; a real tooltip is
+  non-interactic by definition anyway.
+
+That drops two interactions the F8 popup used to host: the Like/Unlike
+button (redundant — double-click-to-like on the map already does the exact
+same thing, untouched) and the link row's click-to-open (which was NOT
+redundant — this is the F9 itch.io-rate-traffic feature). Rather than lose
+that quietly, asked the author directly: their pick was to move it onto a
+plain single (non-double) click on the island itself, which fires alongside
+the existing tap-opens-info behavior touch already relies on (decision 17)
+— so `main.rs`/`bin/web.rs`'s `pending_info_click` resolution now also opens
+and credits the link (if set) when it resolves, on top of what it already did.
+
+**Two regressions caught before handing this to the author, both from
+`island_popup` interactions the redesign didn't originally account for**:
+1. **Double-click-to-like silently stopped working.** Root cause:
+   `map_input_allowed` (and the item-5 `suppress_map_until_release` latch)
+   still gated on `island_popup.is_some()` at all — leftover from when EVERY
+   island popup was a true modal. Once hover started opening popups
+   asynchronously (independent of any click), simply hovering a foreign
+   island now flipped `map_input_allowed` false, which severed the
+   long-press/double-click gesture tracking entirely (`long_press` gets
+   force-reset every frame `map_input_allowed` is false) — hovering to LOOK
+   at an island silently disabled liking it. Fixed by narrowing both checks
+   to `island_popup.as_ref().is_some_and(|p| p.is_own)` — only the real
+   modal blocks map input now; the tooltip never does.
+2. **"My Isle" sometimes opened a STRANGER'S tooltip instead of your own
+   popup.** Root cause: hovering is purely screen->world position based,
+   and the footer/header bands' screen coordinates still map to SOME world
+   tile through the camera transform even though they're visually covered by
+   UI chrome — clicking "My Isle" (screen position over the footer) could
+   have that same resting mouse position simultaneously satisfy the hover
+   accumulator for whatever foreign island happens to occupy that world
+   position at the camera's current framing, overwriting the just-opened
+   own popup within the same second. Fixed by excluding the header/footer
+   bands (`ui::HEADER_H`/`FOOTER_H`) from the hover computation entirely.
+
+**VERIFIED** both regressions via scripted Playwright reproduction against
+local `spacetime start` BEFORE fixing (confirmed both actually reproduced,
+not just theorized) and re-confirmed fixed after: screenshotted "My Isle"
+opening correctly and staying open (owner name in the popup now matches the
+clicking player's own footer name field, where before the fix it showed a
+different player's name entirely). Both clients build clean. Did not
+re-verify the double-click fix with a full two-window capture (same
+far-apart-islands framing difficulty noted in items 6/7's original
+verification) — traced by hand instead (REASONED) after confirming the
+root-cause mechanism directly (the stale `island_popup.is_some()` gate).
+Handing off to the author for real hand-testing now rather than continuing
+to script increasingly elaborate multi-window browser repros.
+
+---
+
+**Previous batch:** F9.5 item 8 — Safari (macOS) trackpad scroll zooms in
 huge, uncontrollable steps. The game's zoom step is `wheel_delta * 0.1`
 (`client/src/main.rs`/`bin/web.rs`, unchanged), fed by whatever raw
 `deltaY` the browser reports — Chrome/Firefox report modest per-tick deltas

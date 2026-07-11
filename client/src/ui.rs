@@ -408,22 +408,6 @@ fn reset_btn_rect() -> Rectangle {
     Rectangle::new(o.x + 20.0, o.y + 280.0, 240.0, 36.0)
 }
 
-fn like_btn_rect() -> Rectangle {
-    let o = overlay_rect();
-    // Author-caught: this used to sit at `o.y + 140`, overlapping the link
-    // row drawn at `o.y + 132` (font height ~16px). Moved below it with a
-    // clear gap.
-    Rectangle::new(o.x + 20.0, o.y + 170.0, 160.0, 36.0)
-}
-
-/// F9: the "Link: itch.io rate #<id>" row on a FOREIGN island's popup, when
-/// a link is actually set — sized to roughly cover the text drawn at the
-/// same position (`draw_island_popup`) so the whole row reads as clickable.
-fn link_row_rect() -> Rectangle {
-    let o = overlay_rect();
-    Rectangle::new(o.x + 20.0, o.y + 128.0, 300.0, 22.0)
-}
-
 /// F9: own-island popup only — numeric input for the itch.io rate id.
 fn link_edit_rect() -> Rectangle {
     let o = overlay_rect();
@@ -631,38 +615,26 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         return actions;
     }
 
-    // F8 island-info popup: modal, same footprint, mutually exclusive with
-    // the other two (enforced by the toggles above and `open_island_info`).
+    // F8/F9.5 island-info: two very different UIs share `island_popup`.
+    // Own island (via the "My Isle" footer button, a deliberate action) is
+    // still the full modal panel below, with a close button and the link
+    // editor. A FOREIGN island's popup (F9.5 item 7: opened by hovering) is
+    // a small, non-interactive tooltip drawn by `draw_island_tooltip` —
+    // no close button (it closes itself on hover-out, in
+    // `main.rs`/`bin/web.rs`) and no click handling here at all;
+    // double-click-to-like and a direct single-click-to-open-link both live
+    // in the map-click code instead, since a box that continuously re-glues
+    // itself to the mouse can't contain a clickable target you could ever
+    // actually reach.
     if let Some(popup) = &state.island_popup {
-        if clicked && point_in(mouse, overlay_close_rect()) {
-            state.island_popup = None;
-            return actions;
-        }
-        // Author-requested: the button now toggles both ways instead of
-        // only ever liking — clicking it again while already liked undoes
-        // it via the new `unlike_island` reducer.
-        if !popup.is_own && clicked && point_in(mouse, like_btn_rect()) {
-            if popup.already_liked {
-                actions.unlike_island = Some(popup.island_id);
-            } else {
-                actions.like_island = Some(popup.island_id);
-            }
-        }
-        // F9: clicking a set link on a FOREIGN island's popup opens it (the
-        // caller does the actual URL-opening — this module stays free of
-        // that platform-specific call) and fires `click_link` for XP, both
-        // off the same click.
-        if !popup.is_own {
-            if let Some(rate_id) = popup.link_id {
-                if clicked && point_in(mouse, link_row_rect()) {
-                    actions.click_link = Some((popup.island_id, rate_id));
-                }
-            }
-        }
-        // F9: own-island link editing — digits only (it's a numeric itch.io
-        // submission id), same Ctrl+V-friendly typing as the Account
-        // overlay's token import field.
         if popup.is_own {
+            if clicked && point_in(mouse, overlay_close_rect()) {
+                state.island_popup = None;
+                return actions;
+            }
+            // F9: own-island link editing — digits only (it's a numeric
+            // itch.io submission id), same Ctrl+V-friendly typing as the
+            // Account overlay's token import field.
             let field = link_edit_rect();
             if clicked {
                 state.link_edit_focused = point_in(mouse, field);
@@ -755,7 +727,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     actions
 }
 
-pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
+pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vector2) {
     draw_header(d, info);
     draw_footer(d, state, info);
     if state.overlay_open {
@@ -763,7 +735,11 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     } else if state.account_open {
         draw_account_overlay(d, state, info);
     } else if let Some(popup) = &state.island_popup {
-        draw_island_popup(d, state, popup);
+        if popup.is_own {
+            draw_island_popup(d, state, popup);
+        } else {
+            draw_island_tooltip(d, popup, mouse);
+        }
     }
     if let Some(toast) = &state.toast {
         draw_toast(d, toast, info);
@@ -774,8 +750,11 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     draw_like_anims(d, state);
 }
 
-/// F8: island-info popup — creator, likes, age, link (if set), and a
-/// Like/Unlike toggle button (hidden for your own island).
+/// F8/F9: own-island management panel (opened via the "My Isle" footer
+/// button — a deliberate action, unlike the hover tooltip below) — creator
+/// line, likes, age, and the link edit field/button. Full modal treatment
+/// (backdrop, close button) since it has real form controls to interact
+/// with, unlike the foreign-island case.
 fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInfo) {
     d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
 
@@ -792,51 +771,62 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
     d.draw_text(&format!("Likes: {}", popup.likes), o.x as i32 + 20, o.y as i32 + 80, 16, Color::RAYWHITE);
     d.draw_text(&format!("Created {}", popup.age_label), o.x as i32 + 20, o.y as i32 + 106, 16, Color::LIGHTGRAY);
 
-    if popup.is_own {
-        // F9: own island — show the current link plus an edit field/button
-        // instead of the foreign-island Like button.
-        let link_label = match popup.link_id {
-            Some(id) => format!("Your link: itch.io rate #{id}"),
-            None => "Your link: not set".to_string(),
-        };
-        d.draw_text(&link_label, o.x as i32 + 20, o.y as i32 + 132, 16, Color::LIGHTGRAY);
-        d.draw_text("Set your itch.io rate id:", o.x as i32 + 20, o.y as i32 + 162, 14, Color::LIGHTGRAY);
+    let link_label = match popup.link_id {
+        Some(id) => format!("Your link: itch.io rate #{id}"),
+        None => "Your link: not set".to_string(),
+    };
+    d.draw_text(&link_label, o.x as i32 + 20, o.y as i32 + 132, 16, Color::LIGHTGRAY);
+    d.draw_text("Set your itch.io rate id:", o.x as i32 + 20, o.y as i32 + 162, 14, Color::LIGHTGRAY);
 
-        let field = link_edit_rect();
-        d.draw_rectangle_rec(field, Color::new(28, 28, 34, 255));
-        d.draw_rectangle_lines_ex(field, 1.0, if state.link_edit_focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
-        let shown = if state.link_edit_input.is_empty() && !state.link_edit_focused { "e.g. 123456" } else { &state.link_edit_input };
-        d.draw_text(shown, field.x as i32 + 6, field.y as i32 + 7, 14, Color::RAYWHITE);
+    let field = link_edit_rect();
+    d.draw_rectangle_rec(field, Color::new(28, 28, 34, 255));
+    d.draw_rectangle_lines_ex(field, 1.0, if state.link_edit_focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
+    let shown = if state.link_edit_input.is_empty() && !state.link_edit_focused { "e.g. 123456" } else { &state.link_edit_input };
+    d.draw_text(shown, field.x as i32 + 6, field.y as i32 + 7, 14, Color::RAYWHITE);
 
-        let sb = link_set_btn_rect();
-        d.draw_rectangle_rec(sb, Color::new(40, 40, 48, 255));
-        d.draw_text("Set", sb.x as i32 + 34, sb.y as i32 + 9, 14, Color::RAYWHITE);
-    } else {
-        // F9: a set link reads as clickable (distinct color + hint text);
-        // unset stays plain, matching the row's hit test in `handle_input`
-        // only firing when `link_id` is `Some`.
-        let link_label = match popup.link_id {
-            Some(id) => format!("Link: itch.io rate #{id} (click to open)"),
-            None => "Link: not set".to_string(),
-        };
-        let link_color = if popup.link_id.is_some() { Color::new(120, 180, 255, 255) } else { Color::LIGHTGRAY };
-        d.draw_text(&link_label, o.x as i32 + 20, o.y as i32 + 132, 16, link_color);
+    let sb = link_set_btn_rect();
+    d.draw_rectangle_rec(sb, Color::new(40, 40, 48, 255));
+    d.draw_text("Set", sb.x as i32 + 34, sb.y as i32 + 9, 14, Color::RAYWHITE);
+}
 
-        // Author-requested: clicking again while already liked now undoes
-        // it, so the button stays clickable (and its label doubles as the
-        // hint) in both states instead of going inert once liked.
-        let lb = like_btn_rect();
-        d.draw_rectangle_rec(
-            lb,
-            if popup.already_liked { Color::new(90, 60, 60, 255) } else { Color::new(40, 40, 48, 255) },
-        );
-        d.draw_text(
-            if popup.already_liked { "Unlike" } else { "Like" },
-            lb.x as i32 + 16,
-            lb.y as i32 + 10,
-            14,
-            Color::RAYWHITE,
-        );
+const TOOLTIP_W: f32 = 220.0;
+const TOOLTIP_PAD: f32 = 8.0;
+const TOOLTIP_LINE_H: f32 = 18.0;
+
+/// F9.5 item 7 (author-requested redesign): a foreign island's info, as a
+/// small, non-interactive tooltip glued to the cursor (offset so it doesn't
+/// sit under it) instead of F8's big centered modal — no backdrop dim, no
+/// close button (the caller closes it automatically on hover-out), no
+/// buttons at all: a box that continuously re-centers on the mouse can
+/// never contain a clickable target you could actually reach, since moving
+/// toward it moves it the same distance. Like/unlike stays exclusively a
+/// double-click on the map; opening the link is a direct single click on
+/// the island itself — see the map-click code in `main.rs`/`bin/web.rs`.
+fn draw_island_tooltip(d: &mut impl RaylibDraw, popup: &IslandInfo, mouse: Vector2) {
+    let lines = if popup.link_id.is_some() { 4 } else { 3 };
+    let height = TOOLTIP_PAD * 2.0 + TOOLTIP_LINE_H * lines as f32;
+    let mut x = mouse.x + 18.0;
+    let mut y = mouse.y + 18.0;
+    if x + TOOLTIP_W > SCREEN_W {
+        x = mouse.x - TOOLTIP_W - 12.0;
+    }
+    if y + height > SCREEN_H {
+        y = mouse.y - height - 12.0;
+    }
+    let rect = Rectangle::new(x, y, TOOLTIP_W, height);
+    d.draw_rectangle_rec(rect, Color::new(20, 20, 26, 235));
+    d.draw_rectangle_lines_ex(rect, 1.0, Color::new(120, 120, 130, 200));
+
+    let tx = rect.x as i32 + TOOLTIP_PAD as i32;
+    let mut ty = rect.y as i32 + TOOLTIP_PAD as i32;
+    d.draw_text(&popup.owner_label, tx, ty, 15, Color::RAYWHITE);
+    ty += TOOLTIP_LINE_H as i32;
+    d.draw_text(&format!("Likes: {}", popup.likes), tx, ty, 13, Color::LIGHTGRAY);
+    ty += TOOLTIP_LINE_H as i32;
+    d.draw_text(&popup.age_label, tx, ty, 12, Color::GRAY);
+    if let Some(id) = popup.link_id {
+        ty += TOOLTIP_LINE_H as i32;
+        d.draw_text(&format!("Linked: rate #{id}"), tx, ty, 12, Color::new(120, 180, 255, 255));
     }
 }
 
