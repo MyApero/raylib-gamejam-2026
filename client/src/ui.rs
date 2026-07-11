@@ -1285,7 +1285,7 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse:
 
     let tol = world::constants::HUE_TOLERANCE;
     let offset = hue_offset_signed(effective_hue(state, info), state.base_hue).clamp(-tol, tol);
-    draw_hue_slider(d, hue_slider_rect(), offset, tol);
+    draw_hue_slider(d, hue_slider_rect(), offset, tol, state.base_hue, info.brush.1, info.brush.2);
     draw_slider(d, sat_slider_rect(), info.brush.1, info.sat_cap, &format!("Saturation ({})", info.brush.1));
     draw_slider(d, val_slider_rect(), info.brush.2, 100, &format!("Value ({})", info.brush.2));
 }
@@ -1361,10 +1361,29 @@ fn draw_account_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo
 
 /// Signed ±`tol` slider: a center tick at offset 0 plus a handle that can
 /// land either side of it, unlike the one-directional Saturation/Value bars.
-fn draw_hue_slider(d: &mut impl RaylibDraw, track: Rectangle, offset: i32, tol: i32) {
+fn draw_hue_slider(
+    d: &mut impl RaylibDraw,
+    track: Rectangle,
+    offset: i32,
+    tol: i32,
+    base_hue: u16,
+    sat: u8,
+    val: u8,
+) {
     let label = if offset == 0 { "Hue (0)".to_string() } else { format!("Hue ({offset:+})") };
     d.draw_text(&label, track.x as i32, track.y as i32 - 18, 14, Color::LIGHTGRAY);
-    d.draw_rectangle_rec(track, Color::new(50, 50, 58, 255));
+    // Left/right edges of the track are the ±tol extremes of the window, so the
+    // gradient previews what dragging to either end would actually look like.
+    let lo_hue = (base_hue as i32 - tol).rem_euclid(360) as u16;
+    let hi_hue = (base_hue as i32 + tol).rem_euclid(360) as u16;
+    d.draw_rectangle_gradient_h(
+        track.x as i32,
+        track.y as i32,
+        track.width as i32,
+        track.height as i32,
+        world::hsv_color(lo_hue, sat, val),
+        world::hsv_color(hi_hue, sat, val),
+    );
     let mid_x = track.x + track.width / 2.0;
     d.draw_line_ex(
         Vector2::new(mid_x, track.y),

@@ -26,7 +26,7 @@ pub mod constants {
     /// point (lets the Hue slider nudge a shade without bloating the
     /// inventory with one row per nudge); the client mirrors it so the
     /// slider never offers a value the server would reject.
-    pub const HUE_TOLERANCE: i32 = 10;
+    pub const HUE_TOLERANCE: i32 = 7;
 }
 
 /// Circular hue distance in degrees (handles the 359->0 wraparound). Server
