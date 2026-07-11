@@ -76,8 +76,8 @@ mod constants {
     /// just observe `gift` rows appear/disappear, no client-side timer.
     /// `GIFT_LIFETIME_SECS` < `GIFT_SPAWN_PERIOD_SECS` so there's visible
     /// down-time between gifts rather than one always being up.
-    pub const GIFT_SPAWN_PERIOD_SECS: i64 = 45;
-    pub const GIFT_LIFETIME_SECS: i64 = 25;
+    pub const GIFT_SPAWN_PERIOD_SECS: i64 = 60;
+    pub const GIFT_LIFETIME_SECS: i64 = 55;
     /// F11: flat XP on the claim coin-flip's "XP" branch — also the "hue"
     /// branch's own fallback if 8 random rerolls all collide with a hue the
     /// claimant already owns, so a win is never silently wasted.
