@@ -42,6 +42,30 @@ crate pulled in by a concurrent author refactor — see `client/src/world.rs`/
 `server/src/lib.rs`, unrelated to this batch). Item 2 unresolved pending
 the author's rebuild confirmation.
 
+**Round 3 (same sitting):** author confirmed testing the web build served
+locally, hard-refreshed/reloaded past cache, and the pencil is STILL not
+visible — ruling out staleness, this is a real rendering bug. Rather than
+keep tuning size/color on the same construction, rebuilt `draw_pencil_icon`
+from scratch on axis-aligned primitives only: `draw_rectangle_rounded` +
+`draw_rectangle_rec` + `draw_triangle` + `draw_rectangle_lines`/
+`draw_triangle_lines`/`draw_rectangle_rounded_lines` — the exact same calls
+`draw_eraser_icon` (proven working) already uses, just recolored/resized
+into a pencil silhouette (pink cap, white body, tan tip). Removed the now-
+dead `rotate_around`/`draw_quad` helpers entirely (no longer used by
+anything) rather than leave them as unreferenced code. The working theory:
+the two failed attempts both went through a hand-rolled rotated-quad-via-
+two-triangles construction that isn't used ANYWHERE else in this codebase
+— possible it interacts badly with something specific to the emscripten/
+WebGL path (untested combination), whereas every other icon in this file
+(including the still-diagonal eraser cap triangle) uses plain, unrotated
+vertices. Trading the diagonal "pencil" look the author picked from the
+Artifact mockup for a horizontal one to eliminate that whole code path as
+a variable, given two rounds already spent on the diagonal version. `cargo
+check -p client` and `./build-web.sh` both clean, no warnings (confirms
+the removed helpers were truly dead, not silently still referenced).
+Genuinely unverified beyond that — needs the author's next test to confirm
+this one actually renders.
+
 ---
 
 **Previous batch:** Author follow-up on the batch immediately below — a

@@ -1129,60 +1129,47 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     d.draw_text("My Isle", mb.x as i32 + 6, mb.y as i32 + 9, 10, Color::RAYWHITE);
 }
 
-/// Rotates `p` around `center` by `angle_rad` (screen-space, y-down).
-fn rotate_around(p: Vector2, center: Vector2, angle_rad: f32) -> Vector2 {
-    let (s, c) = angle_rad.sin_cos();
-    let dx = p.x - center.x;
-    let dy = p.y - center.y;
-    Vector2::new(center.x + dx * c - dy * s, center.y + dx * s + dy * c)
-}
-
-/// Fills a convex quad (corners given in order) as two triangles — raylib
-/// has no rotated-rectangle primitive that keeps this file's "primitives
-/// only" rule, so a rotated rect is just two `draw_triangle` calls.
-fn draw_quad(d: &mut impl RaylibDraw, p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, color: Color) {
-    d.draw_triangle(p0, p1, p2, color);
-    d.draw_triangle(p0, p2, p3, color);
-}
-
 /// Author-requested: default (paint-mode) icon for the paint/erase toggle —
-/// a diagonal pencil with a pink eraser cap and a dark tip, swapped for
+/// a pencil with a pink eraser-band cap and a graphite tip, swapped for
 /// `draw_eraser_icon` while `state.eraser_on` is true (see `draw_footer`),
 /// so the button always shows which tool is currently active.
+///
+/// Author-caught, twice: two earlier cuts of this used a diagonal
+/// (rotated-quad-via-triangles) construction that kept rendering invisible
+/// in practice despite hand-verified, non-degenerate geometry — widening it
+/// and adding a stroke didn't help either time, which pointed at the custom
+/// rotation math itself (untested anywhere else in this codebase) rather
+/// than at sizing/contrast. Rebuilt axis-aligned instead, reusing the exact
+/// same primitive calls `draw_eraser_icon` below already uses successfully
+/// (`draw_rectangle_rounded`, `draw_rectangle_rec`, `draw_triangle`,
+/// `draw_rectangle_lines`/`draw_triangle_lines`) — no custom geometry left
+/// that isn't already proven to render correctly in this exact file.
 fn draw_pencil_icon(d: &mut impl RaylibDraw, r: Rectangle) {
-    let center = Vector2::new(r.x + r.width / 2.0, r.y + r.height / 2.0);
-    let angle = 45f32.to_radians();
-    // Author-caught: the first cut of this (half_w 3.0, no outline, a dark
-    // brownish tip close to the button's own background color) rendered
-    // correctly but was too thin and too low-contrast to read as anything
-    // at 30px — widened the body, brightened the tip, and added the same
-    // dark stroke `draw_eraser_icon` uses for a crisp silhouette against
-    // the dark button background.
-    let half_w = 6.0;
-    let cap_top_y = center.y - 13.0;
-    let cap_bottom_y = center.y - 6.0;
-    let body_bottom_y = center.y + 8.0;
-    let tip_y = center.y + 14.0;
-    let left = center.x - half_w;
-    let right = center.x + half_w;
-    let rot = |x: f32, y: f32| rotate_around(Vector2::new(x, y), center, angle);
+    let cap_w = 5.0;
+    let body_w = 13.0;
+    let tip_w = 7.0;
+    let h = 9.0;
+    let x = r.x + (r.width - (cap_w + body_w + tip_w)) / 2.0;
+    let y = r.y + (r.height - h) / 2.0;
 
-    let tl = rot(left, cap_top_y);
-    let tr = rot(right, cap_top_y);
-    let cl = rot(left, cap_bottom_y);
-    let cr = rot(right, cap_bottom_y);
-    let bl = rot(left, body_bottom_y);
-    let br = rot(right, body_bottom_y);
-    let tip = rot(center.x, tip_y);
+    let cap = Rectangle::new(x, y, cap_w, h);
+    d.draw_rectangle_rounded(cap, 0.5, 4, Color::new(235, 120, 150, 255));
 
-    draw_quad(d, tl, tr, cr, cl, Color::new(235, 120, 150, 255));
-    draw_quad(d, cl, cr, br, bl, Color::new(235, 235, 240, 255));
-    d.draw_triangle(bl, br, tip, Color::new(190, 150, 100, 255));
+    let body = Rectangle::new(x + cap_w, y, body_w, h);
+    d.draw_rectangle_rec(body, Color::new(235, 235, 240, 255));
+
+    let tip_base_x = x + cap_w + body_w;
+    let tip = [
+        Vector2::new(tip_base_x, y),
+        Vector2::new(tip_base_x, y + h),
+        Vector2::new(tip_base_x + tip_w, y + h / 2.0),
+    ];
+    d.draw_triangle(tip[0], tip[1], tip[2], Color::new(190, 150, 100, 255));
 
     let outline = Color::new(40, 40, 48, 255);
-    for &(a, b) in &[(tl, tr), (tr, br), (br, tip), (tip, bl), (bl, tl)] {
-        d.draw_line_ex(a, b, 2.0, outline);
-    }
+    d.draw_rectangle_lines((x + cap_w) as i32, y as i32, body_w as i32, h as i32, outline);
+    d.draw_triangle_lines(tip[0], tip[1], tip[2], outline);
+    d.draw_rectangle_rounded_lines(cap, 0.5, 4, outline);
 }
 
 /// Author-requested: icon-only Eraser button — classic two-tone (pink cap /

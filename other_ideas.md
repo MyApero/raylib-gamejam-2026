@@ -64,17 +64,16 @@ shows a diagonal pencil (`draw_pencil_icon`) by default — the icon reflects
 which TOOL is active, not a static "click to erase" glyph — and swaps to
 the classic two-tone eraser icon plus a red outline (`draw_rectangle_lines_ex`)
 while erasing is on. Both `client/src/ui.rs`, shared by native + web.
-STILL UNCHECKED — reported invisible TWICE now. Round 1: widened
-half_w 3.0->4.5, brightened the tip, added a dark stroke. Round 2 (author
-still can't see it): re-verified the geometry by hand (non-degenerate,
-inside the button bounds, using the exact `draw_triangle` primitive that
-already works for the eraser/cursor/heart icons in this same file) and
-checked raylib's own `DrawTriangle` source for a culling explanation —
-found no code defect. Widened further as insurance (half_w 4.5->6.0,
-outline 1.5->2.0px) but flagging honestly: the leading explanation at this
-point is a stale build (native `cargo run` doesn't hot-reload; a web
-build needs a hard refresh past the browser cache) rather than a
-remaining code bug. Needs a fresh rebuild+restart before the next look.)
+STILL UNCHECKED — reported invisible THREE times. Round 1: widened
+half_w 3.0->4.5, brightened the tip, added a dark stroke. Round 2: widened
+further (half_w 6.0), still invisible after a confirmed hard-refreshed web
+reload (ruling out stale build/cache). Round 3: the common factor in both
+failures was a hand-rolled rotated-quad-via-two-triangles construction not
+used anywhere else in this codebase — rebuilt axis-aligned instead
+(horizontal pencil, not diagonal), reusing the exact
+`draw_rectangle_rounded`/`draw_triangle`/outline calls `draw_eraser_icon`
+already uses successfully. Removed the now-dead rotation helpers. Not yet
+re-confirmed by the author.)
 - [x] When Locked, border of the cursor should be thicker
 (Done: `draw_cursor`/`draw_cursor_scaled` take a `locked` flag and draw a
 3px (vs 1px) black outline when true — applied to your own cursor AND every
