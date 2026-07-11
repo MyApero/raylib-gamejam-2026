@@ -492,16 +492,19 @@ pub fn paint_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), Str
     Ok(())
 }
 
+/// Long-press-to-merge only ever takes from an ISLAND cell — margin tiles
+/// are deliberately not a color-discovery source (design ruling: the margin
+/// is a free pixel-war zone, not a place to farm unlocks; it's also
+/// everyone's to paint, so a tile there gets overwritten mid-gesture far
+/// more often than an island tile, which made the eyedropper feel broken in
+/// practice). `cell_kind` is kept as a parameter (rather than dropped) so
+/// the wire signature doesn't need to change if this is ever revisited.
 #[spacetimedb::reducer]
 pub fn merge_with_cell(ctx: &ReducerContext, cell_kind: u8, cell_id: u32) -> Result<(), String> {
     ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
     let (tile_hue, painter) = match cell_kind {
         0 => {
             let cell = ctx.db.island_cell().id().find(cell_id).ok_or("no such cell")?;
-            ((cell.color >> 16) as u16 & 0x1FF, cell.painted_by)
-        }
-        1 => {
-            let cell = ctx.db.margin_cell().id().find(cell_id).ok_or("no such cell")?;
             ((cell.color >> 16) as u16 & 0x1FF, cell.painted_by)
         }
         _ => return Err("invalid cell_kind".to_string()),

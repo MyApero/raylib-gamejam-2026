@@ -94,29 +94,20 @@ fn island_at(ctx: &DbConnection, world_q: i32, world_r: i32) -> Option<(Island, 
     None
 }
 
-/// The painted cell (if any) at absolute world axial `(q, r)`: island cell
-/// (`kind` 0) or margin cell (`kind` 1), with its row id and current hue.
-/// Snapshotted once at long-press start; only used for the merge target, so
-/// staleness is harmless — the server re-checks `tile_hue != me.hue` at
-/// call time and rejects a no-op merge either way.
+/// The painted island cell (if any) at absolute world axial `(q, r)`
+/// (`kind` 0, matching `merge_with_cell`'s wire signature), with its row id
+/// and current hue. Snapshotted once at long-press start; only used for the
+/// merge target, so staleness is harmless — the server re-checks
+/// `tile_hue != me.hue` at call time and rejects a no-op merge either way.
+/// Margin tiles are deliberately never a target — see the server-side
+/// comment on `merge_with_cell` (no color discovery from the margin).
 fn merge_target_at(ctx: &DbConnection, world_q: i32, world_r: i32) -> Option<(u8, u32, u16)> {
-    if let Some((island, lq, lr)) = island_at(ctx, world_q, world_r) {
-        return ctx
-            .db
-            .island_cell()
-            .iter()
-            .find(|c| c.island_id == island.id && c.q == lq && c.r == lr)
-            .map(|c| (0u8, c.id, world::unpack_hsv(c.color).0));
-    }
-    if !world::in_any_island_territory(world_q, world_r) {
-        return ctx
-            .db
-            .margin_cell()
-            .iter()
-            .find(|c| c.q == world_q && c.r == world_r)
-            .map(|c| (1u8, c.id, world::unpack_hsv(c.color).0));
-    }
-    None
+    let (island, lq, lr) = island_at(ctx, world_q, world_r)?;
+    ctx.db
+        .island_cell()
+        .iter()
+        .find(|c| c.island_id == island.id && c.q == lq && c.r == lr)
+        .map(|c| (0u8, c.id, world::unpack_hsv(c.color).0))
 }
 
 fn short_hex(id: Identity) -> String {

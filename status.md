@@ -7,7 +7,29 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F5 (web client parity) implemented in one batch: `ui.rs`
+**Current batch:** Author-caught fix on top of F5: long-press-to-merge on a
+margin tile didn't work — the tile's color got instantly overwritten by the
+ordinary paint-on-press before the 400ms hold timer could fire
+`merge_with_cell`, so by the time the merge landed the tile already matched
+the caller's own brush and the server correctly (but unhelpfully) rejected
+it as a no-op. **Design ruling (author):** rather than deferring the paint
+until release (workable but adds real complexity for a zone that's supposed
+to be low-stakes), margin tiles are no longer a color-discovery source at
+all — long-press-to-merge now only ever targets ISLAND cells.
+`merge_target_at` (native `main.rs` and `bin/web.rs`, kept identical) dropped
+its margin-cell branch entirely; `merge_with_cell` (`server/src/lib.rs`)
+dropped its `cell_kind == 1` arm, so a raw call bypassing the client is
+rejected the same way as any other invalid `cell_kind`. Margin tiles remain
+normally paintable by everyone, unaffected. `cargo build -p server`,
+`-p client --bin client --bin bot`, `cargo check --target
+wasm32-unknown-emscripten`, and `cargo build --workspace --exclude client`
+all clean. Republished non-destructively (`--delete-data=on-conflict`, no
+schema change). Not yet re-run live; not yet committed.
+**Blockers:** none.
+
+---
+
+**Previous batch:** F5 (web client parity) implemented in one batch: `ui.rs`
 made genuinely platform-clean (dropped its `spacetimedb_sdk::Identity`
 dependency — `HudInfo.me` replaced with a precomputed `short_id: &str`,
 supplied by `main.rs`/`web.rs` respectively), then `client/src/bin/web.rs`
@@ -473,3 +495,11 @@ Implementation notes:
 - `merge_with_cell`'s cell-color → hue unpack masks with `0x1FF` after the `>>16`
   shift; redundant given the packing layout (harmless, kept for clarity of intent
   that hue is 9 bits) — not a bug, just noting it's belt-and-suspenders.
+- **Design ruling superseding F4's margin-cell long-press support**: F4's
+  `merge_target_at` (see its notes above, "resolves to an `island_cell` or
+  `margin_cell` row") and F1's `merge_with_cell` originally accepted
+  `cell_kind == 1` (margin). Post-F5 hand-testing found this broken in
+  practice (ordinary paint-on-press overwrites a margin tile before a
+  long-press can fire) and the author ruled it out entirely rather than
+  patching around it — see the batch note at the top of this file. Margin is
+  no longer a long-press-merge target in either client or the server.

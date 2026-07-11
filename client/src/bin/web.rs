@@ -432,24 +432,19 @@ fn island_at(tables: &Tables, world_q: i32, world_r: i32) -> Option<(u32, i32, i
     })
 }
 
-/// The painted cell (if any) at absolute world axial `(q, r)`: island cell
-/// (`kind` 0) or margin cell (`kind` 1), with its row id and current hue.
+/// The painted island cell (if any) at absolute world axial `(q, r)`
+/// (`kind` 0, matching `merge_with_cell`'s wire signature), with its row id
+/// and current hue. Margin tiles are deliberately never a target — see the
+/// server-side comment on `merge_with_cell` (no color discovery from the
+/// margin; it's everyone's to paint, so a tile there gets overwritten
+/// mid-gesture far more often than an island tile).
 fn merge_target_at(tables: &Tables, world_q: i32, world_r: i32) -> Option<(u8, u32, u16)> {
-    if let Some((island_id, lq, lr)) = island_at(tables, world_q, world_r) {
-        return tables
-            .island_cells
-            .iter()
-            .find(|(_, c)| c.island_id == island_id && c.q == lq && c.r == lr)
-            .map(|(&id, c)| (0u8, id, world::unpack_hsv(c.color).0));
-    }
-    if !world::in_any_island_territory(world_q, world_r) {
-        return tables
-            .margin_cells
-            .iter()
-            .find(|(_, c)| c.q == world_q && c.r == world_r)
-            .map(|(&id, c)| (1u8, id, world::unpack_hsv(c.color).0));
-    }
-    None
+    let (island_id, lq, lr) = island_at(tables, world_q, world_r)?;
+    tables
+        .island_cells
+        .iter()
+        .find(|(_, c)| c.island_id == island_id && c.q == lq && c.r == lr)
+        .map(|(&id, c)| (0u8, id, world::unpack_hsv(c.color).0))
 }
 
 /// Display label for a merge partner in the "new color" toast: their name if
