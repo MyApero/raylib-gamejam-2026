@@ -902,11 +902,22 @@ pub fn disable_island_border(ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }
 
+/// Author-requested: the visibility toggle (Shown/Hidden) is now a separate
+/// action from "set border to current color", so re-showing a previously
+/// hidden border must not also clobber whatever `border_color` was set
+/// before it was hidden.
+#[spacetimedb::reducer]
+pub fn show_island_border(ctx: &ReducerContext) -> Result<(), String> {
+    let island = ctx.db.island().owner().find(ctx.sender()).ok_or("you do not own an island")?;
+    ctx.db.island().id().update(Island { border_hidden: false, ..island });
+    Ok(())
+}
+
 /// F9: credit an island's owner with `XP_LINK_CLICK` the first time a given
 /// clicker opens its itch.io rate link; later re-opens by the same clicker
 /// are free (no repeat XP) via the `island_link_click` dedupe row. Self-clicks
-/// are rejected — the popup never renders a clickable link for the owner's
-/// own island either, this is the server-side backstop for a raw call.
+/// are rejected — the popup's own-island link opens the URL directly without
+/// calling this reducer, so this check is the server-side backstop for a raw call.
 #[spacetimedb::reducer]
 pub fn click_link(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
     let island = ctx.db.island().id().find(island_id).ok_or("unknown island")?;
@@ -1027,11 +1038,11 @@ pub fn rerank_warn(ctx: &ReducerContext, _arg: RerankWarnSchedule) -> Result<(),
 /// F8 re-rank, step 2/2 (one-shot, fired by `rerank_warn`): re-sorts islands
 /// by likes desc, then painted-tile count desc (author-requested: the
 /// "hidden leaderboard" — Hexaworld.md — should reward active painters, not
-/// just liked ones), ties by `created_at`, and rewrites `island.slot`
-/// accordingly. Slot 0 (reserved for the P2/F10 admin island) is never
-/// touched — only slots 1.. are re-sorted. Cell coordinates are
-/// island-relative, so moving an island is just this one row write; no
-/// island_cell/margin_cell row ever needs to change.
+/// just liked ones), then owner name asc (author-requested), ties finally by
+/// `created_at`, and rewrites `island.slot` accordingly. Slot 0 (reserved for
+/// the P2/F10 admin island) is never touched — only slots 1.. are re-sorted.
+/// Cell coordinates are island-relative, so moving an island is just this one
+/// row write; no island_cell/margin_cell row ever needs to change.
 #[spacetimedb::reducer]
 pub fn rerank_fire(ctx: &ReducerContext, _arg: RerankFireSchedule) -> Result<(), String> {
     if ctx.sender() != ctx.database_identity() {
@@ -1044,11 +1055,17 @@ pub fn rerank_fire(ctx: &ReducerContext, _arg: RerankFireSchedule) -> Result<(),
     for cell in ctx.db.island_cell().iter() {
         *tile_counts.entry(cell.island_id).or_insert(0) += 1;
     }
+    // Every player gets a random name at first connect (server-side, see
+    // `player_label` in the client), so this is empty only in the
+    // theoretical case of a still-unnamed owner.
+    let names: HashMap<Identity, String> =
+        ctx.db.user().iter().map(|u| (u.identity, u.name.clone().unwrap_or_default())).collect();
     let mut ranked: Vec<Island> = ctx.db.island().iter().filter(|i| i.slot != 0).collect();
     ranked.sort_by(|a, b| {
         b.likes
             .cmp(&a.likes)
             .then_with(|| tile_counts.get(&b.id).unwrap_or(&0).cmp(tile_counts.get(&a.id).unwrap_or(&0)))
+            .then_with(|| names.get(&a.owner).cmp(&names.get(&b.owner)))
             .then_with(|| a.created_at.cmp(&b.created_at))
     });
     // `slot` is `#[unique]`, so a direct permutation could momentarily

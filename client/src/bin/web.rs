@@ -562,6 +562,24 @@ fn already_liked(tables: &Tables, island_id: u32, me: &str) -> bool {
     tables.island_likes.values().any(|l| l.island_id == island_id && l.liker_hex == me)
 }
 
+/// Author-requested: mirrors `main.rs`'s `resolve_border_color` — what an
+/// island's border currently resolves to, ignoring `border_hidden` (the
+/// custom pin, or the seed-hue default when unset). Feeds the "Set border to
+/// current color" popup preview swatch.
+fn resolve_border_color(tables: &Tables, island: &IslandRow) -> Color {
+    if let Some(packed) = island.border_color {
+        let (h, s, v) = world::unpack_hsv(packed);
+        world::hsv_color(h, s, v)
+    } else {
+        let seed_hue = tables
+            .inventory
+            .values()
+            .find(|inv| inv.owner_hex == island.owner_hex && inv.obtained_with_hex.is_none())
+            .map(|inv| inv.hue);
+        world::hsv_color(seed_hue.unwrap_or(0), 40, 100)
+    }
+}
+
 /// F8: mirrors `main.rs`'s `open_island_info`, reading from the local
 /// `Tables` cache instead of `ctx.db`.
 fn open_island_info(state: &mut State, island_id: u32) {
@@ -575,7 +593,8 @@ fn open_island_info(state: &mut State, island_id: u32) {
     let age_label = format_age(state.now_micros, island.created_at_micros);
     let already_liked = me.is_some_and(|me| already_liked(&state.tables, island_id, me));
     let border_hidden = island.border_hidden;
-    state.ui_state.open_island_info(ui::IslandInfo { island_id, owner_label, likes, age_label, link_id, is_own, already_liked, border_hidden });
+    let border_color = resolve_border_color(&state.tables, island);
+    state.ui_state.open_island_info(ui::IslandInfo { island_id, owner_label, likes, age_label, link_id, is_own, already_liked, border_hidden, border_color });
 }
 
 /// In-flight long-press-to-merge gesture — mirrors `main.rs`'s `LongPress`.
@@ -729,10 +748,10 @@ fn frame(state: &mut State) {
                     state.camera.zoom = to_zoom;
                     state.centered_on_island = true;
                 } else {
-                    // Ease-in-out-circ: slow start, fast middle, gentle
+                    // Ease-in-out-cubic: slow start, fast middle, gentle
                     // landing (author-requested, other_ideas.md; mirrors
                     // `main.rs`).
-                    let ease = world::ease_in_out_circ(t);
+                    let ease = world::ease_in_out_cubic(t);
                     state.camera.target = Vector2::new(
                         from_target.x + (to_target.x - from_target.x) * ease,
                         from_target.y + (to_target.y - from_target.y) * ease,
@@ -826,7 +845,8 @@ fn frame(state: &mut State) {
             if let Some(island) = state.tables.islands.get(&island_id) {
                 let likes = island.likes;
                 let liked = already_liked(&state.tables, island_id, me);
-                state.ui_state.refresh_island_popup(likes, liked, island.border_hidden);
+                let border_color = resolve_border_color(&state.tables, island);
+                state.ui_state.refresh_island_popup(likes, liked, island.border_hidden, border_color);
             }
         }
 
@@ -889,6 +909,9 @@ fn frame(state: &mut State) {
         if actions.disable_island_border {
             call_reducer("disable_island_border", serde_json::json!([]));
         }
+        if actions.show_island_border {
+            call_reducer("show_island_border", serde_json::json!([]));
+        }
         if let Some((island_id, rate_id)) = actions.click_link {
             // plan.md F9: web opens the rate page via `window.open`, unlike
             // native's `OpenURL` — JSON-escaped the same way `call_reducer`
@@ -898,6 +921,11 @@ fn frame(state: &mut State) {
             let js_url = serde_json::to_string(&url).unwrap();
             run_js(&format!("window.open({js_url}, '_blank')"));
             call_reducer("click_link", serde_json::json!([island_id]));
+        }
+        if let Some(rate_id) = actions.open_own_link {
+            let url = format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}");
+            let js_url = serde_json::to_string(&url).unwrap();
+            run_js(&format!("window.open({js_url}, '_blank')"));
         }
         // Author-requested: footer button replacing the old "click your own
         // island" gesture, which just painted instead of opening the popup.
@@ -1400,11 +1428,13 @@ fn frame(state: &mut State) {
     {
         world::draw_hold_ring(&mut d, mouse_screen, frac);
     }
-    // Author-requested: stacked with the FPS counter at the bottom right
-    // (was bottom-left, on its own) so both debug readouts live in one
-    // corner instead of opposite ones.
-    d.draw_text(&format!("ws: {}", state.ws_status), 640, 682, 12, Color::new(120, 120, 130, 200));
-    d.draw_fps(640, 700);
+    // Author-requested: moved into the header band (top of screen, between
+    // the level/xp readout and the online count) instead of the footer's
+    // bottom-right corner — drawn here rather than inside `ui::draw_header`
+    // so both stay visible even before `me`/the HUD itself exists (e.g.
+    // while the socket is still connecting).
+    d.draw_text(&format!("ws: {}", state.ws_status), 300, 8, 13, Color::new(140, 140, 148, 220));
+    d.draw_fps(440, 4);
 }
 
 fn main() {

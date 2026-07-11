@@ -746,17 +746,28 @@ submitted, and only if the freeze window rule still allows a redeploy.
   SHIPPED (2026-07-11, author override of the note below — deliberately landed
   despite it). `Island.border_color: Option<u32>` (packed HSV, appended after
   `created_at` so `bin/web.rs`'s positional row parsing didn't shift) +
-  `Island.border_hidden: bool`. Two reducers: `set_island_border` (pins the border
-  to the caller's CURRENT brush color, also un-hides it) and `disable_island_border`
-  (hides it, `border_color` left untouched). Client-side precedence in both
-  `main.rs` and `bin/web.rs`: `border_hidden` → nothing drawn; else `border_color`
-  if set; else the pre-existing seed-hue default. UI: two new buttons ("Set border
-  to current color" / "Disable border") + a status line in the own-island popup
-  (`ui.rs`, below the link editor). Verified via `spacetime call` against the local
-  instance (not the GUI client, per the author's testing protocol): `set_island_border`
-  packs `(hue, sat, val)` correctly, `disable_island_border` preserves `border_color`
-  while flipping `border_hidden`, re-running `set_island_border` un-hides. NOT yet
-  published to the production VPS — that publish is a separate, explicit step for
-  the author to trigger. Original deferral note, kept for context: "per-island
+  `Island.border_hidden: bool`. Three reducers: `set_island_border` (pins the border
+  to the caller's CURRENT brush color, also un-hides it), `disable_island_border`
+  (hides it, `border_color` left untouched), and `show_island_border` (author
+  follow-up, 2026-07-11: un-hides WITHOUT touching `border_color` — added once the
+  popup UI split "set the color" and "toggle visibility" into two independent
+  buttons, so re-showing a border must not silently repin its color). Client-side
+  precedence in both `main.rs` and `bin/web.rs`: `border_hidden` → nothing drawn;
+  else `border_color` if set; else the pre-existing seed-hue default. UI (author
+  follow-up, same date): the old two-button-plus-status-line layout became a single
+  "Border: Shown"/"Border: Hidden" toggle (red-tinted while hidden, same language as
+  the footer's lock button) plus a "Set border to:" button that previews the pending
+  change as `[current border swatch] -> [current cursor swatch]` instead of a bare
+  label — `IslandInfo.border_color: Color` (precomputed by the caller, main.rs's
+  `resolve_border_color`/web.rs's mirror) and `draw_island_popup` now also takes
+  `&HudInfo` for the live brush color. Verified via `spacetime call`/`cargo build`
+  against the local instance (not the GUI client, per the author's testing
+  protocol): `set_island_border` packs `(hue, sat, val)` correctly,
+  `disable_island_border` preserves `border_color` while flipping `border_hidden`,
+  re-running `set_island_border` un-hides; `show_island_border` called clean
+  (exit 0) against a real owned island. `cargo build -p server`/`-p client --bin
+  client` and `./build-web.sh` all clean after the follow-up. NOT yet published to
+  the production VPS — that publish is a separate, explicit step for the author to
+  trigger. Original deferral note, kept for context: "per-island
   schema field + picker UI — a full publish/regen/mirror cycle for pure cosmetics.
   Post-voting redeploy candidate; not worth a schema cycle before the freeze."

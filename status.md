@@ -7,7 +7,52 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** Backlog item, author override (2026-07-11) — "Customise
+**Current batch:** Author follow-up on the border-customization feature
+(same day, 2026-07-11) — "cleaner way to change Isle border": a single
+"Border: Shown/Hidden" toggle instead of the separate status line + "Disable
+border" button, and "Set border to current color" should preview the
+pending change as `[current border color] -> [current cursor color]`
+instead of a bare label.
+
+1. **New reducer `show_island_border`** — the old toggle idea (re-showing =
+   just call `set_island_border` again) would have silently repinned
+   `border_color` to the current brush every time a player un-hid their
+   border, which isn't what "Shown/Hidden" implies. Added a reducer that
+   only flips `border_hidden` back to `false`, leaving `border_color`
+   untouched — mirrors `disable_island_border`'s "find caller's own island,
+   update one field" shape.
+2. **Client wiring, both targets** — `ui.rs`: `IslandInfo.border_color: Color`
+   (the resolved display color — custom pin else seed-hue default — same
+   fallback the map-render code already uses); `Actions::show_island_border`;
+   `border_disable_btn_rect` renamed `border_toggle_btn_rect`, now fires
+   `show_island_border` or `disable_island_border` depending on
+   `popup.border_hidden`, with its own label carrying the state ("Border:
+   Shown"/"Border: Hidden", red-tinted while hidden) — the separate status
+   line is gone. `border_set_btn_rect`'s button now draws two 16px swatches
+   with a `->` between them (border color, then the live brush color via
+   `world::hsv_color(info.brush...)`), so `draw_island_popup` gained an
+   `&HudInfo` parameter it didn't need before. `main.rs`/`bin/web.rs`: new
+   `resolve_border_color` helper (mirrored in both) computes the swatch color
+   at `open_island_info`/`refresh_island_popup` time from `island.border_color`
+   or a same-owner inventory scan for the seed hue; both reducer-dispatch
+   blocks gained the `show_island_border` arm.
+
+**Verify status:** `cargo build -p server`, `-p client --bin client`, and
+`./build-web.sh` all clean (web package still ~1MB total, nowhere near the
+64MB cap). `spacetime call hexmerge show_island_border -s local` against the
+local instance returned clean (exit 0, no reducer error) for an identity that
+genuinely owns an island — VERIFIED the reducer runs and the ownership check
+passes; did not re-verify the packed-color-untouched behavior with a fresh
+`set_island_border` → `disable_island_border` → `show_island_border` →
+inspect-row sequence this round (REASONED only, by code trace — the
+underlying update pattern is identical to the already-VERIFIED
+`disable_island_border`/`set_island_border` pair from the batch below, just
+with `border_hidden: false` in place of `true` and no `border_color` touch).
+The swatch-preview UI itself is REASONED, not yet author-hand-tested through
+the actual GUI, per the standing protocol. NOT published to the production
+VPS.
+
+**Previous batch:** Backlog item, author override (2026-07-11) — "Customise
 your Isle border color or make it transparent (remove)". `other_ideas.md`
 and plan.md's own backlog entry had deferred this as "not worth a schema
 cycle before the freeze" (submission is 2026-07-12 18:00 UTC); asked the

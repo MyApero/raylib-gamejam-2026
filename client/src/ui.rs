@@ -153,9 +153,16 @@ pub struct IslandInfo {
     pub is_own: bool,
     pub already_liked: bool,
     /// Author-requested: whether the island's border is currently hidden
-    /// (`disable_island_border`) — drives the popup's button labels/status
-    /// line. Only meaningful when `is_own`.
+    /// (`disable_island_border`) — drives the popup's toggle button. Only
+    /// meaningful when `is_own`.
     pub border_hidden: bool,
+    /// Author-requested: the border's current color — whatever `border_color`
+    /// resolves to (the custom pin, or the seed-hue default when unset),
+    /// regardless of `border_hidden`. Precomputed by the caller (same
+    /// fallback the map-render code uses) so this module stays free of the
+    /// packed-HSV/seed-hue lookup. Drives the "Set border to current color"
+    /// button's before/after preview swatch. Only meaningful when `is_own`.
+    pub border_color: Color,
 }
 
 impl UiState {
@@ -220,11 +227,12 @@ impl UiState {
     /// moment it opened — nothing ever told it the reducer had landed).
     /// Called every frame the popup is open, same as `HudInfo` is rebuilt
     /// fresh from server state every frame elsewhere in this module.
-    pub fn refresh_island_popup(&mut self, likes: u32, already_liked: bool, border_hidden: bool) {
+    pub fn refresh_island_popup(&mut self, likes: u32, already_liked: bool, border_hidden: bool, border_color: Color) {
         if let Some(popup) = &mut self.island_popup {
             popup.likes = likes;
             popup.already_liked = already_liked;
             popup.border_hidden = border_hidden;
+            popup.border_color = border_color;
         }
     }
 
@@ -366,66 +374,88 @@ pub struct Actions {
     /// The caller opens the URL AND fires `click_link` for XP; both use the
     /// same click, see the popup's link-row hit test.
     pub click_link: Option<(u32, u32)>,
+    /// The "Your link" row in the caller's own island popup was clicked.
+    /// Opens the URL only — `click_link` is deliberately NOT fired here, the
+    /// server rejects self-clicks (see `click_link`'s reducer doc comment).
+    pub open_own_link: Option<u32>,
     /// Author-requested: pin the caller's own island's border to their
     /// current brush color (and un-hide it if it was disabled).
     pub set_island_border: bool,
     /// Author-requested: hide the caller's own island's border entirely.
+    /// Fired by the popup's Border: Shown/Hidden toggle when currently shown.
     pub disable_island_border: bool,
+    /// Author-requested: re-show a previously hidden border WITHOUT touching
+    /// `border_color` — fired by the same toggle button when currently
+    /// hidden. Kept distinct from `set_island_border`, which also repins the
+    /// color to the current brush.
+    pub show_island_border: bool,
 }
 
 fn footer_bg() -> Rectangle {
     Rectangle::new(0.0, SCREEN_H - FOOTER_H, SCREEN_W, FOOTER_H)
 }
 
-/// Author-requested: icon-only (a "recenter"/geolocation glyph, see
-/// `draw_locate_icon`) rather than a text button — narrower than the old
-/// "Center" label, and the width it gave up shifted into `inventory_btn_rect`
-/// below (its right edge at 238 is unchanged; only its left edge moved).
-fn center_btn_rect() -> Rectangle {
-    Rectangle::new(8.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
-}
+/// Padding from the screen's left/right edges for the two buttons now
+/// pinned to the footer's outer corners (`inventory_btn_rect`/"Colors" on
+/// the left, `center_btn_rect`/"Centre" on the right).
+const FOOTER_EDGE_PAD: f32 = 8.0;
 
-fn last3_rect(i: usize) -> Rectangle {
-    Rectangle::new(46.0 + i as f32 * 34.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
-}
-
-/// Author-requested: widened using the width `center_btn_rect` gave up when
-/// it went icon-only — right edge (238) unchanged, so nothing to its right
-/// needed to move.
+/// Author-requested: "Colors" now anchors the very bottom-left corner of
+/// the footer (previously it sat mid-cluster, right of `center_btn_rect`).
 fn inventory_btn_rect() -> Rectangle {
-    Rectangle::new(150.0, SCREEN_H - FOOTER_H + 7.0, 88.0, 30.0)
+    Rectangle::new(FOOTER_EDGE_PAD, SCREEN_H - FOOTER_H + 7.0, 88.0, 30.0)
+}
+
+/// Author-requested: icon-only (a "recenter"/geolocation glyph, see
+/// `draw_locate_icon`), now anchors the very bottom-right corner of the
+/// footer (previously it was the leftmost button in the cluster).
+fn center_btn_rect() -> Rectangle {
+    Rectangle::new(SCREEN_W - FOOTER_EDGE_PAD - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
+}
+
+/// Author-requested: the name field is centered on screen, with the last-3
+/// swatches/eraser/lock built outward to its left (see below). Account/My
+/// Isle no longer flank it — they now sit next to `center_btn_rect` instead.
+fn name_field_rect() -> Rectangle {
+    let w = 150.0;
+    Rectangle::new((SCREEN_W - w) / 2.0, SCREEN_H - FOOTER_H + 7.0, w, 30.0)
 }
 
 /// Author-requested: icon-only (see `draw_footer`), sitting directly left of
 /// the name field.
-fn eraser_btn_rect() -> Rectangle {
-    Rectangle::new(246.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
-}
-
-/// Author-requested: icon-only (see `draw_footer`), left of the name field,
-/// right next to the eraser toggle.
 fn lock_btn_rect() -> Rectangle {
-    Rectangle::new(280.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
+    let nf = name_field_rect();
+    Rectangle::new(nf.x - 8.0 - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
 }
 
-/// Author-requested: narrower than before now that the eraser/lock icons
-/// moved to its left.
-fn name_field_rect() -> Rectangle {
-    Rectangle::new(318.0, SCREEN_H - FOOTER_H + 7.0, 150.0, 30.0)
+/// Author-requested: icon-only (see `draw_footer`), left of the lock toggle.
+fn eraser_btn_rect() -> Rectangle {
+    let lb = lock_btn_rect();
+    Rectangle::new(lb.x - 4.0 - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
 }
 
-/// Author-requested: trimmed from 80 to 60 wide (its label fits fine).
-fn account_btn_rect() -> Rectangle {
-    Rectangle::new(478.0, SCREEN_H - FOOTER_H + 7.0, 60.0, 30.0)
+fn last3_rect(i: usize) -> Rectangle {
+    let eb = eraser_btn_rect();
+    let group_x0 = eb.x - 8.0 - (2.0 * 34.0 + 30.0);
+    Rectangle::new(group_x0 + i as f32 * 34.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
 }
 
 /// Author-requested: a footer button to open the caller's own island-info
 /// popup, replacing the old "click your own island" gesture (which just
 /// painted the cell it was released on, so the popup never actually showed).
-/// Trimmed from 72 to 56 wide and shifted left to sit right after the
-/// now-narrower Account button, alongside `account_btn_rect`'s own trim.
+/// Now sits directly left of `center_btn_rect` rather than next to the name
+/// field.
 fn my_island_btn_rect() -> Rectangle {
-    Rectangle::new(546.0, SCREEN_H - FOOTER_H + 7.0, 56.0, 30.0)
+    let cb = center_btn_rect();
+    Rectangle::new(cb.x - 8.0 - 56.0, SCREEN_H - FOOTER_H + 7.0, 56.0, 30.0)
+}
+
+/// Author-requested: trimmed from 80 to 60 wide (its label fits fine); now
+/// sits left of `my_island_btn_rect`, both grouped next to the Centre
+/// button instead of next to the name field.
+fn account_btn_rect() -> Rectangle {
+    let mb = my_island_btn_rect();
+    Rectangle::new(mb.x - 8.0 - 60.0, SCREEN_H - FOOTER_H + 7.0, 60.0, 30.0)
 }
 
 fn overlay_rect() -> Rectangle {
@@ -488,26 +518,49 @@ fn reset_btn_rect() -> Rectangle {
     Rectangle::new(o.x + 20.0, o.y + 280.0, 240.0, 36.0)
 }
 
-/// F9: own-island popup only — numeric input for the itch.io rate id.
+/// F9: own-island popup only — numeric input for the itch.io rate id. Fills
+/// the row's full width now that there's no separate Set button (submits
+/// automatically as you type, see `handle_input`).
 fn link_edit_rect() -> Rectangle {
     let o = overlay_rect();
-    Rectangle::new(o.x + 20.0, o.y + 180.0, 200.0, 32.0)
+    Rectangle::new(o.x + 20.0, o.y + 180.0, 310.0, 32.0)
 }
 
-fn link_set_btn_rect() -> Rectangle {
+/// Own-island popup only — the "Your link" row, clickable once a link is
+/// set (see `handle_input`'s own-popup block).
+fn link_row_rect() -> Rectangle {
     let o = overlay_rect();
-    Rectangle::new(o.x + 230.0, o.y + 180.0, 100.0, 32.0)
+    Rectangle::new(o.x + 20.0, o.y + 130.0, 320.0, 20.0)
+}
+
+/// Author-requested: itch.io jam rate ids are always 7 digits — `Some` only
+/// at exactly that length, `None` if shorter or longer. This is the "Your
+/// link" row's clickable/blue condition; red covers the rest, grey is the
+/// separate empty-field case (see `draw_island_popup`). Checked against the
+/// live edit field rather than the server-confirmed id, so it turns blue
+/// the instant the 7th digit is typed instead of waiting on a round-trip.
+fn typed_link_id(state: &UiState) -> Option<u32> {
+    let typed = state.link_edit_input.trim();
+    if typed.len() != 7 {
+        return None;
+    }
+    typed.parse().ok()
 }
 
 /// Author-requested: own-island popup only — pin the border to the caller's
-/// current brush color.
+/// current brush color. Draws a before (border) `->` after (cursor) preview,
+/// see `draw_island_popup`.
 fn border_set_btn_rect() -> Rectangle {
     let o = overlay_rect();
-    Rectangle::new(o.x + 20.0, o.y + 230.0, 290.0, 36.0)
+    Rectangle::new(o.x + 20.0, o.y + 230.0, 250.0, 36.0)
 }
 
-/// Author-requested: own-island popup only — hide the border entirely.
-fn border_disable_btn_rect() -> Rectangle {
+/// Author-requested: own-island popup only — toggles the border between
+/// shown and hidden, independent of `border_set_btn_rect`'s color pin. Label
+/// reads "Border: Shown"/"Border: Hidden" so the button's own text carries
+/// the state, replacing the old separate status line + "Disable border"
+/// button.
+fn border_toggle_btn_rect() -> Rectangle {
     let o = overlay_rect();
     Rectangle::new(o.x + 320.0, o.y + 230.0, 220.0, 36.0)
 }
@@ -684,6 +737,8 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             state.pending_select = Some(hue);
             state.note_used_hue(hue);
         }
+        // Picking a color implies you want to paint with it, not erase.
+        state.eraser_on = false;
     }
     if clicked && point_in(mouse, inventory_btn_rect()) {
         state.overlay_open = !state.overlay_open;
@@ -829,35 +884,53 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 state.island_popup = None;
                 return actions;
             }
+            // Author-requested: once the typed id is a well-formed 7-digit
+            // itch.io rate id (blue, not red/grey — see `typed_link_id`),
+            // the "Your link" row itself opens it. Same click gesture as a
+            // foreign island's link row, but `click_link` is deliberately
+            // not fired (the server rejects self-clicks; see that reducer's
+            // doc comment).
+            if let Some(id) = typed_link_id(state) {
+                if clicked && point_in(mouse, link_row_rect()) {
+                    actions.open_own_link = Some(id);
+                }
+            }
             // F9: own-island link editing — digits only (it's a numeric
             // itch.io submission id), same Ctrl+V-friendly typing as the
-            // Account overlay's token import field.
+            // Account overlay's token import field. Author-requested: no
+            // more Set button — every keystroke that changes the buffer
+            // submits immediately if it parses, so the id just stays live.
             let field = link_edit_rect();
             if clicked {
                 state.link_edit_focused = point_in(mouse, field);
             }
             if state.link_edit_focused {
+                let mut changed = false;
                 while let Some(c) = rl.get_char_pressed() {
                     if c.is_ascii_digit() && state.link_edit_input.len() < 10 {
                         state.link_edit_input.push(c);
+                        changed = true;
                     }
                 }
                 if rl.is_key_pressed(KeyboardKey::KEY_BACKSPACE) {
                     state.link_edit_input.pop();
+                    changed = true;
                 }
-            }
-            let submit = (clicked && point_in(mouse, link_set_btn_rect()))
-                || (state.link_edit_focused && rl.is_key_pressed(KeyboardKey::KEY_ENTER));
-            if submit {
-                if let Ok(id) = state.link_edit_input.trim().parse::<u32>() {
-                    actions.set_island_link = Some(id);
+                if changed {
+                    if let Ok(id) = state.link_edit_input.trim().parse::<u32>() {
+                        actions.set_island_link = Some(id);
+                    }
                 }
             }
             if clicked && point_in(mouse, border_set_btn_rect()) {
                 actions.set_island_border = true;
             }
-            if clicked && point_in(mouse, border_disable_btn_rect()) {
-                actions.disable_island_border = true;
+            if clicked && point_in(mouse, border_toggle_btn_rect()) {
+                if popup.border_hidden {
+                    actions.show_island_border = true;
+                } else {
+                    actions.disable_island_border = true;
+                }
             }
         }
         return actions;
@@ -890,15 +963,19 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     for (i, &hue) in sorted_hues(info).iter().enumerate() {
         // Re-clicking the ALREADY-selected tile is a no-op — see the last-3
         // click handler above for why (would wipe out a live Hue nudge).
-        if clicked && point_in(mouse, swatch_rect(i)) && hue != state.base_hue {
-            // Restore THIS color's own remembered sat/val (F-request: tied
-            // per color) rather than carrying over whatever the sliders were
-            // last left at from a different swatch.
-            let (sat, val) = state.tile_hsl(hue);
-            actions.set_brush = Some((hue, sat.min(info.sat_cap), val));
-            state.base_hue = hue;
-            state.pending_select = Some(hue);
-            state.note_used_hue(hue);
+        if clicked && point_in(mouse, swatch_rect(i)) {
+            if hue != state.base_hue {
+                // Restore THIS color's own remembered sat/val (F-request: tied
+                // per color) rather than carrying over whatever the sliders were
+                // last left at from a different swatch.
+                let (sat, val) = state.tile_hsl(hue);
+                actions.set_brush = Some((hue, sat.min(info.sat_cap), val));
+                state.base_hue = hue;
+                state.pending_select = Some(hue);
+                state.note_used_hue(hue);
+            }
+            // Picking a color implies you want to paint with it, not erase.
+            state.eraser_on = false;
         }
     }
 
@@ -959,12 +1036,14 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         draw_account_overlay(d, state, info);
     } else if let Some(popup) = &state.island_popup {
         if popup.is_own {
-            draw_island_popup(d, state, popup);
+            draw_island_popup(d, state, popup, info);
         } else {
             draw_island_tooltip(d, popup, mouse);
         }
     } else if state.help_open {
         draw_help_overlay(d);
+    } else if let Some(title) = hovered_last3_title(state, mouse) {
+        draw_button_tooltip(d, title, &[], mouse);
     } else if let Some((title, lines)) = hovered_button_tooltip(mouse) {
         draw_button_tooltip(d, title, lines, mouse);
     }
@@ -982,7 +1061,7 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
 /// line, likes, age, and the link edit field/button. Full modal treatment
 /// (backdrop, close button) since it has real form controls to interact
 /// with, unlike the foreign-island case.
-fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInfo) {
+fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInfo, info: &HudInfo) {
     d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
 
     let o = overlay_rect();
@@ -1004,37 +1083,55 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
     d.draw_text(&format!("{}", popup.likes), o.x as i32 + 44, o.y as i32 + 78, 16, Color::RAYWHITE);
     d.draw_text(&format!("Created {}", popup.age_label), o.x as i32 + 20, o.y as i32 + 106, 16, Color::LIGHTGRAY);
 
-    let link_label = match popup.link_id {
-        Some(id) => format!("Your link: itch.io rate #{id}"),
-        None => "Your link: not set".to_string(),
+    // Author-requested: live-updates from the edit field as you type. Grey
+    // while empty, blue (same link color as the foreign-island tooltip's
+    // "Linked: ..." line) the instant it's a well-formed 7-digit itch.io
+    // rate id — and therefore clickable — red while shorter or longer, so
+    // it's clear clicking wouldn't currently go anywhere.
+    let typed = state.link_edit_input.trim();
+    let (link_label, link_color) = if typed.is_empty() {
+        ("Your link: not set".to_string(), Color::LIGHTGRAY)
+    } else if typed_link_id(state).is_some() {
+        (format!("Your link: itch.io rate #{typed}"), Color::new(120, 180, 255, 255))
+    } else {
+        (format!("Your link: itch.io rate #{typed}"), Color::new(220, 90, 90, 255))
     };
-    d.draw_text(&link_label, o.x as i32 + 20, o.y as i32 + 132, 16, Color::LIGHTGRAY);
+    d.draw_text(&link_label, o.x as i32 + 20, o.y as i32 + 132, 16, link_color);
     d.draw_text("Set your itch.io rate id:", o.x as i32 + 20, o.y as i32 + 162, 14, Color::LIGHTGRAY);
 
+    // Author-requested: no Set button — typing submits automatically (see
+    // `handle_input`), so the field just fills the row.
     let field = link_edit_rect();
     d.draw_rectangle_rec(field, Color::new(28, 28, 34, 255));
     d.draw_rectangle_lines_ex(field, 1.0, if state.link_edit_focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
     let shown = if state.link_edit_input.is_empty() && !state.link_edit_focused { "e.g. 123456" } else { &state.link_edit_input };
     d.draw_text(shown, field.x as i32 + 6, field.y as i32 + 7, 14, Color::RAYWHITE);
 
-    let sb = link_set_btn_rect();
-    d.draw_rectangle_rec(sb, Color::new(40, 40, 48, 255));
-    d.draw_text("Set", sb.x as i32 + 34, sb.y as i32 + 9, 14, Color::RAYWHITE);
-
-    // Author-requested: pin the border to the current brush color, or hide
-    // it entirely. The disable button is highlighted red while active, same
-    // "active state is a color change, not just a label" language as the
-    // footer's lock button.
-    let border_status = if popup.border_hidden { "Border: hidden" } else { "Border: on" };
-    d.draw_text(border_status, o.x as i32 + 20, o.y as i32 + 214, 14, Color::LIGHTGRAY);
-
+    // Author-requested: pin the border to the current brush color, or toggle
+    // it shown/hidden — two separate actions now, so un-hiding never
+    // silently repins the color. "Set border to current color" previews the
+    // change as [current border] -> [current cursor] rather than a bare
+    // label, so the player can see what they're about to commit to before
+    // clicking. The toggle button's own label carries the state (no separate
+    // status line), highlighted red while hidden, same "active state is a
+    // color change" language as the footer's lock button.
     let setb = border_set_btn_rect();
     d.draw_rectangle_rec(setb, Color::new(40, 40, 48, 255));
-    d.draw_text("Set border to current color", setb.x as i32 + 10, setb.y as i32 + 10, 14, Color::RAYWHITE);
+    d.draw_text("Set border:", setb.x as i32 + 10, setb.y as i32 + 11, 14, Color::RAYWHITE);
+    let swatch = 16.0;
+    let sw1 = Rectangle::new(setb.x + 168.0, setb.y + (setb.height - swatch) / 2.0, swatch, swatch);
+    d.draw_rectangle_rec(sw1, popup.border_color);
+    d.draw_rectangle_lines_ex(sw1, 1.0, Color::new(90, 90, 96, 255));
+    d.draw_text("->", sw1.x as i32 + 20, setb.y as i32 + 11, 14, Color::LIGHTGRAY);
+    let cursor_color = world::hsv_color(info.brush.0, info.brush.1, info.brush.2);
+    let sw2 = Rectangle::new(sw1.x + 40.0, sw1.y, swatch, swatch);
+    d.draw_rectangle_rec(sw2, cursor_color);
+    d.draw_rectangle_lines_ex(sw2, 1.0, Color::new(90, 90, 96, 255));
 
-    let disb = border_disable_btn_rect();
-    d.draw_rectangle_rec(disb, if popup.border_hidden { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
-    d.draw_text("Disable border", disb.x as i32 + 24, disb.y as i32 + 10, 14, Color::RAYWHITE);
+    let tgb = border_toggle_btn_rect();
+    d.draw_rectangle_rec(tgb, if popup.border_hidden { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
+    let toggle_label = if popup.border_hidden { "Border: Hidden" } else { "Border: Shown" };
+    d.draw_text(toggle_label, tgb.x as i32 + 24, tgb.y as i32 + 10, 14, Color::RAYWHITE);
 }
 
 const TOOLTIP_W: f32 = 220.0;
@@ -1057,6 +1154,17 @@ const BUTTON_TOOLTIPS: &[(fn() -> Rectangle, &str, &[&str])] = &[
 
 fn hovered_button_tooltip(mouse: Vector2) -> Option<(&'static str, &'static [&'static str])> {
     BUTTON_TOOLTIPS.iter().find(|&&(rect_fn, _, _)| point_in(mouse, rect_fn())).map(|&(_, title, lines)| (title, lines))
+}
+
+/// Author-requested: the footer's last-3 swatches (`UiState::last3`, most-
+/// recently-used first, see its doc comment) get their own hover title —
+/// "Last color used" for the newest, "Last last ..." for the one before,
+/// "Last last last ..." for the oldest of the three — instead of being
+/// silently excluded like the name field.
+const LAST3_TITLES: [&str; 3] = ["Last color used", "Last last color used", "Last last last color used"];
+
+fn hovered_last3_title(state: &UiState, mouse: Vector2) -> Option<&'static str> {
+    LAST3_TITLES.iter().enumerate().find(|&(i, _)| i < state.last3.len() && point_in(mouse, last3_rect(i))).map(|(_, &t)| t)
 }
 
 /// Same tooltip visual language as `draw_island_tooltip` (small, glued near
@@ -1182,13 +1290,10 @@ fn draw_toast(d: &mut impl RaylibDraw, toast: &Toast, info: &HudInfo) {
 
 fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo) {
     d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, HEADER_H), Color::new(10, 10, 14, 235));
-    d.draw_text(
-        &format!("{}   Lv{}  {}xp", info.short_id, info.level, info.xp),
-        10,
-        6,
-        16,
-        Color::RAYWHITE,
-    );
+    // Author-requested: the short identity hex used to lead this line, but
+    // it's already reachable via the Account overlay ("Signed in as ..."),
+    // so the header itself only needs the level/xp readout.
+    d.draw_text(&format!("Lv{}  {}xp", info.level, info.xp), 10, 6, 16, Color::RAYWHITE);
     // Fixed-position right-side label rather than measuring text width —
     // the draw handle has no default-font `measure_text` (that's only on
     // `RaylibHandle`, unavailable once `begin_drawing` hands out its borrow).

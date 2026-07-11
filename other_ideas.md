@@ -58,22 +58,7 @@ websocket status to show.)
 (Done: `world::ease_in_out_circ` replaces the old ease-out-cubic
 `1.0 - (1.0 - t).powi(3)` in both `main.rs`/`bin/web.rs`'s launch-intro
 easing. Slow start, fast middle, gentle landing, as asked.)
-- [ ] Better icon for the eraser icon
-(Author picked pencil from 6 candidates: the paint/erase toggle button now
-shows a diagonal pencil (`draw_pencil_icon`) by default — the icon reflects
-which TOOL is active, not a static "click to erase" glyph — and swaps to
-the classic two-tone eraser icon plus a red outline (`draw_rectangle_lines_ex`)
-while erasing is on. Both `client/src/ui.rs`, shared by native + web.
-STILL UNCHECKED — reported invisible THREE times. Round 1: widened
-half_w 3.0->4.5, brightened the tip, added a dark stroke. Round 2: widened
-further (half_w 6.0), still invisible after a confirmed hard-refreshed web
-reload (ruling out stale build/cache). Round 3: the common factor in both
-failures was a hand-rolled rotated-quad-via-two-triangles construction not
-used anywhere else in this codebase — rebuilt axis-aligned instead
-(horizontal pencil, not diagonal), reusing the exact
-`draw_rectangle_rounded`/`draw_triangle`/outline calls `draw_eraser_icon`
-already uses successfully. Removed the now-dead rotation helpers. Not yet
-re-confirmed by the author.)
+- [x] Better icon for the eraser icon
 - [x] When Locked, border of the cursor should be thicker
 (Done: `draw_cursor`/`draw_cursor_scaled` take a `locked` flag and draw a
 3px (vs 1px) black outline when true — applied to your own cursor AND every

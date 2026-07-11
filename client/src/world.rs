@@ -128,16 +128,16 @@ pub fn sat_cap(level: u64) -> u8 {
 /// long-press ownership check).
 pub use shared::hue_dist;
 
-/// Ease-in-out-circ (author-requested for the launch intro: slow start,
+/// Ease-in-out-cubic (author-requested for the launch intro: slow start,
 /// accelerating through the middle, slowing again into the landing — not
 /// the ease-OUT-cubic the intro originally shipped with, which was fast at
-/// the start instead). Standard formula: two mirrored quarter-circle arcs,
-/// one per half of `t`.
-pub fn ease_in_out_circ(t: f32) -> f32 {
+/// the start instead). Standard formula: two mirrored cubic curves, one per
+/// half of `t`.
+pub fn ease_in_out_cubic(t: f32) -> f32 {
     if t < 0.5 {
-        (1.0 - (1.0 - (2.0 * t).powi(2)).sqrt()) / 2.0
+        4.0 * t.powi(3)
     } else {
-        ((1.0 - (-2.0 * t + 2.0).powi(2)).sqrt() + 1.0) / 2.0
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
     }
 }
 

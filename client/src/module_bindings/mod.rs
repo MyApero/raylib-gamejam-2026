@@ -38,6 +38,7 @@ pub mod set_island_link_reducer;
 pub mod set_lock_reducer;
 pub mod set_name_reducer;
 pub mod set_pos_reducer;
+pub mod show_island_border_reducer;
 pub mod time_xp_schedule_type;
 pub mod unlike_island_reducer;
 pub mod user_table;
@@ -75,6 +76,7 @@ pub use set_island_link_reducer::set_island_link;
 pub use set_lock_reducer::set_lock;
 pub use set_name_reducer::set_name;
 pub use set_pos_reducer::set_pos;
+pub use show_island_border_reducer::show_island_border;
 pub use time_xp_schedule_type::TimeXpSchedule;
 pub use unlike_island_reducer::unlike_island;
 pub use user_table::*;
@@ -103,6 +105,7 @@ pub enum Reducer {
     SetLock { locked: bool },
     SetName { name: String },
     SetPos { cx: f32, cy: f32 },
+    ShowIslandBorder,
     UnlikeIsland { island_id: u32 },
 }
 
@@ -128,6 +131,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::SetLock { .. } => "set_lock",
             Reducer::SetName { .. } => "set_name",
             Reducer::SetPos { .. } => "set_pos",
+            Reducer::ShowIslandBorder => "show_island_border",
             Reducer::UnlikeIsland { .. } => "unlike_island",
             _ => unreachable!(),
         }
@@ -206,6 +210,9 @@ impl __sdk::Reducer for Reducer {
                 cx: cx.clone(),
                 cy: cy.clone(),
             }),
+            Reducer::ShowIslandBorder => {
+                __sats::bsatn::to_vec(&show_island_border_reducer::ShowIslandBorderArgs {})
+            }
             Reducer::UnlikeIsland { island_id } => {
                 __sats::bsatn::to_vec(&unlike_island_reducer::UnlikeIslandArgs {
                     island_id: island_id.clone(),

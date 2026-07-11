@@ -200,11 +200,28 @@ fn already_liked(ctx: &DbConnection, island_id: u32, me: Identity) -> bool {
     ctx.db.island_like().iter().any(|l| l.island_id == island_id && l.liker == me)
 }
 
+/// Author-requested: what an island's border currently resolves to,
+/// ignoring `border_hidden` — the same custom-pin-else-seed-hue fallback the
+/// main draw loop's per-frame `seed_hues` branch uses (see the border
+/// render code below), just computed standalone here since the popup's
+/// open/refresh call sites don't have that map in scope. Feeds the
+/// "Set border to current color" preview swatch.
+fn resolve_border_color(ctx: &DbConnection, island: &Island) -> Color {
+    if let Some(packed) = island.border_color {
+        let (h, s, v) = world::unpack_hsv(packed);
+        world::hsv_color(h, s, v)
+    } else {
+        let seed_hue = ctx.db.inventory().iter().find(|inv| inv.owner == island.owner && inv.obtained_with.is_none()).map(|inv| inv.hue);
+        world::hsv_color(seed_hue.unwrap_or(0), 40, 100)
+    }
+}
+
 /// F8: builds the popup payload for `island_id` and opens it. A no-op if the
 /// island has since vanished (can't happen for real islands, defensive only).
 fn open_island_info(ctx: &DbConnection, ui_state: &mut ui::UiState, island_id: u32, me: Identity, now: Timestamp) {
     let Some(island) = ctx.db.island().id().find(&island_id) else { return };
     let already_liked = already_liked(ctx, island_id, me);
+    let border_color = resolve_border_color(ctx, &island);
     ui_state.open_island_info(ui::IslandInfo {
         island_id,
         owner_label: player_label(ctx, island.owner),
@@ -213,6 +230,7 @@ fn open_island_info(ctx: &DbConnection, ui_state: &mut ui::UiState, island_id: u
         link_id: island.itch_rate_id,
         is_own: island.owner == me,
         already_liked,
+        border_color,
         border_hidden: island.border_hidden,
     });
 }
@@ -365,9 +383,9 @@ fn main() {
                         camera.zoom = to_zoom;
                         centered_on_island = true;
                     } else {
-                        // Ease-in-out-circ: slow start, fast middle, gentle
+                        // Ease-in-out-cubic: slow start, fast middle, gentle
                         // landing (author-requested, other_ideas.md).
-                        let ease = world::ease_in_out_circ(t);
+                        let ease = world::ease_in_out_cubic(t);
                         camera.target = Vector2::new(
                             from_target.x + (to_target.x - from_target.x) * ease,
                             from_target.y + (to_target.y - from_target.y) * ease,
@@ -467,7 +485,8 @@ fn main() {
             if let Some(island_id) = ui_state.island_popup.as_ref().map(|p| p.island_id) {
                 if let Some(island) = ctx.db.island().id().find(&island_id) {
                     let already_liked = ctx.db.island_like().iter().any(|l| l.island_id == island_id && l.liker == me);
-                    ui_state.refresh_island_popup(island.likes, already_liked, island.border_hidden);
+                    let border_color = resolve_border_color(&ctx, &island);
+                    ui_state.refresh_island_popup(island.likes, already_liked, island.border_hidden, border_color);
                 }
             }
             // F8 re-rank countdown: `next_rerank_at.duration_since(now)` is
@@ -544,9 +563,15 @@ fn main() {
             if actions.disable_island_border {
                 let _ = ctx.reducers.disable_island_border();
             }
+            if actions.show_island_border {
+                let _ = ctx.reducers.show_island_border();
+            }
             if let Some((island_id, rate_id)) = actions.click_link {
                 open_url(&format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"));
                 let _ = ctx.reducers.click_link(island_id);
+            }
+            if let Some(rate_id) = actions.open_own_link {
+                open_url(&format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"));
             }
             // Author-requested: footer button replacing the old "click your
             // own island" gesture, which just painted instead of opening
@@ -859,7 +884,13 @@ fn main() {
                 // island's border doesn't flicker its popup open.
                 let gesturing = rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
                     || rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE);
-                if !ui_state.overlay_open && !ui_state.account_open && !gesturing {
+                // Own-island popup (opened via the "My Isle" footer button) is
+                // a modal too — without this, hovering a foreign tile would,
+                // after the delay, silently overwrite it with that island's
+                // info instead of leaving it up (mirrors the `is_own` exemption
+                // in the hover-out close check below).
+                let own_popup_open = ui_state.island_popup.as_ref().is_some_and(|p| p.is_own);
+                if !ui_state.overlay_open && !ui_state.account_open && !own_popup_open && !gesturing {
                     if let Some((hid, since)) = hover_target {
                         let already_open = ui_state.island_popup.as_ref().is_some_and(|p| p.island_id == id);
                         if hid == id && !already_open && since.elapsed() >= HOVER_OPEN_DELAY {
@@ -1117,6 +1148,9 @@ fn main() {
         }) {
             world::draw_hold_ring(&mut d, mouse_screen, frac);
         }
-        d.draw_fps(640, 10);
+        // Author-requested: sits in the header band (drawn here, not inside
+        // `ui::draw_header`, so it's still visible before `me`/the HUD
+        // itself exists) rather than floating in its own corner.
+        d.draw_fps(440, 4);
     }
 }
