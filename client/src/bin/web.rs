@@ -448,13 +448,15 @@ fn merge_target_at(tables: &Tables, world_q: i32, world_r: i32) -> Option<(u8, u
 }
 
 /// Display label for a merge partner in the "new color" toast: their name if
-/// set, else their short identity hex.
+/// set (every player gets a random one at first connect, server-side).
+/// Falls back to a generic label, never the partner's identity — mirrors
+/// `main.rs`'s `player_label`, see its comment for why.
 fn player_label(tables: &Tables, id: &str) -> String {
     tables
         .users
         .get(id)
         .and_then(|u| u.name.clone().filter(|n| !n.is_empty()))
-        .unwrap_or_else(|| short_hex(id).to_string())
+        .unwrap_or_else(|| "another player".to_string())
 }
 
 /// Whether `me` already effectively has `hue` unlocked (within
@@ -627,6 +629,7 @@ fn frame(state: &mut State) {
             brush: (hue, sat, val),
             sat_cap: world::sat_cap(level),
             hues: &hues,
+            show_token_import: true,
         };
         let actions = ui::handle_input(&mut state.rl, &mut state.ui_state, &info);
         if let Some((h, s, v)) = actions.set_brush {
@@ -638,13 +641,23 @@ fn frame(state: &mut State) {
         if let Some(locked) = actions.set_lock {
             call_reducer("set_lock", serde_json::json!([locked]));
         }
+        if actions.copy_token {
+            run_js("window.stdb && window.stdb.copyToken()");
+        }
+        if let Some(token) = actions.import_token {
+            let js_token = serde_json::to_string(&token).unwrap();
+            run_js(&format!("window.stdb && window.stdb.importToken({js_token})"));
+        }
+        if actions.reset_account {
+            call_reducer("reset_account", serde_json::json!([]));
+        }
         if actions.center_camera {
             if let Some((island, _)) = my_island(&state.tables, me) {
                 recenter(&mut state.camera, island);
             }
         }
     }
-    let map_input_allowed = !state.ui_state.overlay_open;
+    let map_input_allowed = !state.ui_state.overlay_open && !state.ui_state.account_open;
 
     // Two-finger pinch/pan (touch); single-finger tap/drag is already
     // translated to ordinary mouse events by raylib's web backend, so the
@@ -866,6 +879,7 @@ fn frame(state: &mut State) {
             brush,
             sat_cap: world::sat_cap(level),
             hues: &hues,
+            show_token_import: true,
         };
         ui::draw(&mut d, &state.ui_state, &info);
 

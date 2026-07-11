@@ -116,14 +116,18 @@ fn short_hex(id: Identity) -> String {
 }
 
 /// Display label for a merge partner in the "new color" toast: their name if
-/// set, else their short identity hex.
+/// set. Every player gets a random name at first connect (server-side), so
+/// this should always be set in practice; the fallback is a generic label,
+/// never the partner's identity hex — a player's ID is confidential (it
+/// doubles as their account-recovery token, decision 11), so it must never
+/// leak to another player, not even truncated.
 fn player_label(ctx: &DbConnection, id: Identity) -> String {
     ctx.db
         .user()
         .identity()
         .find(&id)
         .and_then(|u| u.name.filter(|n| !n.is_empty()))
-        .unwrap_or_else(|| short_hex(id))
+        .unwrap_or_else(|| "another player".to_string())
 }
 
 /// Whether `me` already effectively has `hue` unlocked — long-pressing a
@@ -279,6 +283,7 @@ fn main() {
                 brush: (hue, sat, val),
                 sat_cap: world::sat_cap(level),
                 hues: &hues,
+                show_token_import: false,
             };
             let actions = ui::handle_input(&mut rl, &mut ui_state, &info);
             // Note: last-3 tracking happens inside `ui::handle_input` itself
@@ -294,6 +299,26 @@ fn main() {
             if let Some(locked) = actions.set_lock {
                 let _ = ctx.reducers.set_lock(locked);
             }
+            if actions.copy_token {
+                match creds_store().load() {
+                    Ok(Some(token)) => {
+                        if let Err(e) = rl.set_clipboard_text(&token) {
+                            eprintln!("Failed to copy token to clipboard: {e:?}");
+                        }
+                    }
+                    Ok(None) => eprintln!("No saved credentials to copy yet"),
+                    Err(e) => eprintln!("Failed to load credentials: {e:?}"),
+                }
+            }
+            // Native token import is skipped for the jam (plan.md F6): the
+            // judged target is the web build, where importing reconnects via
+            // a page reload; native has no equivalent hot-swap short of
+            // restarting the process. `show_token_import: false` above means
+            // `ui::handle_input` never actually produces this action here.
+            let _ = actions.import_token;
+            if actions.reset_account {
+                let _ = ctx.reducers.reset_account();
+            }
             if actions.center_camera {
                 if let Some(island) = my_island(&ctx, me) {
                     camera.target = island_world_center(&island);
@@ -305,7 +330,7 @@ fn main() {
                 }
             }
         }
-        let map_input_allowed = !ui_state.overlay_open;
+        let map_input_allowed = !ui_state.overlay_open && !ui_state.account_open;
 
         // Zoom toward the cursor (official raylib recipe): re-anchor
         // offset/target at the mouse before changing zoom so the world
@@ -537,6 +562,7 @@ fn main() {
                 brush,
                 sat_cap: world::sat_cap(level),
                 hues: &hues,
+                show_token_import: false,
             };
             ui::draw(&mut d, &ui_state, &info);
 

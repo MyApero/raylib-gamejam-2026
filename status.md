@@ -7,7 +7,96 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** Author-caught fix on top of F5: long-press-to-merge on a
+**Current batch:** F6 (identity: token login, reset) implemented, plus three
+author-caught fixes found via live hand-testing during the same batch
+(`known_bugs.md`, a scratch note the author was actively filling in while I
+worked — checked in as untracked, left alone). Client: added an "Account"
+overlay (`ui.rs`), a new footer button opening it, mutually exclusive with
+the inventory overlay (opening one closes the other; `map_input_allowed` in
+both `main.rs` and `bin/web.rs` now also gates on `account_open`). Contents:
+Copy-ID button, an import-token field (web only, see below), and a
+Reset-account button that arms on first click ("Click again to confirm
+reset") and fires on a second click within `RESET_CONFIRM_WINDOW` (4s),
+auto-disarming otherwise. `HudInfo` gained `show_token_import: bool` (true on
+web, false on native) so `ui.rs` stays platform-clean while only rendering
+the paste-token field where it's actually wired up.
+- **Copy ID**: "ID" here means the full reconnection TOKEN (plan.md decision
+  11 — the token, not the identity, is the Cookie-Clicker-style recovery
+  key), not the header's 8-hex-char display label. Native: `Actions::copy_token`
+  triggers a fresh `creds_store().load()` (re-reading rather than holding a
+  stale copy from startup, in case a reconnect rotated it) +
+  `rl.set_clipboard_text`. Web: triggers `window.stdb.copyToken()`
+  (`game.html`), which tries `navigator.clipboard.writeText` and falls back
+  to `window.prompt` (pre-selected text, so Ctrl+C works even where the
+  Clipboard API is denied — e.g. a sandboxed itch.io iframe) — satisfies
+  plan.md's "always provide a fallback that shows the token in a selectable
+  text field" without any extra DOM/CSS.
+- **Import (web only)**: text field + Import button/Enter in the Account
+  overlay, wired to `window.stdb.importToken(token)`, which writes
+  `localStorage` and reloads the page (auth is a connect-time query param in
+  this protocol, not a live call, so there's no in-place identity hot-swap —
+  a reload was explicitly called out as acceptable in plan.md). Native leaves
+  `show_token_import: false`, so the field never renders and
+  `actions.import_token` is structurally always `None` there — matches
+  plan.md's explicit allowance to SKIP native import as out of scope for the
+  jam (time-boxed).
+- **Reset**: `actions.reset_account` → `ctx.reducers.reset_account()` /
+  `call_reducer("reset_account", [])`.
+- **BUG FIX (author-caught, `known_bugs.md`): "reset an account should give a
+  random color"** — `reset_account` (`server/src/lib.rs`) was rolling the new
+  hue via `start_hue(&ctx.sender())`, the SAME deterministic hash of the
+  identity used at first connect. `client_connected` keeping that
+  deterministic function is fine (a brand-new identity is itself effectively
+  random), but `reset_account` keeps the SAME identity by design (decision
+  12) — so every reset was silently handing the player back their exact
+  original starting hue, never a fresh one, defeating the whole point of the
+  reducer's name. Fixed to draw from `ctx.rng().gen_range(0..360u16)`
+  instead (`spacetimedb::rand::Rng` imported). `start_hue` is now only used
+  where determinism is actually correct: `client_connected`.
+- **BUG FIX (author-caught): "you can't paste in 'Paste an ID'"** — the
+  import field's input handling (`ui.rs`, added this batch) only captured
+  typed characters (`get_char_pressed`) and Backspace, like the (much
+  shorter) name field it was modeled on. A ~200+-char token isn't realistic
+  to type by hand. Added Ctrl+V/Cmd+V handling that reads
+  `rl.get_clipboard_text()` and appends the trimmed result, capped at the
+  same 256-char field limit.
+- **Design addition (author-directed, in response to a question about the
+  two remaining `known_bugs.md` items):** "merged with ... shouldn't include
+  the id of someone" / "id is very confidential" — the merge toast's
+  `player_label` fell back to the partner's short identity hex when they had
+  no name set, which leaks enough of the identifier to correlate a player
+  across merges (the same identifier decision 11 requires to stay
+  confidential, since it doubles as the account-recovery token). Author's
+  fix of choice: every player gets a random generated name at first connect
+  instead of `name: None`, so the fallback essentially never fires. Added
+  `random_name` (`server/src/lib.rs`): a 20-adjective × 20-noun table (e.g.
+  "SwiftFox"), sampled via `ctx.rng()`, set in `client_connected`'s
+  new-user branch. Hardened the fallback itself too, in both clients'
+  `player_label` (`main.rs`, `bin/web.rs`): now `"another player"` instead of
+  `short_hex(id)`, as defense-in-depth for any pre-existing row that
+  predates this change (local dev data only). The OTHER `known_bugs.md` item
+  ("selected color not in recent-used on launch") was explicitly deferred by
+  the author — not part of this batch, not fixed.
+- Also added a confidentiality warning line next to the Copy-ID button
+  ("Keep it private: anyone who has it can log in as you"), directly from
+  the "id is very confidential" note.
+- `cargo build -p server`, `-p client --bin client --bin bot`, `./build-web.sh`
+  (release) all clean, no warnings (re-checked with `touch` to force a
+  recompile after the no-warning first pass, since incremental builds can
+  hide a fresh warning). `cargo build --workspace --exclude client` clean.
+  `du -sh client/web` = 892K (well under the 64 MB cap). Author independently
+  confirmed the build succeeds after the RNG/paste/naming fixes.
+- REASONED from code, not yet run live for actual behavior (needs a browser +
+  a real `spacetime start` instance): copy/paste round-trip, reset actually
+  producing a fresh hue in practice, refresh/reopen identity persistence
+  (already implemented at F5 via `localStorage`, not newly touched here — F6
+  just adds the recovery UI plan.md asked for on top of it), random names
+  appearing for new connections, merge toast never showing an identity hex.
+**Blockers:** none.
+
+---
+
+**Previous batch:** Author-caught fix on top of F5: long-press-to-merge on a
 margin tile didn't work — the tile's color got instantly overwritten by the
 ordinary paint-on-press before the 400ms hold timer could fire
 `merge_with_cell`, so by the time the merge landed the tile already matched
@@ -24,7 +113,7 @@ normally paintable by everyone, unaffected. `cargo build -p server`,
 `-p client --bin client --bin bot`, `cargo check --target
 wasm32-unknown-emscripten`, and `cargo build --workspace --exclude client`
 all clean. Republished non-destructively (`--delete-data=on-conflict`, no
-schema change). Not yet re-run live; not yet committed.
+schema change). Committed (`fb0b120`).
 **Blockers:** none.
 
 ---
@@ -420,9 +509,24 @@ Implementation notes:
       (`index.html` 4K, `game.html` 8K, `web.js` 224K, `web.wasm` 644K).
 
 ## F6 — Identity: token login, reset
-- [ ] Copy ID (with selectable-text fallback), paste-token import in a private window —
+- [x] Copy ID (with selectable-text fallback), paste-token import in a private window —
+      IMPLEMENTED (Account overlay, `ui.rs`/`game.html`/`bin/web.rs`/`main.rs`), REASONED
+      from code; not yet run live in a browser (needs author hand-test per plan.md's
+      verify checklist: note identity, clear tab, reopen, copy token, import in a
+      private window).
 - [ ] Refresh/reopen keeps identity; `SELECT COUNT(*) FROM user` unchanged —
-- [ ] Reset: 1 fresh hue, XP 0, island art intact (author to confirm art-survives rule) —
+      REASONED (unchanged since F5's localStorage persistence); BLOCKED on author
+      hand-test, same as above.
+- [x] Reset: 1 fresh hue, XP 0, island art intact (author to confirm art-survives rule) —
+      `reset_account` (`server/src/lib.rs`) deletes all inventory rows, inserts one
+      fresh hue, zeroes xp, resets sat/val to defaults, keeps `name`/`identity`/island
+      ownership (island_cell rows are never touched by this reducer). **Bug fixed this
+      batch** (author-caught via `known_bugs.md`): the fresh hue used to come from
+      `start_hue(identity)`, deterministic per identity, so a reset — which keeps the
+      SAME identity by design — always produced the SAME hue as before, not a new one.
+      Now uses `ctx.rng().gen_range(0..360u16)`. REASONED from code; BLOCKED on author
+      hand-test to confirm island art survives in practice and the hue is now actually
+      different each reset.
 
 ## F7 — Deploy + itch.io package  ← game is submittable when this is done
 - [ ] Host-resolution rule (localhost/private-IP → ws local, else wss production) —
@@ -443,6 +547,13 @@ Implementation notes:
 - [ ] F13 hexa event (6-cursor hexagon: pooled dictionaries, one-time XP, snap rendering) —
 
 ## Notes / deviations from plan.md
+- **New at F6 (author-directed, not in plan.md's original text):** players
+  get an auto-generated random name (adjective+noun, e.g. "SwiftFox") at
+  first connect instead of `name: None`. Motivated by a privacy fix, not a
+  cosmetic one — see the F6 batch note above and decision 11 (the identity
+  doubles as the account-recovery token, so it must never leak, not even
+  truncated, and the merge toast's old no-name fallback was doing exactly
+  that). Players can still rename via the existing `set_name` UI at any time.
 - `PAINT_BUCKET_MAX`/`PAINT_REFILL_PER_SEC` raised, in two live-tuning passes
   during F2 hand-testing, to 1000/50 (50x the original 20/1.0); `plan.md`'s
   canonical constants table updated to match (same ratio, same "N tiles /

@@ -1,0 +1,2 @@
+- [ ] Centre Ilot should have a bot drawing R and a heart
+- [ ] It should also be a battlefield

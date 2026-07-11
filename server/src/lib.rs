@@ -1,3 +1,4 @@
+use spacetimedb::rand::Rng;
 use spacetimedb::{Identity, ReducerContext, Table, Timestamp};
 
 /// Canonical constants — see plan.md "Canonical constants" table. Mirror
@@ -231,6 +232,31 @@ pub struct MarginCell {
     color: u32,
     painted_by: Identity,
     painted_at: Timestamp,
+}
+
+/// Author decision (F6 follow-up): the merge toast used to fall back to a
+/// partner's short identity hex when they hadn't picked a name, which leaks
+/// enough of the identity to correlate a player across merges — the same
+/// identifier decision 11 requires to stay confidential. Auto-assigning a
+/// name at first connect (rather than leaving `name: None`) means the
+/// clients' identity-hex fallback essentially never fires in practice.
+const NAME_ADJECTIVES: [&str; 20] = [
+    "Swift", "Calm", "Bold", "Wild", "Bright", "Quiet", "Lucky", "Sunny", "Cosmic", "Golden",
+    "Silver", "Amber", "Coral", "Azure", "Violet", "Crimson", "Emerald", "Ivory", "Jade", "Rusty",
+];
+const NAME_NOUNS: [&str; 20] = [
+    "Fox", "Otter", "Hex", "Reef", "Island", "Wren", "Falcon", "Panda", "Comet", "Nova", "Pixel",
+    "Dune", "Tide", "Ember", "Lynx", "Heron", "Wisp", "Atoll", "Drifter", "Compass",
+];
+
+fn random_name(ctx: &ReducerContext) -> String {
+    // `&StdbRng`'s `RngCore` impl needs `&mut self`, so the binding itself
+    // must be `mut` here (unlike a one-shot `ctx.rng().gen_range(..)` call,
+    // which mutably borrows the temporary automatically).
+    let mut rng = ctx.rng();
+    let a = NAME_ADJECTIVES[rng.gen_range(0..NAME_ADJECTIVES.len())];
+    let n = NAME_NOUNS[rng.gen_range(0..NAME_NOUNS.len())];
+    format!("{a}{n}")
 }
 
 fn level_of(xp: u64) -> u64 {
@@ -540,7 +566,13 @@ pub fn reset_account(ctx: &ReducerContext) -> Result<(), String> {
     for inv in ctx.db.inventory().owner().filter(&ctx.sender()).collect::<Vec<_>>() {
         ctx.db.inventory().id().delete(inv.id);
     }
-    let hue = start_hue(&ctx.sender());
+    // `start_hue` is a deterministic hash of the identity, which is fine for
+    // `client_connected` (a brand-new identity is itself effectively
+    // random), but reset keeps the SAME identity (decision 12) — reusing
+    // `start_hue` here would silently hand the player back their exact
+    // original hue every time, not a fresh roll. Use the module's actual RNG
+    // instead, so repeated resets give different starting hues.
+    let hue = ctx.rng().gen_range(0..360u16);
     ctx.db.inventory().insert(Inventory {
         id: 0,
         owner: ctx.sender(),
@@ -577,7 +609,7 @@ pub fn client_connected(ctx: &ReducerContext) {
     let hue = start_hue(&ctx.sender());
     ctx.db.user().insert(User {
         identity: ctx.sender(),
-        name: None,
+        name: Some(random_name(ctx)),
         online: true,
         cx: 0.0,
         cy: 0.0,

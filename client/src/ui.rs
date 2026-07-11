@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 use crate::world;
 
 const TOAST_DURATION: Duration = Duration::from_millis(2500);
+/// How long the Reset Account button stays armed after a first click, before
+/// a second click is required to actually fire the reducer.
+const RESET_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
 
 pub const HEADER_H: f32 = 28.0;
 pub const FOOTER_H: f32 = 44.0;
@@ -72,6 +75,18 @@ pub struct UiState {
     /// (via the resync check) and snaps the slider handle to an extreme for
     /// one frame before it settles at 0.
     pending_select: Option<u16>,
+    /// Account overlay (F6: copy/import ID, reset account) — mutually
+    /// exclusive with `overlay_open`, same modal footprint.
+    pub account_open: bool,
+    import_input: String,
+    import_focused: bool,
+    /// Set on the first click of "Reset account"; a second click within
+    /// `RESET_CONFIRM_WINDOW` actually fires it, otherwise it auto-disarms.
+    reset_armed_at: Option<Instant>,
+    /// Brief "copied" acknowledgement after the Copy ID button is clicked —
+    /// the JS clipboard call is fire-and-forget from Rust's side (no success
+    /// signal comes back), so this just confirms the click registered.
+    copy_clicked_at: Option<Instant>,
 }
 
 impl UiState {
@@ -86,6 +101,11 @@ impl UiState {
             toast: None,
             base_hue: 0,
             pending_select: None,
+            account_open: false,
+            import_input: String::new(),
+            import_focused: false,
+            reset_armed_at: None,
+            copy_clicked_at: None,
         }
     }
 
@@ -135,6 +155,11 @@ pub struct HudInfo<'a> {
     pub brush: (u16, u8, u8),
     pub sat_cap: u8,
     pub hues: &'a [u16],
+    /// Whether to render the paste-token import field in the Account
+    /// overlay. True on web (the judged target, per plan.md F6); false on
+    /// native, where reconnecting as an imported identity would need a full
+    /// process restart and is explicitly out of scope for the jam.
+    pub show_token_import: bool,
 }
 
 #[derive(Default)]
@@ -143,6 +168,13 @@ pub struct Actions {
     pub set_name: Option<String>,
     pub set_lock: Option<bool>,
     pub center_camera: bool,
+    /// Copy the full reconnection token (not just the header's short hex) to
+    /// the clipboard.
+    pub copy_token: bool,
+    /// A token pasted into the Account overlay's import field, submitted via
+    /// the Import button or Enter.
+    pub import_token: Option<String>,
+    pub reset_account: bool,
 }
 
 fn footer_bg() -> Rectangle {
@@ -167,6 +199,10 @@ fn name_field_rect() -> Rectangle {
 
 fn lock_btn_rect() -> Rectangle {
     Rectangle::new(458.0, SCREEN_H - FOOTER_H + 7.0, 90.0, 30.0)
+}
+
+fn account_btn_rect() -> Rectangle {
+    Rectangle::new(558.0, SCREEN_H - FOOTER_H + 7.0, 80.0, 30.0)
 }
 
 fn overlay_rect() -> Rectangle {
@@ -209,6 +245,26 @@ fn val_slider_rect() -> Rectangle {
     Rectangle::new(o.x + 40.0, o.y + o.height - 60.0, 440.0, 16.0)
 }
 
+fn copy_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 60.0, 180.0, 36.0)
+}
+
+fn import_field_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 180.0, 320.0, 32.0)
+}
+
+fn import_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 350.0, o.y + 180.0, 100.0, 32.0)
+}
+
+fn reset_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 280.0, 240.0, 36.0)
+}
+
 /// `mouse_x` -> integer value in `0..=max`, clamped to the track's extent.
 fn slider_value(track: Rectangle, mouse_x: f32, max: f32) -> u8 {
     (((mouse_x - track.x) / track.width).clamp(0.0, 1.0) * max).round() as u8
@@ -242,6 +298,12 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     }
     if state.pending_select == Some(info.brush.0) {
         state.pending_select = None;
+    }
+    if state.reset_armed_at.is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW) {
+        state.reset_armed_at = None;
+    }
+    if state.copy_clicked_at.is_some_and(|t| t.elapsed() >= TOAST_DURATION) {
+        state.copy_clicked_at = None;
     }
     // Re-anchor the Hue slider whenever the actual brush hue has drifted
     // outside its window (a merge changed it server-side, the live hue was
@@ -287,9 +349,18 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     }
     if clicked && point_in(mouse, inventory_btn_rect()) {
         state.overlay_open = !state.overlay_open;
+        if state.overlay_open {
+            state.account_open = false;
+        }
     }
     if clicked && point_in(mouse, lock_btn_rect()) {
         actions.set_lock = Some(!info.locked);
+    }
+    if clicked && point_in(mouse, account_btn_rect()) {
+        state.account_open = !state.account_open;
+        if state.account_open {
+            state.overlay_open = false;
+        }
     }
 
     // Name field: click to focus/blur (blur commits), Enter commits+blurs.
@@ -316,6 +387,66 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             state.name_focused = false;
             actions.set_name = Some(state.name_input.clone());
         }
+    }
+
+    // Account overlay is modal too, and mutually exclusive with the
+    // inventory overlay (only one can be open, enforced by the toggles
+    // above) — handled and returned here before the inventory-overlay gate.
+    if state.account_open {
+        if clicked && point_in(mouse, overlay_close_rect()) {
+            state.account_open = false;
+            return actions;
+        }
+        if clicked && point_in(mouse, copy_btn_rect()) {
+            actions.copy_token = true;
+            state.copy_clicked_at = Some(Instant::now());
+        }
+        if info.show_token_import {
+            let field = import_field_rect();
+            if clicked {
+                state.import_focused = point_in(mouse, field);
+            }
+            if state.import_focused {
+                while let Some(c) = rl.get_char_pressed() {
+                    if !c.is_control() && state.import_input.chars().count() < 256 {
+                        state.import_input.push(c);
+                    }
+                }
+                if rl.is_key_pressed(KeyboardKey::KEY_BACKSPACE) {
+                    state.import_input.pop();
+                }
+                // A pasted token is ~200+ chars — typing it by hand isn't a
+                // real option, so Ctrl+V/Cmd+V must work here, unlike the
+                // name field above (short enough to type).
+                let pasting = rl.is_key_pressed(KeyboardKey::KEY_V)
+                    && (rl.is_key_down(KeyboardKey::KEY_LEFT_CONTROL)
+                        || rl.is_key_down(KeyboardKey::KEY_RIGHT_CONTROL)
+                        || rl.is_key_down(KeyboardKey::KEY_LEFT_SUPER)
+                        || rl.is_key_down(KeyboardKey::KEY_RIGHT_SUPER));
+                if pasting {
+                    if let Ok(clip) = rl.get_clipboard_text() {
+                        let room = 256usize.saturating_sub(state.import_input.chars().count());
+                        state.import_input.extend(clip.trim().chars().take(room));
+                    }
+                }
+            }
+            let submit = (clicked && point_in(mouse, import_btn_rect()))
+                || (state.import_focused && rl.is_key_pressed(KeyboardKey::KEY_ENTER));
+            if submit && !state.import_input.trim().is_empty() {
+                actions.import_token = Some(state.import_input.trim().to_string());
+                state.import_input.clear();
+                state.import_focused = false;
+            }
+        }
+        if clicked && point_in(mouse, reset_btn_rect()) {
+            if state.reset_armed_at.is_some() {
+                actions.reset_account = true;
+                state.reset_armed_at = None;
+            } else {
+                state.reset_armed_at = Some(Instant::now());
+            }
+        }
+        return actions;
     }
 
     if !state.overlay_open {
@@ -390,6 +521,8 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     draw_footer(d, state, info);
     if state.overlay_open {
         draw_overlay(d, state, info);
+    } else if state.account_open {
+        draw_account_overlay(d, state, info);
     }
     if let Some(toast) = &state.toast {
         draw_toast(d, toast, info);
@@ -464,6 +597,10 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
         14,
         Color::RAYWHITE,
     );
+
+    let ab = account_btn_rect();
+    d.draw_rectangle_rec(ab, Color::new(40, 40, 48, 255));
+    d.draw_text("Account", ab.x as i32 + 8, ab.y as i32 + 9, 10, Color::RAYWHITE);
 }
 
 fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
@@ -499,6 +636,75 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     draw_hue_slider(d, hue_slider_rect(), offset, tol);
     draw_slider(d, sat_slider_rect(), info.brush.1, info.sat_cap, &format!("Saturation ({})", info.brush.1));
     draw_slider(d, val_slider_rect(), info.brush.2, 100, &format!("Value ({})", info.brush.2));
+}
+
+/// Copy/import ID (Cookie-Clicker-style account portability) + reset. Shares
+/// the inventory overlay's footprint/backdrop/close button but never draws
+/// alongside it (`draw` picks one or the other).
+fn draw_account_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
+    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
+
+    let o = overlay_rect();
+    d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
+    d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
+    d.draw_text("Account", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+
+    let close = overlay_close_rect();
+    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
+    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
+
+    d.draw_text(&format!("Signed in as {}", info.short_id), o.x as i32 + 20, o.y as i32 + 44, 14, Color::LIGHTGRAY);
+
+    let cb = copy_btn_rect();
+    d.draw_rectangle_rec(cb, Color::new(40, 40, 48, 255));
+    d.draw_text("Copy full ID", cb.x as i32 + 16, cb.y as i32 + 11, 14, Color::RAYWHITE);
+    if state.copy_clicked_at.is_some_and(|t| t.elapsed() < TOAST_DURATION) {
+        d.draw_text(
+            "copied (or check the popup)",
+            cb.x as i32 + cb.width as i32 + 12,
+            cb.y as i32 + 11,
+            14,
+            Color::LIGHTGRAY,
+        );
+    }
+    d.draw_text(
+        "Save this before clearing site data or switching browsers/devices.\nKeep it private: anyone who has it can log in as you.",
+        o.x as i32 + 20,
+        cb.y as i32 + cb.height as i32 + 10,
+        12,
+        Color::new(220, 170, 90, 255),
+    );
+
+    if info.show_token_import {
+        let field = import_field_rect();
+        d.draw_text("Paste an ID to restore that account:", field.x as i32, field.y as i32 - 18, 14, Color::LIGHTGRAY);
+        d.draw_rectangle_rec(field, Color::new(28, 28, 34, 255));
+        d.draw_rectangle_lines_ex(field, 1.0, if state.import_focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
+        let shown = if state.import_input.is_empty() && !state.import_focused { "paste here..." } else { &state.import_input };
+        d.draw_text(shown, field.x as i32 + 6, field.y as i32 + 7, 14, Color::RAYWHITE);
+
+        let ib = import_btn_rect();
+        d.draw_rectangle_rec(ib, Color::new(40, 40, 48, 255));
+        d.draw_text("Import", ib.x as i32 + 20, ib.y as i32 + 9, 14, Color::RAYWHITE);
+    }
+
+    let rb = reset_btn_rect();
+    let armed = state.reset_armed_at.is_some();
+    d.draw_rectangle_rec(rb, if armed { Color::new(140, 50, 50, 255) } else { Color::new(60, 40, 40, 255) });
+    d.draw_text(
+        if armed { "Click again to confirm reset" } else { "Reset account" },
+        rb.x as i32 + 10,
+        rb.y as i32 + 11,
+        14,
+        Color::RAYWHITE,
+    );
+    d.draw_text(
+        "Wipes XP and unlocked colors, rolls a new starting hue.\nKeeps your ID, name, and island art.",
+        rb.x as i32,
+        rb.y as i32 + rb.height as i32 + 10,
+        12,
+        Color::GRAY,
+    );
 }
 
 /// Signed ±`tol` slider: a center tick at offset 0 plus a handle that can

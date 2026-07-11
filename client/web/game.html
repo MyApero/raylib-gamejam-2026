@@ -164,6 +164,34 @@
               }));
             }
           },
+          // F6 account portability: the stored token IS the reconnection
+          // identifier (see plan.md decision 11), so "copy ID" really copies
+          // the token. Clipboard writes need a secure context + user
+          // gesture, both satisfied here (https/localhost, called from a
+          // click), but the itch.io iframe may still deny
+          // navigator.clipboard outright — window.prompt's pre-selected
+          // text is the fallback manual-copy path either way.
+          copyToken: function () {
+            var token = localStorage.getItem(TOKEN_KEY);
+            if (!token) return;
+            function fallback() {
+              window.prompt('Copy your ID (already selected, press Ctrl+C / Cmd+C):', token);
+            }
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(token).catch(fallback);
+            } else {
+              fallback();
+            }
+          },
+          // Reconnecting as an imported identity needs a fresh socket
+          // (auth is a connect-time query param, not a mid-session call), so
+          // this stores the token and reloads the page rather than trying to
+          // hot-swap `ws` in place.
+          importToken: function (token) {
+            if (!token) return;
+            localStorage.setItem(TOKEN_KEY, token);
+            window.location.reload();
+          },
         };
       })();
     </script>
