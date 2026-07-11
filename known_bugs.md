@@ -25,7 +25,10 @@ see status.md)
 
 - [ ] Scroll on macos (safari) is bugged
 
-- [ ] Ilot info should only be hover
+- [x] Ilot info should only be hover
+(F9.5 item 7 / decision 17: popup now opens after a 200ms continuous hover
+over a foreign island, closes on hover-out; double-click-to-like and touch
+tap-to-open are unchanged — see status.md)
 
 - [x] Dezoom should reduce the size of other's cursor
 (F9.5 item 6: `world::draw_cursor_scaled` — see status.md)

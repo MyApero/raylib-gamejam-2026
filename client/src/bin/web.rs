@@ -59,6 +59,8 @@ const LONG_PRESS_HOLD: Duration = Duration::from_millis(400);
 const LONG_PRESS_TOL_PX: f32 = 8.0;
 /// Author-requested: mirrors `main.rs`'s `DOUBLE_CLICK_WINDOW` exactly.
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
+/// F9.5 item 7 / decision 17: mirrors `main.rs`'s `HOVER_OPEN_DELAY` exactly.
+const HOVER_OPEN_DELAY: Duration = Duration::from_millis(200);
 
 unsafe extern "C" {
     fn emscripten_run_script_string(script: *const c_char) -> *const c_char;
@@ -90,7 +92,6 @@ struct UserRow {
     online: bool,
     cx: f32,
     cy: f32,
-    last_seen_micros: i64,
     hue: u16,
     sat: u8,
     val: u8,
@@ -218,7 +219,6 @@ fn parse_user(v: &Value) -> Option<(String, UserRow)> {
             online: r.field("online", 2)?.as_bool()?,
             cx: r.field("cx", 3)?.as_f64()? as f32,
             cy: r.field("cy", 4)?.as_f64()? as f32,
-            last_seen_micros: timestamp_micros(r.field("last_seen", 5)?),
             hue: r.field("hue", 6)?.as_u64()? as u16,
             sat: r.field("sat", 7)?.as_u64()? as u8,
             val: r.field("val", 8)?.as_u64()? as u8,
@@ -431,9 +431,6 @@ fn call_reducer(name: &str, args: Value) {
     run_js(&format!("window.stdb && window.stdb.callReducer({js_name}, {js_args})"));
 }
 
-fn is_present(last_seen_micros: i64, now_micros: i64) -> bool {
-    now_micros.saturating_sub(last_seen_micros) < PRESENCE_TIMEOUT_SECS * 1_000_000
-}
 
 /// What a hovered world cell is paintable as, from `me`'s point of view —
 /// mirrors `main.rs`'s `Paintable` against this file's plain `Tables`
@@ -593,6 +590,12 @@ struct State {
     /// DOUBLE_CLICK_WINDOW before it resolves into actually opening the
     /// info popup (see the gesture block's comment for why).
     pending_info_click: Option<(Instant, Vector2, u32)>,
+    /// F9.5 item 7 / decision 17: mirrors `main.rs`'s `hover_target` —
+    /// `(island_id, hover_started_at)` for the currently-hovered foreign
+    /// island, tracked purely by cursor position, independent of
+    /// `pending_info_click` above (left unchanged for double-click-to-like
+    /// and touch).
+    hover_target: Option<(u32, Instant)>,
     pinch: Option<Pinch>,
     stroke_last: Option<(u8, i32, i32)>,
     last_paint_at: Instant,
@@ -1002,6 +1005,46 @@ fn frame(state: &mut State) {
         }
     }
 
+    // F9.5 item 7 / decision 17: island info on hover (desktop). Mirrors
+    // `main.rs` — purely position-based, independent of the click/long-press
+    // gesture block above (left untouched for double-click-to-like and
+    // touch; raylib-web aliases a single touch to ordinary mouse events, so
+    // that path already covers touch taps).
+    let currently_hovered_foreign = me.and_then(|me| {
+        let (wq, wr) = world::world_to_axial(mouse_world);
+        island_at(&state.tables, wq, wr)
+            .filter(|&(id, _, _)| state.tables.islands.get(&id).is_some_and(|isl| isl.owner_hex != me))
+            .map(|(id, _, _)| id)
+    });
+    match currently_hovered_foreign {
+        Some(id) => {
+            if state.hover_target.map(|(hid, _)| hid) != Some(id) {
+                state.hover_target = Some((id, Instant::now()));
+            }
+            // Suppressed while any button/gesture is active (mid paint
+            // stroke, pan, pinch, or long-press).
+            let gesturing_input = state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
+                || state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
+                || gesturing;
+            if !state.ui_state.overlay_open && !state.ui_state.account_open && !gesturing_input {
+                if let Some((hid, since)) = state.hover_target {
+                    let already_open = state.ui_state.island_popup.as_ref().is_some_and(|p| p.island_id == id);
+                    if hid == id && !already_open && since.elapsed() >= HOVER_OPEN_DELAY {
+                        open_island_info(state, id);
+                    }
+                }
+            }
+        }
+        None => state.hover_target = None,
+    }
+    // Closes on hover-out, regardless of how the popup was opened (hover or
+    // the click/double-click path above).
+    if let Some(popup) = &state.ui_state.island_popup {
+        if currently_hovered_foreign != Some(popup.island_id) {
+            state.ui_state.island_popup = None;
+        }
+    }
+
     // View-space culling bounds, padded well past the screen edges.
     let pad = (ISLAND_RADIUS as f32) * 2.0 * 5.0;
     let top_left = state.rl.get_screen_to_world2D(Vector2::new(0.0, 0.0), state.camera);
@@ -1032,7 +1075,10 @@ fn frame(state: &mut State) {
         .tables
         .users
         .iter()
-        .filter(|(id, u)| is_present(u.last_seen_micros, state.now_micros) && Some(id.as_str()) != me)
+        // Author-reported: mirrors `main.rs` — cursors used to vanish ~3s
+        // after a player stopped moving; a stationary-but-connected player
+        // should stay visible the whole time they're online.
+        .filter(|(id, u)| u.online && Some(id.as_str()) != me)
         .map(|(_, u)| {
             (
                 state.rl.get_world_to_screen2D(Vector2::new(u.cx, u.cy), state.camera),
@@ -1195,6 +1241,7 @@ fn main() {
         last_level: None,
         long_press: None,
         pending_info_click: None,
+        hover_target: None,
         pinch: None,
         stroke_last: None,
         last_paint_at: Instant::now(),

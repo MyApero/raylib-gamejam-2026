@@ -6,9 +6,9 @@
 (F9.5 item 6: other players' cursors now scale with camera zoom relative to
 their size at the default ISLAND_FIT_ZOOM, floored so they stay findable
 zoomed far out — see status.md)
-- [ ] hover to see island information
+- [x] hover to see island information (F9.5 item 7 / decision 17 — see status.md)
 - [ ] heart icon for like
-- [ ] hover to see ilot information
+- [x] hover to see ilot information (duplicate of the entry above — F9.5 item 7)
 - [ ] Eraser
 - [ ] Quand on lance le jeu, intro vue d'ensemble de la map, zoom sur ton île
 - [ ] Move with arrow keys

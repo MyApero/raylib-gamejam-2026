@@ -7,7 +7,75 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9.5 item 6 — other players' cursors drawn screen-space
+**Current batch:** F9.5 item 7 — island info on hover (decision 17), plus one
+author-reported bug caught while working the same area: other players'
+cursors vanished ~3s after they stopped moving.
+
+**Item 7**: the F8 click-to-open popup "turned out to feel wrong in
+practice" per the author's deployed-build testing — decision 17 supersedes
+it with hover: popup opens after ~200ms of continuous hover over a foreign
+island, closes on hover-out, suppressed while a paint/pan/long-press gesture
+is in progress (so a stroke sweeping past a neighboring border doesn't
+flicker it open). Double-click-to-like and touch (tap opens, double-tap
+likes) are explicitly unchanged.
+
+Implementation, both clients (`main.rs`/`bin/web.rs`): added a NEW,
+independent `hover_target: Option<(island_id, Instant)>` tracked purely by
+cursor world-position — deliberately NOT touching the existing
+`long_press`/`pending_info_click` gesture block at all, which stays exactly
+as shipped and still drives double-click-to-like (and, since raylib-web
+aliases a single touch to ordinary mouse events, already covers touch tap
+too). The two mechanisms can both legally open the same popup; whichever
+fires first wins, and re-opening an already-open popup for the same island
+is a no-op. Hover-accumulation resets whenever the hovered island changes or
+the cursor leaves foreign territory; the actual `open_island_info` call is
+gated on `HOVER_OPEN_DELAY` elapsed AND no mouse button currently held (left
+or middle — covers paint-drag, pan, and long-press-hold uniformly) AND
+neither of the other two overlays being open. A separate, unconditional
+check closes `island_popup` the instant the hovered position no longer
+matches its `island_id`, regardless of which mechanism opened it.
+
+Considered and rejected: making the popup block `map_input_allowed` the way
+the account/inventory overlays do (true modal). That would make it
+impossible to double-click-like or long-press-merge the very island whose
+popup is showing, since the popup's fixed-position panel (`overlay_rect()`,
+unchanged from F8) covers most of the screen and would swallow the click
+before it ever reached the map. Left `map_input_allowed` NOT gated by
+`island_popup` (as it already wasn't, this predates F9.5) — safe because the
+popup only ever appears over FOREIGN territory, where the hovering player
+can't paint anyway, so there's no equivalent to item 5's click-through
+hazard: any gesture that "leaks through" is by definition a legitimate
+foreign-island gesture (merge or like) already.
+
+**Presence bug** (author-caught while testing this batch): other players'
+cursors were gated on `is_present(last_seen, now)` — a 3-second freshness
+window meant for merge-eligibility (`set_pos`'s cursor-merge check;
+`time_xp_tick`), reused for cursor RENDERING too. A player who stops moving
+their mouse (reading, picking a color, idle) still has `last_seen` frozen at
+their last `set_pos` call (client only sends on movement), so after 3s they
+vanished from other players' screens even though fully connected. Changed
+the cursor-visibility filter in both clients to `u.online` instead —
+merge-eligibility and time-XP's own freshness checks are untouched
+(server-side, `set_pos`/`time_xp_tick`), only what makes an already-online
+player's cursor VISIBLE changed. Removed the now-fully-unused `is_present`
+helper (both clients), `bin/web.rs`'s now-unused `UserRow.last_seen_micros`
+field and its parser line (kept the wire's positional field indices correct
+for everything after it), and `world::constants::PRESENCE_TIMEOUT_SECS`
+(only ever read by the removed helpers — the server keeps its own separate
+copy, unaffected).
+
+**VERIFIED**: both clients build clean, no warnings (including after
+removing the now-dead presence-check code — re-checked, this project treats
+warnings as a build gate). Did not get a clean scripted multi-player capture
+of the hover-open/hover-close timing in a real browser this batch (same
+two-far-apart-islands framing difficulty as item 6's cursor-scale
+verification) — logic was traced by hand instead (REASONED); the author's
+own hand-test hovering a second real player's island is the real verification
+here.
+
+---
+
+**Previous batch:** F9.5 item 6 — other players' cursors drawn screen-space
 today, so zooming out leaves them huge relative to the tiles (and zooming in
 leaves them small).
 

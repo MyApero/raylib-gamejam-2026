@@ -10,7 +10,6 @@ use std::sync::OnceLock;
 pub mod constants {
     pub const ISLAND_RADIUS: i32 = 13;
     pub const SLOT_SPACING: i32 = 29;
-    pub const PRESENCE_TIMEOUT_SECS: i64 = 3;
     /// Client-side send-rate cap for `set_pos`; the server has no matching
     /// limit (cursor spam is cheap), this just avoids flooding the socket.
     pub const CURSOR_SEND_HZ: f32 = 20.0;

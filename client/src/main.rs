@@ -30,6 +30,11 @@ const LONG_PRESS_TOL_PX: f32 = 8.0;
 /// `LONG_PRESS_TOL_PX`) toggle a like/unlike instead of opening the info
 /// popup — see `pending_info_click`.
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
+/// F9.5 item 7 / decision 17: how long the cursor must sit continuously over
+/// a foreign island before its info popup opens on its own — long enough
+/// that a paint stroke's cursor briefly sweeping past a neighboring border
+/// doesn't flicker it open.
+const HOVER_OPEN_DELAY: Duration = Duration::from_millis(200);
 
 /// `credentials::File` keys its storage path only by this string
 /// (`~/.spacetimedb_client_credentials/<key>`), shared by every process on
@@ -44,10 +49,6 @@ fn creds_store() -> credentials::File {
     credentials::File::new(key)
 }
 
-fn is_present(last_seen: Timestamp, now: Timestamp) -> bool {
-    now.duration_since(last_seen)
-        .is_some_and(|elapsed| elapsed.as_secs() < PRESENCE_TIMEOUT_SECS as u64)
-}
 
 /// The caller's own island, if the subscription has it yet.
 fn my_island(ctx: &DbConnection, me: Identity) -> Option<Island> {
@@ -259,6 +260,14 @@ fn main() {
     // same island follows (-> like/unlike toggle) before it resolves into
     // actually opening the info popup. See the gesture block below.
     let mut pending_info_click: Option<(Instant, Vector2, u32)> = None;
+    // F9.5 item 7 / decision 17: `(island_id, hover_started_at)` for the
+    // currently-hovered foreign island, tracked purely by cursor position
+    // (independent of `long_press`/`pending_info_click` above, which stay
+    // exactly as shipped for the double-click-to-like/touch-tap gesture).
+    // Reset whenever the hovered island changes or the cursor leaves foreign
+    // territory; only actually opens the popup once `HOVER_OPEN_DELAY` has
+    // elapsed AND no paint/pan/long-press gesture is in progress.
+    let mut hover_target: Option<(u32, Instant)> = None;
     // `inventory` insert-watch for the merge toast: seeded once (skipping
     // rows that already exist, e.g. the starting hue from `client_connected`)
     // so only rows inserted *after* that point are treated as "new".
@@ -642,6 +651,47 @@ fn main() {
             }
         }
 
+        // F9.5 item 7 / decision 17: island info on hover (desktop). Purely
+        // position-based — independent of the click/long-press gesture
+        // block above, which is left untouched for double-click-to-like and
+        // touch (tap opens, double-tap likes; raylib-web aliases a single
+        // touch to ordinary mouse events, so that path already covers touch).
+        let currently_hovered_foreign = me.and_then(|me| {
+            let (hq, hr) = world::world_to_axial(mouse_world);
+            island_at(&ctx, hq, hr).filter(|(island, _, _)| island.owner != me).map(|(island, _, _)| island.id)
+        });
+        match currently_hovered_foreign {
+            Some(id) => {
+                if hover_target.map(|(hid, _)| hid) != Some(id) {
+                    hover_target = Some((id, Instant::now()));
+                }
+                // Suppressed while any button is held (mid paint stroke,
+                // pan, or long-press) so a drag sweeping past a neighboring
+                // island's border doesn't flicker its popup open.
+                let gesturing = rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
+                    || rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE);
+                if !ui_state.overlay_open && !ui_state.account_open && !gesturing {
+                    if let Some((hid, since)) = hover_target {
+                        let already_open = ui_state.island_popup.as_ref().is_some_and(|p| p.island_id == id);
+                        if hid == id && !already_open && since.elapsed() >= HOVER_OPEN_DELAY {
+                            if let Some(me) = me {
+                                open_island_info(&ctx, &mut ui_state, id, me, now);
+                            }
+                        }
+                    }
+                }
+            }
+            None => hover_target = None,
+        }
+        // Closes on hover-out, regardless of how the popup was opened
+        // (hover or the click/double-click path above) — moving off the
+        // island it's about should always dismiss it.
+        if let Some(popup) = &ui_state.island_popup {
+            if currently_hovered_foreign != Some(popup.island_id) {
+                ui_state.island_popup = None;
+            }
+        }
+
         // View-space culling bounds, padded well past the screen edges so
         // panning/zooming out doesn't pop islands in and out abruptly.
         let pad = (ISLAND_RADIUS as f32) * 2.0 * 5.0;
@@ -680,7 +730,13 @@ fn main() {
             .db
             .user()
             .iter()
-            .filter(|u| is_present(u.last_seen, now) && Some(u.identity) != me)
+            // Author-reported: cursors used to vanish ~3s after a player
+            // stopped moving their mouse (`is_present`'s freshness window,
+            // meant for merge-eligibility, was also gating cursor
+            // rendering) — a stationary-but-connected player should stay
+            // visible the whole time they're online, not just while
+            // actively moving.
+            .filter(|u| u.online && Some(u.identity) != me)
             .map(|u| {
                 (
                     rl.get_world_to_screen2D(Vector2::new(u.cx, u.cy), camera),
