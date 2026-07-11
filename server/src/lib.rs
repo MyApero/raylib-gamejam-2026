@@ -284,7 +284,9 @@ fn gift_drift_pos(spawn_x: f32, spawn_y: f32, elapsed_secs: f32) -> (f32, f32) {
 pub struct Config {
     #[primary_key]
     id: u32,
+    #[default(false)]
     frozen: bool,
+    #[default(None::<Identity>)]
     admin: Option<Identity>,
     /// F8: when set, a re-rank is landing at this timestamp — clients render
     /// a countdown banner from it. `None` outside the `RERANK_WARNING_SECS`
@@ -328,6 +330,7 @@ pub struct Inventory {
     /// the last-3 color ring instead of showing a "new color" toast) —
     /// appended at the end, same reason `Island.border_color` was, so
     /// `bin/web.rs`'s positional row parsing doesn't shift.
+    #[default(false)]
     from_gift: bool,
 }
 
@@ -350,11 +353,13 @@ pub struct Island {
     /// New fields appended at the end (not inserted among the existing
     /// ones) so `bin/web.rs`'s hand-rolled positional row parsing, which
     /// indexes fields by schema order, doesn't shift under it.
+    #[default(None::<u32>)]
     border_color: Option<u32>,
     /// Author-requested: hides the border entirely regardless of
     /// `border_color` — a separate flag rather than overloading
     /// `border_color: None` for "hidden", since that value already means
     /// "use the default seed-hue color".
+    #[default(false)]
     border_hidden: bool,
 }
 

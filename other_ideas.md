@@ -87,3 +87,7 @@ constant trick, in both clients.)
 - [ ] Put a clear hexel title with a ENTER
 
 - [x] The Saturation slider should go to 100 but block at the max you unlocked. Tooltip explaining (You need more XP to unlock more saturation)
+
+- [ ] Export My Island button at the top right. Island, Name, Link to their project, raylib.mister-esman.uk
+- [ ] hexel name at the center of the header
+- [ ] 
