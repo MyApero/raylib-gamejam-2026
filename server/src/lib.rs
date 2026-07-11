@@ -14,6 +14,10 @@ mod constants {
     pub const XP_MERGE_NEW: u64 = 25;
     pub const LEVEL_XP: u64 = 100;
     pub const START_SAT: u8 = 40;
+    /// How far (degrees, either direction) a painted hue may stray from an
+    /// unlocked inventory entry — lets the Hue slider nudge a shade without
+    /// bloating the inventory with one row per nudge.
+    pub const HUE_TOLERANCE: u16 = 5;
 }
 
 /// Axial hex geometry, slot-lattice mapping and cell-id packing — see
@@ -237,6 +241,12 @@ fn sat_cap(level: u64) -> u8 {
     (40 + 3 * level).min(100) as u8
 }
 
+/// Circular hue distance in degrees (handles the 359->0 wraparound).
+fn hue_dist(a: u16, b: u16) -> u16 {
+    let diff = (a as i32 - b as i32).unsigned_abs() as u16;
+    diff.min(360 - diff)
+}
+
 /// Deterministic-enough starting hue: hashes the identity's bytes. Not
 /// cryptographic, just needs to spread new players across the wheel.
 fn start_hue(identity: &Identity) -> u16 {
@@ -396,7 +406,13 @@ pub fn set_brush(ctx: &ReducerContext, hue: u16, sat: u8, val: u8) -> Result<(),
     if hue > 359 {
         return Err("hue out of range".to_string());
     }
-    if !ctx.db.inventory().owner().filter(&ctx.sender()).any(|inv| inv.hue == hue) {
+    if !ctx
+        .db
+        .inventory()
+        .owner()
+        .filter(&ctx.sender())
+        .any(|inv| hue_dist(inv.hue, hue) <= constants::HUE_TOLERANCE)
+    {
         return Err("hue not unlocked".to_string());
     }
     if sat > sat_cap(level_of(user.xp)) {
@@ -478,7 +494,7 @@ pub fn paint_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), Str
 
 #[spacetimedb::reducer]
 pub fn merge_with_cell(ctx: &ReducerContext, cell_kind: u8, cell_id: u32) -> Result<(), String> {
-    let me = ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
+    ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
     let (tile_hue, painter) = match cell_kind {
         0 => {
             let cell = ctx.db.island_cell().id().find(cell_id).ok_or("no such cell")?;
@@ -490,11 +506,28 @@ pub fn merge_with_cell(ctx: &ReducerContext, cell_kind: u8, cell_id: u32) -> Res
         }
         _ => return Err("invalid cell_kind".to_string()),
     };
-    if tile_hue == me.hue {
-        return Err("brush already matches this tile".to_string());
+    // Gate on already OWNING the color (within HUE_TOLERANCE, same window as
+    // `set_brush`'s validation), not an exact match and not just on it
+    // matching the current brush — a tile painted at `base - 5` while the
+    // painter's brush has since drifted to `base + 5` is still "the same
+    // color" as far as ownership goes, even though neither exactly equals
+    // the other or the unlocked `base` entry. This also keeps the eyedropper
+    // from being repeatable: after the first take, `tile_hue` is within
+    // tolerance of the caller's own inventory, so a repeat long-press on the
+    // same cell is rejected here instead of letting one placed tile be
+    // merged against indefinitely for free XP.
+    if ctx
+        .db
+        .inventory()
+        .owner()
+        .filter(&ctx.sender())
+        .any(|inv| hue_dist(inv.hue, tile_hue) <= constants::HUE_TOLERANCE)
+    {
+        return Err("you already have this color".to_string());
     }
-    let merged = merge::merge_hue(me.hue, tile_hue);
-    apply_merge(ctx, ctx.sender(), painter, merged, false);
+    // Long-press "takes" the tile's exact color rather than blending it with
+    // the caller's brush (unlike cursor-merge, which does blend).
+    apply_merge(ctx, ctx.sender(), painter, tile_hue, false);
     Ok(())
 }
 

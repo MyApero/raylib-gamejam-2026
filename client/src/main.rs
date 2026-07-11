@@ -6,7 +6,7 @@ use world::constants::*;
 
 use raylib::prelude::*;
 use spacetimedb_sdk::{credentials, DbContext, Identity, Table, Timestamp};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Local SpacetimeDB instance (`spacetime start`).
@@ -21,6 +21,10 @@ const CLIENT_PAINT_HZ: f32 = 100.0;
 /// (radius 13, so ~22.5 world units to the furthest edge) inside the
 /// 720x720 window with the header/footer bands and a little padding.
 const ISLAND_FIT_ZOOM: f32 = 13.0;
+/// Long-press-to-merge thresholds: hold LMB steady within `LONG_PRESS_TOL_PX`
+/// screen pixels for `LONG_PRESS_HOLD` to trigger `merge_with_cell`.
+const LONG_PRESS_HOLD: Duration = Duration::from_millis(400);
+const LONG_PRESS_TOL_PX: f32 = 8.0;
 
 /// `credentials::File` keys its storage path only by this string
 /// (`~/.spacetimedb_client_credentials/<key>`), shared by every process on
@@ -76,6 +80,85 @@ fn classify(ctx: &DbConnection, me: Identity, world_q: i32, world_r: i32) -> Pai
     Paintable::None
 }
 
+/// Like `classify`, but considers every island, not just the caller's —
+/// long-press merge can target any player's painted tile.
+fn island_at(ctx: &DbConnection, world_q: i32, world_r: i32) -> Option<(Island, i32, i32)> {
+    for island in ctx.db.island().iter() {
+        let (q, r) = world::slot_coords(island.slot);
+        let (ccx, ccy) = world::slot_center(q, r);
+        let (lq, lr) = (world_q - ccx, world_r - ccy);
+        if world::hexdist(lq, lr) <= ISLAND_RADIUS {
+            return Some((island, lq, lr));
+        }
+    }
+    None
+}
+
+/// The painted cell (if any) at absolute world axial `(q, r)`: island cell
+/// (`kind` 0) or margin cell (`kind` 1), with its row id and current hue.
+/// Snapshotted once at long-press start; only used for the merge target, so
+/// staleness is harmless — the server re-checks `tile_hue != me.hue` at
+/// call time and rejects a no-op merge either way.
+fn merge_target_at(ctx: &DbConnection, world_q: i32, world_r: i32) -> Option<(u8, u32, u16)> {
+    if let Some((island, lq, lr)) = island_at(ctx, world_q, world_r) {
+        return ctx
+            .db
+            .island_cell()
+            .iter()
+            .find(|c| c.island_id == island.id && c.q == lq && c.r == lr)
+            .map(|c| (0u8, c.id, world::unpack_hsv(c.color).0));
+    }
+    if !world::in_any_island_territory(world_q, world_r) {
+        return ctx
+            .db
+            .margin_cell()
+            .iter()
+            .find(|c| c.q == world_q && c.r == world_r)
+            .map(|c| (1u8, c.id, world::unpack_hsv(c.color).0));
+    }
+    None
+}
+
+fn short_hex(id: Identity) -> String {
+    let hex = id.to_hex().to_string();
+    hex[..8.min(hex.len())].to_string()
+}
+
+/// Display label for a merge partner in the "new color" toast: their name if
+/// set, else their short identity hex.
+fn player_label(ctx: &DbConnection, id: Identity) -> String {
+    ctx.db
+        .user()
+        .identity()
+        .find(&id)
+        .and_then(|u| u.name.filter(|n| !n.is_empty()))
+        .unwrap_or_else(|| short_hex(id))
+}
+
+/// Whether `me` already effectively has `hue` unlocked — long-pressing a
+/// tile you already own is pointless (no new inventory row, no XP), so this
+/// gates both the eyedropper itself and the "+" hover hint. Uses the same
+/// `HUE_TOLERANCE` window as `set_brush`'s validation, not an exact match:
+/// a tile painted at, say, `base - 5` is still "the same color" as an
+/// unlocked `base` as far as ownership goes, even though the two differ by
+/// a few exact degrees.
+fn have_hue(ctx: &DbConnection, me: Identity, hue: u16) -> bool {
+    ctx.db
+        .inventory()
+        .iter()
+        .any(|inv| inv.owner == me && world::hue_dist(inv.hue, hue) <= HUE_TOLERANCE)
+}
+
+/// In-flight long-press-to-merge gesture: started on LMB press, cancelled by
+/// movement past the tolerance or button release, fires once at the hold
+/// threshold.
+struct LongPress {
+    press_screen: Vector2,
+    press_at: Instant,
+    target: Option<(u8, u32, u16)>,
+    fired: bool,
+}
+
 fn main() {
     let ctx = DbConnection::builder()
         .on_connect(|_ctx, _identity, token| {
@@ -129,6 +212,12 @@ fn main() {
     let mut stroke_last: Option<(u8, i32, i32)> = None;
     let mut last_paint_at = Instant::now();
     let mut ui_state = ui::UiState::new();
+    let mut long_press: Option<LongPress> = None;
+    // `inventory` insert-watch for the merge toast: seeded once (skipping
+    // rows that already exist, e.g. the starting hue from `client_connected`)
+    // so only rows inserted *after* that point are treated as "new".
+    let mut known_inventory_ids: HashSet<u64> = HashSet::new();
+    let mut inventory_seeded = false;
 
     while !rl.window_should_close() {
         if let Err(e) = ctx.frame_tick() {
@@ -151,6 +240,25 @@ fn main() {
                     // island would land off-target after any prior scroll.
                     camera.offset = Vector2::new(360.0, 360.0);
                     centered_on_island = true;
+                }
+            }
+        }
+
+        // Inventory-insert watch (F4 merge feedback): toast + last3 nudge
+        // when a new row for `me` appears. Runs before the HUD snapshot below
+        // so a toast fired this frame is visible in this same frame's draw.
+        if let Some(me) = me {
+            if !inventory_seeded {
+                if ctx.db.inventory().iter().any(|i| i.owner == me) {
+                    known_inventory_ids = ctx.db.inventory().iter().map(|i| i.id).collect();
+                    inventory_seeded = true;
+                }
+            } else {
+                for inv in ctx.db.inventory().iter() {
+                    if known_inventory_ids.insert(inv.id) && inv.owner == me {
+                        let label = inv.obtained_with.map_or_else(|| "someone".to_string(), |p| player_label(&ctx, p));
+                        ui_state.show_merge_toast(inv.hue, &label);
+                    }
                 }
             }
         }
@@ -181,9 +289,12 @@ fn main() {
                 hues: &hues,
             };
             let actions = ui::handle_input(&mut rl, &mut ui_state, &info);
+            // Note: last-3 tracking happens inside `ui::handle_input` itself
+            // (only on an explicit swatch/last-3 click), NOT here — every
+            // `set_brush` action also fires continuously while dragging the
+            // Hue/Sat/Val sliders, which must not spam the last-3 ring.
             if let Some((h, s, v)) = actions.set_brush {
                 let _ = ctx.reducers.set_brush(h, s, v);
-                ui_state.note_used_hue(h);
             }
             if let Some(name) = actions.set_name {
                 let _ = ctx.reducers.set_name(name);
@@ -270,6 +381,44 @@ fn main() {
             stroke_last = None;
         }
 
+        // Long-press-to-merge: hold LMB steady on a painted cell for
+        // LONG_PRESS_HOLD -> merge_with_cell. Doubles as "a cell you're NOT
+        // painting": if the cell was paintable by you, the ordinary
+        // paint-on-press call above already overwrote it with your own hue,
+        // so by the time this timer would fire the tile no longer differs
+        // from your brush and the server rejects the merge as a no-op.
+        // `target` is filtered to hues not already in the caller's
+        // inventory at press-time — long-pressing a color you already own
+        // gets no hold ring at all, matching the "+" hover hint below.
+        if !map_input_allowed {
+            long_press = None;
+        } else if let Some(me) = me {
+            if !panning && rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
+                let (wq, wr) = world::world_to_axial(mouse_world);
+                long_press = Some(LongPress {
+                    press_screen: mouse_screen,
+                    press_at: Instant::now(),
+                    target: merge_target_at(&ctx, wq, wr).filter(|&(_, _, hue)| !have_hue(&ctx, me, hue)),
+                    fired: false,
+                });
+            }
+            if let Some(lp) = &mut long_press {
+                let dx = mouse_screen.x - lp.press_screen.x;
+                let dy = mouse_screen.y - lp.press_screen.y;
+                let moved = (dx * dx + dy * dy).sqrt() > LONG_PRESS_TOL_PX;
+                if moved || !rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) {
+                    long_press = None;
+                } else if !lp.fired && lp.press_at.elapsed() >= LONG_PRESS_HOLD {
+                    lp.fired = true;
+                    if let Some((kind, id, _)) = lp.target {
+                        let _ = ctx.reducers.merge_with_cell(kind, id);
+                    }
+                }
+            }
+        } else {
+            long_press = None;
+        }
+
         // View-space culling bounds, padded well past the screen edges so
         // panning/zooming out doesn't pop islands in and out abruptly.
         let pad = (ISLAND_RADIUS as f32) * 2.0 * 5.0;
@@ -298,6 +447,7 @@ fn main() {
             })
             .collect();
 
+        let hover_takeable;
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::new(18, 18, 24, 255));
 
@@ -355,6 +505,15 @@ fn main() {
                 d2.draw_poly(hover_center, 6, 1.0, 0.0, Color::new(255, 255, 255, 70));
                 d2.draw_poly_lines_ex(hover_center, 6, 1.0, 0.0, 0.06, Color::new(255, 255, 255, 210));
             }
+
+            // Eyedropper hint: a cell not paintable by the caller (someone
+            // else's island — the only real long-press-merge target, see the
+            // long-press block below) whose hue isn't already unlocked.
+            hover_takeable = map_input_allowed
+                && me.is_some_and(|me| {
+                    matches!(classify(&ctx, me, hq, hr), Paintable::None)
+                        && merge_target_at(&ctx, hq, hr).is_some_and(|(_, _, hue)| !have_hue(&ctx, me, hue))
+                });
         }
 
         // Other players' cursors sit under the HUD (world-space indicators);
@@ -390,6 +549,14 @@ fn main() {
 
             let (hue, sat, val) = brush;
             world::draw_cursor(&mut d, mouse_screen, world::hsv_color(hue, sat, val));
+        }
+        if hover_takeable {
+            world::draw_plus_hint(&mut d, mouse_screen);
+        }
+        if let Some(frac) = long_press.as_ref().filter(|lp| !lp.fired && lp.target.is_some()).map(|lp| {
+            (lp.press_at.elapsed().as_secs_f32() / LONG_PRESS_HOLD.as_secs_f32()).clamp(0.0, 1.0)
+        }) {
+            world::draw_hold_ring(&mut d, mouse_screen, frac);
         }
         d.draw_fps(640, 10);
     }

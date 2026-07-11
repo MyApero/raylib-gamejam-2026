@@ -8,8 +8,11 @@
 use raylib::prelude::*;
 use spacetimedb_sdk::Identity;
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use crate::world;
+
+const TOAST_DURATION: Duration = Duration::from_millis(2500);
 
 pub const HEADER_H: f32 = 28.0;
 pub const FOOTER_H: f32 = 44.0;
@@ -23,8 +26,28 @@ fn point_in(p: Vector2, r: Rectangle) -> bool {
 #[derive(Clone, Copy, PartialEq)]
 enum Drag {
     None,
+    Hue,
     Sat,
     Val,
+}
+
+/// Signed circular offset of `current` from `base`, in `(-180, 180]`.
+fn hue_offset_signed(current: u16, base: u16) -> i32 {
+    let mut diff = current as i32 - base as i32;
+    if diff > 180 {
+        diff -= 360;
+    } else if diff < -180 {
+        diff += 360;
+    }
+    diff
+}
+
+/// "New color obtained" feedback for a just-inserted `inventory` row of the
+/// caller's own — a toast line plus a fading flash of the new hue.
+struct Toast {
+    text: String,
+    hue: u16,
+    shown_at: Instant,
 }
 
 pub struct UiState {
@@ -34,6 +57,22 @@ pub struct UiState {
     pub overlay_open: bool,
     pub last3: VecDeque<u16>,
     dragging: Drag,
+    toast: Option<Toast>,
+    /// Anchor hue for the Hue slider's ±`HUE_TOLERANCE` window. Set exactly
+    /// on a swatch click; otherwise auto-recentered (see `handle_input`)
+    /// whenever the server's actual brush hue drifts outside that window —
+    /// which is how it silently follows merges (cursor- or tile-) without
+    /// needing `main.rs` to know anything about it.
+    base_hue: u16,
+    /// The hue an explicit swatch click most recently asked the server to
+    /// set, until `info.brush.0` echoes it back. Without this, the one frame
+    /// between the click (which sets `base_hue` immediately) and the
+    /// `set_brush` round trip landing would compare the NEW anchor against
+    /// the OLD confirmed brush hue — for two distant colors that's a huge
+    /// jump, which both flickers `base_hue` back toward the old selection
+    /// (via the resync check) and snaps the slider handle to an extreme for
+    /// one frame before it settles at 0.
+    pending_select: Option<u16>,
 }
 
 impl UiState {
@@ -45,7 +84,22 @@ impl UiState {
             overlay_open: false,
             last3: VecDeque::new(),
             dragging: Drag::None,
+            toast: None,
+            base_hue: 0,
+            pending_select: None,
         }
+    }
+
+    /// Called by `main.rs` when it sees a fresh `inventory` row belonging to
+    /// the caller (cursor- or tile-merge). `partner_label` is the other
+    /// player's name if set, else their short identity hex.
+    pub fn show_merge_toast(&mut self, hue: u16, partner_label: &str) {
+        self.toast = Some(Toast {
+            text: format!("new color, obtained with {partner_label}"),
+            hue,
+            shown_at: Instant::now(),
+        });
+        self.note_used_hue(hue);
     }
 
     /// Seeds the name field from the server row exactly once. After that the
@@ -137,6 +191,11 @@ fn swatch_rect(i: usize) -> Rectangle {
     )
 }
 
+fn hue_slider_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 40.0, o.y + o.height - 160.0, 440.0, 16.0)
+}
+
 fn sat_slider_rect() -> Rectangle {
     let o = overlay_rect();
     Rectangle::new(o.x + 40.0, o.y + o.height - 110.0, 440.0, 16.0)
@@ -158,18 +217,47 @@ fn slider_hit(track: Rectangle) -> Rectangle {
     Rectangle::new(track.x, track.y - 10.0, track.width, track.height + 20.0)
 }
 
-/// The currently-selected hue is rendered at the ACTUAL brush sat/val, so
-/// dragging the sliders visibly repaints it live; every other swatch is just
-/// a "what you'd get" preview at the sat cap.
+/// Every swatch (footer last-3, inventory grid) is rendered at the CURRENT
+/// brush sat/val, not just the selected hue — dragging the sliders previews
+/// what every unlocked hue would look like at that sat/val, which is the
+/// whole point of comparing them side by side before picking one.
 fn swatch_color(hue: u16, info: &HudInfo) -> Color {
-    if hue == info.brush.0 {
-        world::hsv_color(hue, info.brush.1, info.brush.2)
-    } else {
-        world::hsv_color(hue, info.sat_cap, 90)
-    }
+    world::hsv_color(hue, info.brush.1, info.brush.2)
+}
+
+/// The brush hue to treat as "current" for Hue-slider bookkeeping: an
+/// explicit click's own just-requested hue until the server confirms it via
+/// `info.brush.0`, which avoids a 1-frame mismatch right after the click
+/// (see `UiState::pending_select`).
+fn effective_hue(state: &UiState, info: &HudInfo) -> u16 {
+    state.pending_select.unwrap_or(info.brush.0)
 }
 
 pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) -> Actions {
+    if state.toast.as_ref().is_some_and(|t| t.shown_at.elapsed() >= TOAST_DURATION) {
+        state.toast = None;
+    }
+    if state.pending_select == Some(info.brush.0) {
+        state.pending_select = None;
+    }
+    // Re-anchor the Hue slider whenever the actual brush hue has drifted
+    // outside its window (a merge changed it server-side, the live hue was
+    // left nudged away from any exact swatch by a previous session, or this
+    // is the very first frame and `base_hue` is still its `0` default) — run
+    // before any click handling below so an explicit swatch click this same
+    // frame (which sets `base_hue` directly) always wins over this. Snaps to
+    // the NEAREST owned exact hue rather than the raw (possibly nudged)
+    // brush value, so the inventory grid's "selected" swatch is always some
+    // real entry, never a value that matches nothing in `info.hues`.
+    let cur_hue = effective_hue(state, info);
+    if world::hue_dist(cur_hue, state.base_hue) > world::constants::HUE_TOLERANCE {
+        state.base_hue = info
+            .hues
+            .iter()
+            .copied()
+            .min_by_key(|&h| world::hue_dist(cur_hue, h))
+            .unwrap_or(cur_hue);
+    }
     let mut actions = Actions::default();
     let mouse = rl.get_mouse_position();
     let clicked = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT);
@@ -179,10 +267,20 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     if clicked && point_in(mouse, center_btn_rect()) {
         actions.center_camera = true;
     }
+    // Collected first, applied after: `note_used_hue` below needs `&mut
+    // state.last3`, which can't happen while this loop still holds `.iter()`
+    // borrowed from it.
+    let mut last3_clicked = None;
     for (i, &hue) in state.last3.iter().enumerate() {
         if clicked && point_in(mouse, last3_rect(i)) {
-            actions.set_brush = Some((hue, info.brush.1.min(info.sat_cap), info.brush.2));
+            last3_clicked = Some(hue);
         }
+    }
+    if let Some(hue) = last3_clicked {
+        actions.set_brush = Some((hue, info.brush.1.min(info.sat_cap), info.brush.2));
+        state.base_hue = hue;
+        state.pending_select = Some(hue);
+        state.note_used_hue(hue);
     }
     if clicked && point_in(mouse, inventory_btn_rect()) {
         state.overlay_open = !state.overlay_open;
@@ -232,13 +330,19 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     for (i, &hue) in info.hues.iter().enumerate() {
         if clicked && point_in(mouse, swatch_rect(i)) {
             actions.set_brush = Some((hue, info.brush.1.min(info.sat_cap), info.brush.2));
+            state.base_hue = hue;
+            state.pending_select = Some(hue);
+            state.note_used_hue(hue);
         }
     }
 
+    let hue_hit = slider_hit(hue_slider_rect());
     let sat_hit = slider_hit(sat_slider_rect());
     let val_hit = slider_hit(val_slider_rect());
     if clicked {
-        if point_in(mouse, sat_hit) {
+        if point_in(mouse, hue_hit) {
+            state.dragging = Drag::Hue;
+        } else if point_in(mouse, sat_hit) {
             state.dragging = Drag::Sat;
         } else if point_in(mouse, val_hit) {
             state.dragging = Drag::Val;
@@ -249,6 +353,16 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     }
     if held {
         match state.dragging {
+            Drag::Hue => {
+                let tol = world::constants::HUE_TOLERANCE;
+                let track = hue_slider_rect();
+                let frac = ((mouse.x - track.x) / track.width).clamp(0.0, 1.0);
+                let offset = (frac * (2 * tol) as f32).round() as i32 - tol;
+                let target = (state.base_hue as i32 + offset).rem_euclid(360) as u16;
+                if target != info.brush.0 {
+                    actions.set_brush = Some((target, info.brush.1, info.brush.2));
+                }
+            }
             Drag::Sat => {
                 let v = slider_value(sat_slider_rect(), mouse.x, info.sat_cap as f32);
                 if v != info.brush.1 {
@@ -272,8 +386,26 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     draw_header(d, info);
     draw_footer(d, state, info);
     if state.overlay_open {
-        draw_overlay(d, info);
+        draw_overlay(d, state, info);
     }
+    if let Some(toast) = &state.toast {
+        draw_toast(d, toast, info);
+    }
+}
+
+/// Banner just under the header, with a flash swatch that fades out over
+/// `TOAST_DURATION` (the "new color" feedback from a merge).
+fn draw_toast(d: &mut impl RaylibDraw, toast: &Toast, info: &HudInfo) {
+    let frac = 1.0 - (toast.shown_at.elapsed().as_secs_f32() / TOAST_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+    let alpha = (frac * 235.0) as u8;
+    let bar = Rectangle::new(180.0, HEADER_H + 10.0, 360.0, 34.0);
+    d.draw_rectangle_rec(bar, Color::new(24, 24, 30, alpha));
+    d.draw_rectangle_lines_ex(bar, 1.0, Color::new(255, 215, 0, alpha));
+    let swatch = Rectangle::new(bar.x + 6.0, bar.y + 6.0, 22.0, 22.0);
+    let mut flash = world::hsv_color(toast.hue, info.sat_cap, 90);
+    flash.a = alpha;
+    d.draw_rectangle_rec(swatch, flash);
+    d.draw_text(&toast.text, bar.x as i32 + 36, bar.y as i32 + 9, 14, Color::new(255, 255, 255, alpha));
 }
 
 fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo) {
@@ -333,7 +465,7 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     );
 }
 
-fn draw_overlay(d: &mut impl RaylibDraw, info: &HudInfo) {
+fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     // Dim the world behind the modal.
     d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
 
@@ -349,7 +481,11 @@ fn draw_overlay(d: &mut impl RaylibDraw, info: &HudInfo) {
     for (i, &hue) in info.hues.iter().enumerate() {
         let r = swatch_rect(i);
         d.draw_rectangle_rec(r, swatch_color(hue, info));
-        let selected = hue == info.brush.0;
+        // Compare against the Hue slider's anchor, not the live (possibly
+        // nudged) brush hue — otherwise dragging the slider away from 0
+        // makes every swatch look unselected even though you're still
+        // fine-tuning the same one.
+        let selected = hue == state.base_hue;
         d.draw_rectangle_lines_ex(
             r,
             if selected { 3.0 } else { 1.0 },
@@ -357,8 +493,29 @@ fn draw_overlay(d: &mut impl RaylibDraw, info: &HudInfo) {
         );
     }
 
+    let tol = world::constants::HUE_TOLERANCE;
+    let offset = hue_offset_signed(effective_hue(state, info), state.base_hue).clamp(-tol, tol);
+    draw_hue_slider(d, hue_slider_rect(), offset, tol);
     draw_slider(d, sat_slider_rect(), info.brush.1, info.sat_cap, &format!("Saturation ({})", info.brush.1));
     draw_slider(d, val_slider_rect(), info.brush.2, 100, &format!("Value ({})", info.brush.2));
+}
+
+/// Signed ±`tol` slider: a center tick at offset 0 plus a handle that can
+/// land either side of it, unlike the one-directional Saturation/Value bars.
+fn draw_hue_slider(d: &mut impl RaylibDraw, track: Rectangle, offset: i32, tol: i32) {
+    let label = if offset == 0 { "Hue (0)".to_string() } else { format!("Hue ({offset:+})") };
+    d.draw_text(&label, track.x as i32, track.y as i32 - 18, 14, Color::LIGHTGRAY);
+    d.draw_rectangle_rec(track, Color::new(50, 50, 58, 255));
+    let mid_x = track.x + track.width / 2.0;
+    d.draw_line_ex(
+        Vector2::new(mid_x, track.y),
+        Vector2::new(mid_x, track.y + track.height),
+        1.0,
+        Color::new(200, 200, 200, 140),
+    );
+    let frac = (offset + tol) as f32 / (2 * tol) as f32;
+    let handle_x = track.x + track.width * frac;
+    d.draw_circle(handle_x as i32, (track.y + track.height / 2.0) as i32, 9.0, Color::RAYWHITE);
 }
 
 fn draw_slider(d: &mut impl RaylibDraw, track: Rectangle, value: u8, max: u8, label: &str) {

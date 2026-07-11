@@ -15,6 +15,11 @@ pub mod constants {
     /// limit (cursor spam is cheap), this just avoids flooding the socket.
     pub const CURSOR_SEND_HZ: f32 = 20.0;
     pub const LEVEL_XP: u64 = 100;
+    /// How far (degrees, either direction) the Hue slider may nudge the
+    /// selected inventory hue — mirrors `server::constants::HUE_TOLERANCE`,
+    /// which is the actual enforcement point; this just keeps the slider
+    /// from offering a value the server would reject.
+    pub const HUE_TOLERANCE: i32 = 5;
 }
 
 pub fn level_of(xp: u64) -> u64 {
@@ -23,6 +28,14 @@ pub fn level_of(xp: u64) -> u64 {
 
 pub fn sat_cap(level: u64) -> u8 {
     (40 + 3 * level).min(100) as u8
+}
+
+/// Circular hue distance in degrees (handles the 359->0 wraparound). Mirrors
+/// `server::hue_dist` exactly — both sides must agree on what "close to an
+/// unlocked hue" means (Hue slider tolerance, long-press ownership check).
+pub fn hue_dist(a: u16, b: u16) -> i32 {
+    let diff = (a as i32 - b as i32).unsigned_abs() as i32;
+    diff.min(360 - diff)
 }
 
 pub fn hexdist(dq: i32, dr: i32) -> i32 {
@@ -146,6 +159,24 @@ pub fn pack_hsv(h: u16, s: u8, v: u8) -> u32 {
 
 pub fn hsv_color(h: u16, s: u8, v: u8) -> Color {
     Color::color_from_hsv(h as f32, s as f32 / 100.0, v as f32 / 100.0)
+}
+
+/// Small "+" badge near the screen-space cursor, shown while hovering a
+/// long-press-eyedropper-eligible tile (painted, someone else's, hue not
+/// already in the caller's inventory) — signals "you can pick this up".
+pub fn draw_plus_hint(d: &mut impl RaylibDraw, m: Vector2) {
+    let cx = m.x + 18.0;
+    let cy = m.y + 2.0;
+    d.draw_circle(cx as i32, cy as i32, 8.0, Color::new(20, 20, 24, 220));
+    d.draw_line_ex(Vector2::new(cx - 4.0, cy), Vector2::new(cx + 4.0, cy), 2.0, Color::RAYWHITE);
+    d.draw_line_ex(Vector2::new(cx, cy - 4.0), Vector2::new(cx, cy + 4.0), 2.0, Color::RAYWHITE);
+}
+
+/// Progress ring around the screen-space cursor while long-pressing toward a
+/// merge (`frac` 0.0..1.0 of the hold threshold elapsed).
+pub fn draw_hold_ring(d: &mut impl RaylibDraw, m: Vector2, frac: f32) {
+    let center = Vector2::new(m.x + 6.0, m.y + 12.0);
+    d.draw_ring(center, 10.0, 14.0, -90.0, -90.0 + 360.0 * frac.clamp(0.0, 1.0), 24, Color::new(255, 255, 255, 220));
 }
 
 /// Filled+outlined flat-top hex at world `center` with world-unit `radius`
