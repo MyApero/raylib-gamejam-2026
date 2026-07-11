@@ -7,7 +7,36 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9.5 item 7 redesign (author feedback, same day as the
+**Current batch:** F9.5 item 9 — island placement retest (ex-F6.5 task 2).
+The original report predates the F2-F6 geometry rewrites; plan.md's own
+instruction is to retest fresh and only chase render-side causes if it still
+reproduces.
+
+**Checked mathematically** (not just "ruled out by inspection" — actually
+computed): a standalone replica of `server::geometry::slot_coords` /
+`world::slot_coords` (both must match exactly; verified they do by reading
+both side by side, unchanged this batch), run for slots 0..500 — zero
+duplicate coarse-cell assignments (every slot gets a genuinely distinct
+position, the hex-spiral algorithm itself has no bug), and the MINIMUM
+world-space hexdist between any two islands' centers across that whole
+range is exactly `SLOT_SPACING` (29), comfortably more than the `2 *
+ISLAND_RADIUS` (26) needed to guarantee no two islands' 547-cell interiors
+can ever overlap — a 3-unit margin gap always holds, by construction, for
+every slot the spiral will ever produce, not just the 17 currently live on
+the local instance (cross-checked against those 17 real slots too: no
+duplicates there either).
+
+**Not done**: a live visual re-check on the actual deployed build (culling
+pop-in padding, stale/duplicate subscription rows are render-side concerns
+the math above can't rule out) — this is explicitly the author's own
+retest per plan.md's wording, and the author is doing their own hand-testing
+pass right now rather than having me script another browser session for it.
+Leaving this unchecked in `known_bugs.md` until the author confirms visually;
+the geometry itself is verified clean either way.
+
+---
+
+**Previous batch:** F9.5 item 7 redesign (author feedback, same day as the
 original batch) — the F8-style big centered modal (backdrop dim, close
 button, Like/Unlike button, clickable link row) was too heavy for something
 that now opens on mere hover; author asked for "way simpler... glue to the
