@@ -10,6 +10,7 @@ pub struct Config {
     pub id: u32,
     pub frozen: bool,
     pub admin: Option<__sdk::Identity>,
+    pub next_rerank_at: Option<__sdk::Timestamp>,
 }
 
 impl __sdk::InModule for Config {
@@ -23,6 +24,7 @@ pub struct ConfigCols {
     pub id: __sdk::__query_builder::Col<Config, u32>,
     pub frozen: __sdk::__query_builder::Col<Config, bool>,
     pub admin: __sdk::__query_builder::Col<Config, Option<__sdk::Identity>>,
+    pub next_rerank_at: __sdk::__query_builder::Col<Config, Option<__sdk::Timestamp>>,
 }
 
 impl __sdk::__query_builder::HasCols for Config {
@@ -32,6 +34,7 @@ impl __sdk::__query_builder::HasCols for Config {
             id: __sdk::__query_builder::Col::new(table_name, "id"),
             frozen: __sdk::__query_builder::Col::new(table_name, "frozen"),
             admin: __sdk::__query_builder::Col::new(table_name, "admin"),
+            next_rerank_at: __sdk::__query_builder::Col::new(table_name, "next_rerank_at"),
         }
     }
 }

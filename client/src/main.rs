@@ -25,6 +25,11 @@ const ISLAND_FIT_ZOOM: f32 = 13.0;
 /// screen pixels for `LONG_PRESS_HOLD` to trigger `merge_with_cell`.
 const LONG_PRESS_HOLD: Duration = Duration::from_millis(400);
 const LONG_PRESS_TOL_PX: f32 = 8.0;
+/// Author-requested: two clean single-clicks landing on the SAME foreign
+/// island within this window (and without drifting past
+/// `LONG_PRESS_TOL_PX`) toggle a like/unlike instead of opening the info
+/// popup — see `pending_info_click`.
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
 /// `credentials::File` keys its storage path only by this string
 /// (`~/.spacetimedb_client_credentials/<key>`), shared by every process on
@@ -144,13 +149,53 @@ fn have_hue(ctx: &DbConnection, me: Identity, hue: u16) -> bool {
         .any(|inv| inv.owner == me && world::hue_dist(inv.hue, hue) <= HUE_TOLERANCE)
 }
 
+/// F8: coarse "N {unit} ago" label for the island-info popup — no date/time
+/// crate in this workspace, and a jam popup doesn't need calendar precision.
+fn format_age(now: Timestamp, created_at: Timestamp) -> String {
+    let secs = now.duration_since(created_at).map(|d| d.as_secs()).unwrap_or(0);
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// Whether `me` has already liked `island_id` — shared by the popup payload
+/// and the double-click-to-like toggle below.
+fn already_liked(ctx: &DbConnection, island_id: u32, me: Identity) -> bool {
+    ctx.db.island_like().iter().any(|l| l.island_id == island_id && l.liker == me)
+}
+
+/// F8: builds the popup payload for `island_id` and opens it. A no-op if the
+/// island has since vanished (can't happen for real islands, defensive only).
+fn open_island_info(ctx: &DbConnection, ui_state: &mut ui::UiState, island_id: u32, me: Identity, now: Timestamp) {
+    let Some(island) = ctx.db.island().id().find(&island_id) else { return };
+    let already_liked = already_liked(ctx, island_id, me);
+    ui_state.open_island_info(ui::IslandInfo {
+        island_id,
+        owner_label: player_label(ctx, island.owner),
+        likes: island.likes,
+        age_label: format_age(now, island.created_at),
+        link_id: island.itch_rate_id,
+        is_own: island.owner == me,
+        already_liked,
+    });
+}
+
 /// In-flight long-press-to-merge gesture: started on LMB press, cancelled by
 /// movement past the tolerance or button release, fires once at the hold
-/// threshold.
+/// threshold. Also tracks the F8 island-info target, which fires instead on
+/// a plain (short, unmoved) click — the two gestures are distinguished only
+/// by hold duration, never both fire for the same press.
 struct LongPress {
     press_screen: Vector2,
     press_at: Instant,
     target: Option<(u8, u32, u16)>,
+    info_target: Option<u32>,
     fired: bool,
 }
 
@@ -183,6 +228,7 @@ fn main() {
         "SELECT * FROM user",
         "SELECT * FROM inventory",
         "SELECT * FROM island",
+        "SELECT * FROM island_like",
         "SELECT * FROM island_cell",
         "SELECT * FROM margin_cell",
     ]);
@@ -208,6 +254,11 @@ fn main() {
     let mut last_paint_at = Instant::now();
     let mut ui_state = ui::UiState::new();
     let mut long_press: Option<LongPress> = None;
+    // Author-requested: a clean single-click on a foreign island, held
+    // pending for DOUBLE_CLICK_WINDOW to see whether a second click on the
+    // same island follows (-> like/unlike toggle) before it resolves into
+    // actually opening the info popup. See the gesture block below.
+    let mut pending_info_click: Option<(Instant, Vector2, u32)> = None;
     // `inventory` insert-watch for the merge toast: seeded once (skipping
     // rows that already exist, e.g. the starting hue from `client_connected`)
     // so only rows inserted *after* that point are treated as "new".
@@ -271,6 +322,26 @@ fn main() {
             let locked = user.as_ref().is_some_and(|u| u.locked);
             let level = world::level_of(xp);
             ui_state.sync_name_once(user.as_ref().and_then(|u| u.name.as_ref()));
+            // Author-caught: the Like button looked unresponsive because the
+            // popup's `likes`/`already_liked` were a one-time snapshot from
+            // when it opened. Re-read both live every frame the popup is
+            // open, same as everything else in `HudInfo`.
+            if let Some(island_id) = ui_state.island_popup.as_ref().map(|p| p.island_id) {
+                if let Some(island) = ctx.db.island().id().find(&island_id) {
+                    let already_liked = ctx.db.island_like().iter().any(|l| l.island_id == island_id && l.liker == me);
+                    ui_state.refresh_island_popup(island.likes, already_liked);
+                }
+            }
+            // F8 re-rank countdown: `next_rerank_at.duration_since(now)` is
+            // `Some` only while the target is still in the future.
+            let rerank_secs = ctx
+                .db
+                .config()
+                .id()
+                .find(&0)
+                .and_then(|c| c.next_rerank_at)
+                .and_then(|t| t.duration_since(now))
+                .map(|d| d.as_secs_f32().ceil() as i64);
 
             let short_id = short_hex(me);
             let info = ui::HudInfo {
@@ -284,6 +355,7 @@ fn main() {
                 sat_cap: world::sat_cap(level),
                 hues: &hues,
                 show_token_import: false,
+                rerank_secs,
             };
             let actions = ui::handle_input(&mut rl, &mut ui_state, &info);
             // Note: last-3 tracking happens inside `ui::handle_input` itself
@@ -319,6 +391,20 @@ fn main() {
             if actions.reset_account {
                 let _ = ctx.reducers.reset_account();
             }
+            if let Some(island_id) = actions.like_island {
+                let _ = ctx.reducers.like_island(island_id);
+            }
+            if let Some(island_id) = actions.unlike_island {
+                let _ = ctx.reducers.unlike_island(island_id);
+            }
+            // Author-requested: footer button replacing the old "click your
+            // own island" gesture, which just painted instead of opening
+            // the popup.
+            if actions.open_own_island {
+                if let Some(island) = my_island(&ctx, me) {
+                    open_island_info(&ctx, &mut ui_state, island.id, me, now);
+                }
+            }
             if actions.center_camera {
                 if let Some(island) = my_island(&ctx, me) {
                     camera.target = island_world_center(&island);
@@ -330,7 +416,7 @@ fn main() {
                 }
             }
         }
-        let map_input_allowed = !ui_state.overlay_open && !ui_state.account_open;
+        let map_input_allowed = !ui_state.overlay_open && !ui_state.account_open && ui_state.island_popup.is_none();
 
         // Zoom toward the cursor (official raylib recipe): re-anchor
         // offset/target at the mouse before changing zoom so the world
@@ -416,6 +502,14 @@ fn main() {
                     press_screen: mouse_screen,
                     press_at: Instant::now(),
                     target: merge_target_at(&ctx, wq, wr).filter(|&(_, _, hue)| !have_hue(&ctx, me, hue)),
+                    // F8 (author follow-up): any point on a FOREIGN island's
+                    // territory, not just its center — released here opens
+                    // its info popup instead of painting. Your own island
+                    // stays paint-only; its popup now opens via the "My
+                    // Isle" footer button instead (`actions.open_own_island`).
+                    info_target: island_at(&ctx, wq, wr)
+                        .filter(|(island, _, _)| island.owner != me)
+                        .map(|(island, _, _)| island.id),
                     fired: false,
                 });
             }
@@ -423,7 +517,44 @@ fn main() {
                 let dx = mouse_screen.x - lp.press_screen.x;
                 let dy = mouse_screen.y - lp.press_screen.y;
                 let moved = (dx * dx + dy * dy).sqrt() > LONG_PRESS_TOL_PX;
-                if moved || !rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) {
+                let released = !rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT);
+                if moved || released {
+                    // Author-requested (Instagram-style): a clean short
+                    // click on a foreign island no longer opens the popup
+                    // immediately — it's held as `pending_info_click` for
+                    // DOUBLE_CLICK_WINDOW first, in case a second click
+                    // lands on the same island within it, which instead
+                    // toggles a like/unlike (with a floating +1/-1 pop) and
+                    // cancels the popup-open entirely. If no second click
+                    // arrives, the deferred-resolution check below opens the
+                    // popup once the window elapses. The trade-off is a
+                    // short, deliberate delay before a single click's popup
+                    // appears — otherwise the popup (which blocks further
+                    // map input while open) would swallow the second click
+                    // of every double-click before it could ever register.
+                    if released && !moved && !lp.fired {
+                        if let Some(island_id) = lp.info_target {
+                            let is_double = pending_info_click.is_some_and(|(t, pos, id)| {
+                                let ddx = pos.x - mouse_screen.x;
+                                let ddy = pos.y - mouse_screen.y;
+                                id == island_id
+                                    && t.elapsed() < DOUBLE_CLICK_WINDOW
+                                    && (ddx * ddx + ddy * ddy).sqrt() <= LONG_PRESS_TOL_PX
+                            });
+                            if is_double {
+                                let liked = already_liked(&ctx, island_id, me);
+                                if liked {
+                                    let _ = ctx.reducers.unlike_island(island_id);
+                                } else {
+                                    let _ = ctx.reducers.like_island(island_id);
+                                }
+                                ui_state.spawn_like_anim(mouse_screen, !liked);
+                                pending_info_click = None;
+                            } else {
+                                pending_info_click = Some((Instant::now(), mouse_screen, island_id));
+                            }
+                        }
+                    }
                     long_press = None;
                 } else if !lp.fired && lp.press_at.elapsed() >= LONG_PRESS_HOLD {
                     lp.fired = true;
@@ -434,6 +565,20 @@ fn main() {
             }
         } else {
             long_press = None;
+        }
+
+        // Resolves a `pending_info_click` into an actual popup-open once
+        // DOUBLE_CLICK_WINDOW has passed without a follow-up click landing
+        // on the same island (which would have consumed it as a
+        // like/unlike toggle instead, above). Runs every frame,
+        // independently of this frame's press/release state.
+        if let Some((clicked_at, _, island_id)) = pending_info_click {
+            if clicked_at.elapsed() >= DOUBLE_CLICK_WINDOW {
+                if let Some(me) = me {
+                    open_island_info(&ctx, &mut ui_state, island_id, me, now);
+                }
+                pending_info_click = None;
+            }
         }
 
         // View-space culling bounds, padded well past the screen edges so
@@ -447,6 +592,21 @@ fn main() {
 
         let island_cell_colors: HashMap<(u32, i32, i32), u32> =
             ctx.db.island_cell().iter().map(|c| ((c.island_id, c.q, c.r), c.color)).collect();
+
+        // Author-requested (F8 follow-up): each island's border is drawn in
+        // its owner's SEED hue — the color they started with (or re-rolled
+        // via reset), never the live/nudged brush — so the world map is
+        // browsable by "whose island is that" at a glance. Exactly one
+        // `obtained_with.is_none()` row exists per owner at any time (the
+        // original `client_connected` seed, or `reset_account`'s reseed,
+        // which deletes every prior row first).
+        let seed_hues: HashMap<Identity, u16> = ctx
+            .db
+            .inventory()
+            .iter()
+            .filter(|inv| inv.obtained_with.is_none())
+            .map(|inv| (inv.owner, inv.hue))
+            .collect();
 
         // Screen-space projection for other players' cursors, computed here
         // (not inside the draw call) because `rl` can't be borrowed again
@@ -489,14 +649,36 @@ fn main() {
                         });
                     world::draw_hex(&mut d2, cell_world, 1.0, fill, Color::new(40, 40, 46, 255));
                 }
-                if mine {
+                // Author-caught: sat/val used to be a fixed (85, 95),
+                // making the border a different shade than the owner's
+                // actual starting color. Matches `START_SAT`/100 exactly so
+                // it reads as literally "their first color", not a
+                // lookalike.
+                let border_color = seed_hues.get(&island.owner).map(|&hue| world::hsv_color(hue, 40, 100));
+                if let Some(border_color) = border_color {
                     let r_f = ISLAND_RADIUS as f32;
                     let corners: Vec<Vector2> = world::DIRECTIONS
                         .iter()
                         .map(|&(dq, dr)| world::axial_to_world(fcx + (dq as f32 * r_f) as i32, fcy + (dr as f32 * r_f) as i32))
                         .collect();
+                    // Own island's border is drawn thicker — still colored
+                    // by identity like every other island, just easier to
+                    // pick out as "mine" at a glance.
+                    //
+                    // Author-caught: thickness used to be a fixed WORLD-unit
+                    // value, so `BeginMode2D`'s zoom scaled it down along
+                    // with everything else — at low zoom it fell under a
+                    // screen pixel, and different edges (each at a slightly
+                    // different angle) rounded to zero at slightly different
+                    // zoom levels, making one side of the hexagon vanish
+                    // before the others. Converting the desired SCREEN pixel
+                    // width back to world units (dividing by zoom) keeps the
+                    // rendered line a constant, always-visible thickness
+                    // regardless of zoom.
+                    let px = if mine { 3.0 } else { 1.5 };
+                    let thickness = px / camera.zoom;
                     for i in 0..6 {
-                        d2.draw_line_ex(corners[i], corners[(i + 1) % 6], 0.3, Color::GOLD);
+                        d2.draw_line_ex(corners[i], corners[(i + 1) % 6], thickness, border_color);
                     }
                 }
             }
@@ -552,6 +734,14 @@ fn main() {
             let hues: Vec<u16> = ctx.db.inventory().iter().filter(|i| i.owner == me).map(|i| i.hue).collect();
             let level = world::level_of(xp);
             let short_id = short_hex(me);
+            let rerank_secs = ctx
+                .db
+                .config()
+                .id()
+                .find(&0)
+                .and_then(|c| c.next_rerank_at)
+                .and_then(|t| t.duration_since(now))
+                .map(|d| d.as_secs_f32().ceil() as i64);
             let info = ui::HudInfo {
                 short_id: &short_id,
                 level,
@@ -563,6 +753,7 @@ fn main() {
                 sat_cap: world::sat_cap(level),
                 hues: &hues,
                 show_token_import: false,
+                rerank_secs,
             };
             ui::draw(&mut d, &ui_state, &info);
 

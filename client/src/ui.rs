@@ -87,6 +87,39 @@ pub struct UiState {
     /// the JS clipboard call is fire-and-forget from Rust's side (no success
     /// signal comes back), so this just confirms the click registered.
     copy_clicked_at: Option<Instant>,
+    /// F8 island-info popup, opened by the caller (`main.rs`/`bin/web.rs`)
+    /// when a short click lands on a foreign island's center. Mutually
+    /// exclusive with `overlay_open`/`account_open`, same modal footprint.
+    pub island_popup: Option<IslandInfo>,
+    /// Author-requested: floating "+1"/"-1" feedback for a double-click
+    /// like/unlike on the map, screen-space so it survives camera pans
+    /// without recomputing a world->screen projection every frame. Pruned in
+    /// `handle_input` (same place `toast` expires), drawn in `draw`.
+    like_anims: Vec<LikeAnim>,
+}
+
+/// One floating like/unlike pop — see `UiState::spawn_like_anim`.
+struct LikeAnim {
+    pos: Vector2,
+    liked: bool,
+    started_at: Instant,
+}
+
+const LIKE_ANIM_DURATION: Duration = Duration::from_millis(600);
+
+/// Everything the F8 island-info popup needs to render, precomputed by the
+/// caller so this module stays free of SDK/DB types (mirrors `HudInfo`'s
+/// `short_id` convention).
+pub struct IslandInfo {
+    pub island_id: u32,
+    pub owner_label: String,
+    pub likes: u32,
+    /// Human-readable relative age (e.g. "3h ago"), precomputed by the
+    /// caller since this module has no notion of `Timestamp`.
+    pub age_label: String,
+    pub link_id: Option<u32>,
+    pub is_own: bool,
+    pub already_liked: bool,
 }
 
 impl UiState {
@@ -106,6 +139,37 @@ impl UiState {
             import_focused: false,
             reset_armed_at: None,
             copy_clicked_at: None,
+            island_popup: None,
+            like_anims: Vec::new(),
+        }
+    }
+
+    /// Author-requested: called by the caller right after firing
+    /// `like_island`/`unlike_island` from a map double-click, so the click
+    /// gets a little visual acknowledgement even though the popup never
+    /// opens for that gesture. `pos` is the click's screen position.
+    pub fn spawn_like_anim(&mut self, pos: Vector2, liked: bool) {
+        self.like_anims.push(LikeAnim { pos, liked, started_at: Instant::now() });
+    }
+
+    /// Opens the F8 island-info popup, closing the other two (mutually
+    /// exclusive) overlays if either was open.
+    pub fn open_island_info(&mut self, info: IslandInfo) {
+        self.overlay_open = false;
+        self.account_open = false;
+        self.island_popup = Some(info);
+    }
+
+    /// Re-reads the two fields that can change while the popup sits open
+    /// (author-caught: the Like button used to look stuck on "Like" after a
+    /// successful like, because the popup was a one-time snapshot from the
+    /// moment it opened — nothing ever told it the reducer had landed).
+    /// Called every frame the popup is open, same as `HudInfo` is rebuilt
+    /// fresh from server state every frame elsewhere in this module.
+    pub fn refresh_island_popup(&mut self, likes: u32, already_liked: bool) {
+        if let Some(popup) = &mut self.island_popup {
+            popup.likes = likes;
+            popup.already_liked = already_liked;
         }
     }
 
@@ -160,6 +224,9 @@ pub struct HudInfo<'a> {
     /// native, where reconnecting as an imported identity would need a full
     /// process restart and is explicitly out of scope for the jam.
     pub show_token_import: bool,
+    /// Seconds remaining until the F8 re-rank fires, if `config.next_rerank_at`
+    /// is set and still in the future — drives the countdown banner.
+    pub rerank_secs: Option<i64>,
 }
 
 #[derive(Default)]
@@ -175,6 +242,12 @@ pub struct Actions {
     /// the Import button or Enter.
     pub import_token: Option<String>,
     pub reset_account: bool,
+    /// F8: like the island in the currently-open island-info popup.
+    pub like_island: Option<u32>,
+    /// Author-requested: undo a like from the popup's now-toggling button.
+    pub unlike_island: Option<u32>,
+    /// Footer button: open the caller's own island-info popup.
+    pub open_own_island: bool,
 }
 
 fn footer_bg() -> Rectangle {
@@ -203,6 +276,13 @@ fn lock_btn_rect() -> Rectangle {
 
 fn account_btn_rect() -> Rectangle {
     Rectangle::new(558.0, SCREEN_H - FOOTER_H + 7.0, 80.0, 30.0)
+}
+
+/// Author-requested: a footer button to open the caller's own island-info
+/// popup, replacing the old "click your own island" gesture (which just
+/// painted the cell it was released on, so the popup never actually showed).
+fn my_island_btn_rect() -> Rectangle {
+    Rectangle::new(642.0, SCREEN_H - FOOTER_H + 7.0, 72.0, 30.0)
 }
 
 fn overlay_rect() -> Rectangle {
@@ -265,6 +345,18 @@ fn reset_btn_rect() -> Rectangle {
     Rectangle::new(o.x + 20.0, o.y + 280.0, 240.0, 36.0)
 }
 
+fn like_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    // Author-caught: this used to sit at `o.y + 140`, overlapping the link
+    // row drawn at `o.y + 132` (font height ~16px). Moved below it with a
+    // clear gap.
+    Rectangle::new(o.x + 20.0, o.y + 170.0, 160.0, 36.0)
+}
+
+fn rerank_banner_rect() -> Rectangle {
+    Rectangle::new(210.0, SCREEN_H - FOOTER_H - 32.0, 300.0, 24.0)
+}
+
 /// `mouse_x` -> integer value in `0..=max`, clamped to the track's extent.
 fn slider_value(track: Rectangle, mouse_x: f32, max: f32) -> u8 {
     (((mouse_x - track.x) / track.width).clamp(0.0, 1.0) * max).round() as u8
@@ -296,6 +388,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     if state.toast.as_ref().is_some_and(|t| t.shown_at.elapsed() >= TOAST_DURATION) {
         state.toast = None;
     }
+    state.like_anims.retain(|a| a.started_at.elapsed() < LIKE_ANIM_DURATION);
     if state.pending_select == Some(info.brush.0) {
         state.pending_select = None;
     }
@@ -351,6 +444,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         state.overlay_open = !state.overlay_open;
         if state.overlay_open {
             state.account_open = false;
+            state.island_popup = None;
         }
     }
     if clicked && point_in(mouse, lock_btn_rect()) {
@@ -360,7 +454,13 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         state.account_open = !state.account_open;
         if state.account_open {
             state.overlay_open = false;
+            state.island_popup = None;
         }
+    }
+    if clicked && point_in(mouse, my_island_btn_rect()) {
+        actions.open_own_island = true;
+        state.overlay_open = false;
+        state.account_open = false;
     }
 
     // Name field: click to focus/blur (blur commits), Enter commits+blurs.
@@ -449,6 +549,26 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         return actions;
     }
 
+    // F8 island-info popup: modal, same footprint, mutually exclusive with
+    // the other two (enforced by the toggles above and `open_island_info`).
+    if let Some(popup) = &state.island_popup {
+        if clicked && point_in(mouse, overlay_close_rect()) {
+            state.island_popup = None;
+            return actions;
+        }
+        // Author-requested: the button now toggles both ways instead of
+        // only ever liking — clicking it again while already liked undoes
+        // it via the new `unlike_island` reducer.
+        if !popup.is_own && clicked && point_in(mouse, like_btn_rect()) {
+            if popup.already_liked {
+                actions.unlike_island = Some(popup.island_id);
+            } else {
+                actions.like_island = Some(popup.island_id);
+            }
+        }
+        return actions;
+    }
+
     if !state.overlay_open {
         state.dragging = Drag::None;
         return actions;
@@ -523,10 +643,93 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
         draw_overlay(d, state, info);
     } else if state.account_open {
         draw_account_overlay(d, state, info);
+    } else if let Some(popup) = &state.island_popup {
+        draw_island_popup(d, popup);
     }
     if let Some(toast) = &state.toast {
         draw_toast(d, toast, info);
     }
+    if let Some(secs) = info.rerank_secs {
+        draw_rerank_banner(d, secs);
+    }
+    draw_like_anims(d, state);
+}
+
+/// F8: island-info popup — creator, likes, age, link (if set), and a
+/// Like/Unlike toggle button (hidden for your own island).
+fn draw_island_popup(d: &mut impl RaylibDraw, popup: &IslandInfo) {
+    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
+
+    let o = overlay_rect();
+    d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
+    d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
+    d.draw_text("Island", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+
+    let close = overlay_close_rect();
+    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
+    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
+
+    d.draw_text(&format!("Owner: {}", popup.owner_label), o.x as i32 + 20, o.y as i32 + 54, 16, Color::RAYWHITE);
+    d.draw_text(&format!("Likes: {}", popup.likes), o.x as i32 + 20, o.y as i32 + 80, 16, Color::RAYWHITE);
+    d.draw_text(&format!("Created {}", popup.age_label), o.x as i32 + 20, o.y as i32 + 106, 16, Color::LIGHTGRAY);
+    let link_label = match popup.link_id {
+        Some(id) => format!("Link: itch.io rate #{id}"),
+        None => "Link: not set".to_string(),
+    };
+    d.draw_text(&link_label, o.x as i32 + 20, o.y as i32 + 132, 16, Color::LIGHTGRAY);
+
+    if popup.is_own {
+        d.draw_text("(this is your island)", o.x as i32 + 20, o.y as i32 + 170, 14, Color::GRAY);
+    } else {
+        // Author-requested: clicking again while already liked now undoes
+        // it, so the button stays clickable (and its label doubles as the
+        // hint) in both states instead of going inert once liked.
+        let lb = like_btn_rect();
+        d.draw_rectangle_rec(
+            lb,
+            if popup.already_liked { Color::new(90, 60, 60, 255) } else { Color::new(40, 40, 48, 255) },
+        );
+        d.draw_text(
+            if popup.already_liked { "Unlike" } else { "Like" },
+            lb.x as i32 + 16,
+            lb.y as i32 + 10,
+            14,
+            Color::RAYWHITE,
+        );
+    }
+}
+
+/// Author-requested: a floating "+1"/"-1" pop where a double-click
+/// like/unlike landed, since that gesture (unlike the popup button) has no
+/// other visible feedback. Grows slightly and fades out over
+/// `LIKE_ANIM_DURATION`; screen-space, drawn over everything else.
+fn draw_like_anims(d: &mut impl RaylibDraw, state: &UiState) {
+    for anim in &state.like_anims {
+        let t = (anim.started_at.elapsed().as_secs_f32() / LIKE_ANIM_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+        let alpha = ((1.0 - t) * 255.0) as u8;
+        let rise = t * 26.0;
+        let radius = 10.0 + t * 6.0;
+        let cy = anim.pos.y - rise;
+        let ring = if anim.liked { Color::new(230, 70, 90, alpha) } else { Color::new(160, 160, 168, alpha) };
+        d.draw_circle(anim.pos.x as i32, cy as i32, radius, ring);
+        let label = if anim.liked { "+1" } else { "-1" };
+        d.draw_text(label, anim.pos.x as i32 - 8, cy as i32 - 8, 16, Color::new(255, 255, 255, alpha));
+    }
+}
+
+/// Bottom-of-screen banner (own spot, away from the header/toast area) while
+/// `config.next_rerank_at` counts down to an F8 re-rank.
+fn draw_rerank_banner(d: &mut impl RaylibDraw, secs: i64) {
+    let bar = rerank_banner_rect();
+    d.draw_rectangle_rec(bar, Color::new(24, 24, 30, 235));
+    d.draw_rectangle_lines_ex(bar, 1.0, Color::new(255, 215, 0, 220));
+    d.draw_text(
+        &format!("Islands re-ranking in {secs}s"),
+        bar.x as i32 + 10,
+        bar.y as i32 + 5,
+        14,
+        Color::RAYWHITE,
+    );
 }
 
 /// Banner just under the header, with a flash swatch that fades out over
@@ -601,6 +804,10 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     let ab = account_btn_rect();
     d.draw_rectangle_rec(ab, Color::new(40, 40, 48, 255));
     d.draw_text("Account", ab.x as i32 + 8, ab.y as i32 + 9, 10, Color::RAYWHITE);
+
+    let mb = my_island_btn_rect();
+    d.draw_rectangle_rec(mb, Color::new(40, 40, 48, 255));
+    d.draw_text("My Isle", mb.x as i32 + 6, mb.y as i32 + 9, 10, Color::RAYWHITE);
 }
 
 fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {

@@ -7,7 +7,236 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F6 (identity: token login, reset) implemented, plus three
+**Current batch:** a third round of author feedback on F8 — a schema-additive
+server change (new reducer, no data wipe) plus client work (native and web
+kept identical as always):
+1. **"We should see Owner, Likes, Created and Link"** — checked: the popup
+   already renders all four (`draw_island_popup`, `ui.rs`), unchanged this
+   batch. `Link` currently always reads "not set" since `set_island_link` is
+   F9, not yet built — expected at this stage, not a bug.
+2. **"The color of the border should be the same saturation and value as the
+   default (40 and 100)"** — the previous batch's border-hue fix used a
+   fixed `(85, 95)` lookalike shade instead of the owner's ACTUAL starting
+   color. Changed to `(START_SAT, 100)` = `(40, 100)` exactly, in both
+   clients.
+3. **"Sometimes a border vanishes (just one side) when we dezoom"** — root
+   cause: border thickness was a fixed WORLD-unit value (`0.4`/`0.15`), and
+   `BeginMode2D`'s zoom scales line geometry along with everything else — at
+   low zoom the line fell under a screen pixel, and the hexagon's six edges
+   (each at a different angle) round to zero at slightly different zoom
+   levels, so one side would disappear before the others. Fixed by
+   converting a constant SCREEN-pixel width (3px mine / 1.5px foreign) back
+   to world units by dividing by `camera.zoom` each frame, so the rendered
+   line stays a constant, always-visible width regardless of zoom.
+4. **"We should be able to unlike an island"** — added `unlike_island`
+   reducer (server): removes the caller's `island_like` row, decrements
+   `island.likes`, and reverts the owner's `XP_LIKE` grant (`saturating_sub`)
+   — reverting the XP is necessary, not optional: without it a
+   like/unlike/like cycle would let one liker re-grant the owner XP
+   indefinitely, since `like_island`'s uniqueness check only looks at
+   CURRENTLY-existing rows. Bindings regenerated
+   (`unlike_island_reducer.rs`), republished non-destructively (additive
+   reducer only, no column change, no data wipe). The popup's Like button
+   now toggles both ways ("Like" <-> "Unlike") instead of going inert once
+   liked.
+5. **"Double-clicking should like, with a little animation"** — asked the
+   author where this should live, since a single click already opens the
+   (modal) info popup which then blocks further map input, so a naive
+   double-click-on-the-map handler would never see its second click. Author
+   chose Instagram-style: double-click the island directly on the map, no
+   popup involved. Implemented as a deferred-open two-stage gesture: a clean
+   single click on a foreign island is held as `pending_info_click` for
+   `DOUBLE_CLICK_WINDOW` (350ms) instead of opening the popup immediately;
+   if a second click lands on the SAME island within that window (and inside
+   `LONG_PRESS_TOL_PX`), it's consumed as a like/unlike toggle (calling
+   `like_island`/`unlike_island` directly, whichever applies) instead, and
+   the popup never opens for that click pair. If no second click arrives,
+   a separate per-frame check opens the popup once the window elapses. The
+   trade-off, understood and accepted: every single click now opens the
+   popup ~350ms later than before, instead of instantly.
+   - New `UiState.like_anims` (shared `ui.rs`, both clients get it for
+     free): a floating "+1"/"-1" with a growing, fading colored ring at the
+     click position, `LIKE_ANIM_DURATION` = 600ms, pruned in `handle_input`
+     alongside the toast, drawn in `draw`.
+- `cargo build -p server` clean; `spacetime generate`/`publish -s local
+  --delete-data=on-conflict` both succeeded with NO data wipe (additive
+  reducer only). `cargo build -p client --bin client --bin bot`,
+  `./build-web.sh` (release), `cargo build --workspace --exclude client` all
+  clean, no warnings (forced recompile via `touch`). `du -sh client/web` =
+  924K.
+- VERIFIED: author hand-tested and confirmed it feels good. Committed
+  together with all earlier F8 batches below.
+
+---
+
+**Previous batch:** two more author-caught fixes on top of F8, from a second
+round of live hand-testing (no schema/server change — client-only, both
+`main.rs` and `bin/web.rs` kept identical as always):
+1. **"Clicking on someone else's island (release mouse) should show that
+   popup, not just the center"** — `info_target` was additionally filtered to
+   `hexdist(lq, lr) <= INFO_HIT_RADIUS` (3 hex units from the island's exact
+   center), left over from before the previous batch removed the `owner !=
+   me` restriction. Dropped entirely: `island_at` already bounds the hit test
+   to the island's full `ISLAND_RADIUS` footprint, so any clean click
+   anywhere on a FOREIGN island now opens its popup. `INFO_HIT_RADIUS` is now
+   dead (only that one call site used it) and was deleted from both clients.
+2. **"You should have a button in the footer rather than clicking on your own
+   island (in which you draw)"** — the previous batch's "click your own
+   island's center also opens the popup" fix DID open the popup, but paint
+   is a separate, independent gesture that fires on press regardless (that's
+   the existing paint-while-held behavior) — so every click meant to check
+   your own likes also painted over that cell with your current brush,
+   an unwanted side effect. Replaced with a dedicated footer button:
+   `ui::Actions.open_own_island`, a new `my_island_btn_rect()` ("My Isle",
+   footer-right, next to Account), wired in both `main.rs`/`bin/web.rs` to
+   call `open_island_info` on `my_island(...)`'s result. Own-island clicks
+   now only paint, with no popup side effect; the popup is reached
+   exclusively via the button, which never touches the canvas.
+- `cargo build -p client --bin client --bin bot`, `./build-web.sh` (release),
+  `cargo build --workspace --exclude client` all clean, no warnings (forced
+  recompile via `touch`). `du -sh client/web` = 924K. No server/schema
+  change this batch.
+- VERIFIED: author hand-tested and confirmed it feels good. Committed
+  together with all earlier F8 batches below.
+
+---
+
+**Previous batch:** four author-caught fixes on top of F8, from live
+hand-testing (no schema/server change — client-only, both `main.rs` and
+`bin/web.rs` kept identical as always):
+1. **"How to see your own likes?"** — the info-popup click gesture
+   (`info_target`) was filtered to `owner != me`, so there was literally no
+   way to open your own island's popup. Filter dropped; a click on your own
+   island's center now also opens the popup (it still paints that one cell
+   too, unchanged — the two aren't mutually exclusive). The Like button
+   stays hidden for your own island regardless (`IslandInfo.is_own`), so this
+   only adds a read-only view of your own stats, no new self-like path.
+2. **"Fill the border of an ilot with the first color you get when creating
+   the account"** (design request, not a bug) — every island's border used
+   to be undrawn except a fixed gold outline on your OWN island only. Now
+   EVERY island's border is drawn in its owner's SEED hue (`seed_hues` /
+   `seed_hues` maps built once per frame from the inventory rows where
+   `obtained_with(_hex).is_none()` — exactly one such row exists per owner
+   at any time, either the original `client_connected` seed or the latest
+   `reset_account` reseed), at a fixed vivid `(sat 85, val 95)` regardless of
+   the owner's live/nudged brush, so it reads as a stable identity marker
+   rather than flickering with their slider. Own island keeps a thicker line
+   (0.4 vs 0.15 world units) so "which one is mine" is still a glance away,
+   just via thickness now instead of a different color.
+3. **"Like button isn't reactive (must reload to see I liked it)"** — the
+   popup's `likes`/`already_liked` were a ONE-TIME snapshot taken by
+   `open_island_info` at click time; nothing ever refreshed them afterward,
+   so a successful `like_island` call had no visible effect until the next
+   popup open (or reload). Added `UiState::refresh_island_popup`, called
+   every frame the popup is open (re-reading the live `island`/`island_like`
+   rows), mirroring how `HudInfo` itself is already rebuilt fresh every frame
+   rather than cached.
+4. **"Like button is on top of the link, inconvenient"** — `like_btn_rect()`
+   sat at `overlay_y + 140`, overlapping the link row drawn at
+   `overlay_y + 132` (16px font). Moved to `overlay_y + 170`, clear of it;
+   the "(this is your island)" label shifted to match.
+- `cargo build -p client --bin client --bin bot`, `./build-web.sh` (release),
+  `cargo build --workspace --exclude client` all clean, no warnings (forced
+  recompile via `touch`). `du -sh client/web` = 924K. No server/schema
+  change this batch, so no republish/bindings-regen needed.
+- VERIFIED: author hand-tested and confirmed it feels good. Committed
+  together with all earlier F8 batches below.
+
+---
+
+**Previous batch:** F8 (likes, island info, 5-minute re-ranking) implemented.
+
+**Schema (breaking):** `Config` gained `next_rerank_at: Option<Timestamp>`.
+New tables: `IslandLike` (`public`; `#[derive(Clone)]` added to `Island` too,
+needed by the reslot logic below), and two SERVER-INTERNAL (not `public`,
+correctly excluded from codegen — confirmed by `generate_module_bindings.sh`'s
+own "Skipping private tables" log line) scheduled tables:
+`RerankWarnSchedule` (repeating, `RERANK_PERIOD_SECS`=300) and
+`RerankFireSchedule` (one-shot, scheduled `RERANK_WARNING_SECS`=5 later by
+the warn step). Both scheduled reducers (`rerank_warn`, `rerank_fire`) guard
+`ctx.sender() != ctx.database_identity()` per the SDK's documented pattern —
+confirmed live: a raw `spacetime call` can't reach them (they're not even in
+the generated client-callable reducer list, since their sole argument type
+is a private table row).
+- **IMPORTANT — data wipe (author should know):** adding `next_rerank_at` to
+  the existing `Config` table is NOT a compatible schema change on this SDK
+  version ("Adding a column ... requires a default value annotation") — the
+  local dev database got a full `--delete-data` wipe on the FIRST publish of
+  this batch (all prior local test users/islands/painted tiles gone). This
+  was NOT anticipated going in; flagging clearly since it's a real, if
+  local-only, data loss. Every subsequent publish this batch (constants-only
+  changes, tested live below) was a compatible/empty migration plan — no
+  further wipes.
+- `rerank_warn`/`rerank_fire` are lazily seeded in `client_connected`
+  (`if ...count() == 0 { insert(...) }`), the same pattern already used for
+  the `config` row — NOT an `init` reducer, because `init` does not re-run
+  on a republish of an existing (non-cleared) database, which would have
+  silently left the re-rank timer never started on any redeploy after the
+  first.
+- Slot reassignment in `rerank_fire`: `slot` is `#[unique]`, so a direct
+  permutation risks one island's NEW slot colliding with another
+  still-unmoved island's CURRENT slot (both real values, same unique index).
+  Reslots in two passes — everyone to a temporary `slot + 1_000_000` range
+  first, then to the final `1..N` — sidestepping the collision entirely.
+- `like_island`: self-like rejected (`island.owner == ctx.sender()`);
+  (island, liker) uniqueness enforced in the reducer (one row check), not as
+  a DB constraint — this SDK only supports single-column `#[unique]`, no
+  compound constraints.
+- Client (both, kept identical): a short click (released before the
+  400 ms merge-hold threshold, no drift past `LONG_PRESS_TOL_PX`) on a
+  FOREIGN island's center — within `INFO_HIT_RADIUS`=3 hex of its slot
+  center — opens an "Island" info popup (owner name, likes, relative age,
+  link-if-set, Like button). Reuses the existing `LongPress` gesture
+  bookkeeping (`info_target` alongside the existing merge `target`) rather
+  than a new gesture type, since the two are already naturally distinguished
+  by hold duration; own-island clicks never trigger it (they paint, as
+  before) since `info_target` is filtered to `owner != me` at press time.
+  `ui.rs` gained a THIRD mutually-exclusive modal (`island_popup`, alongside
+  `overlay_open`/`account_open`) plus a non-modal rerank-countdown banner
+  (`HudInfo.rerank_secs`, computed by each caller from `config.next_rerank_at`
+  vs the local clock — `Timestamp::duration_since` natively on the client
+  side, raw micros arithmetic on the web side, same shape as every other
+  native/web time comparison in this codebase).
+- Age formatting: no date/time crate in the workspace: `format_age` buckets
+  into "just now"/"Nm ago"/"Nh ago"/"Nd ago" from integer seconds — plenty
+  for a jam popup, no new dependency.
+- Web-only note: `bin/web.rs`'s `config`/`island_like` tables were added to
+  its generic `RowView`-based parser (same pattern as every other table);
+  `IslandRow` gained `likes`/`itch_rate_id`/`created_at_micros` (previously
+  only `owner_hex`/`slot` — nothing needed them before F8). `game.html`'s
+  `TABLES` subscription list updated to include `island_like`.
+
+**VERIFIED live** (local `spacetime` 2.6.1, via `spacetime call`/`sql`/`logs`,
+not yet through an actual browser/native UI — that part is REASONED from
+code, BLOCKED on author hand-test):
+- `like_island`: a fresh `--anonymous` identity liking island 1 → likes
+  0→1, `island_like` row inserted, owner's xp +10 (`XP_LIKE`). Calling it
+  again as the OWNER identity → rejected `"cannot like your own island"`.
+  Calling with a bogus id (999) → rejected `"unknown island"`.
+- Full two-step timer chain, observed with `RERANK_PERIOD_SECS`/
+  `RERANK_WARNING_SECS` temporarily dropped to 10/3 (reverted after,
+  republished, confirmed back to 300/5 via `spacetime sql`): the repeating
+  loop fired `rerank_warn` (`config.next_rerank_at` went `None` → `Some`),
+  `RerankFireSchedule` gained a one-shot row, then ~3s later `rerank_fire`
+  ran and `next_rerank_at` went back to `None` — no `ERROR` lines in
+  `spacetime logs` either time.
+- **The actual slot permutation**, not just the chain executing as a no-op:
+  manufactured a real ranking change (liked island 3 three times, more than
+  island 1's two, via three distinct `--anonymous` identities), waited for
+  the next cycle, and confirmed island 3 → slot 1, island 1 → slot 2 — the
+  two-pass temp-offset reslot handled a genuine unique-constraint collision
+  correctly, not a coincidentally-already-sorted no-op.
+- `cargo build -p server`, `-p client --bin client --bin bot`,
+  `./build-web.sh` (release), `cargo build --workspace --exclude client` all
+  clean, no warnings (forced recompiles via `touch` to rule out stale
+  incremental-build caching). `du -sh client/web` = 916K, well under the
+  64 MB cap.
+- Not yet exercised: the actual popup/Like-button UI in a running client (no
+  browser/second native instance available to me this batch — same
+  constraint noted in every prior batch); the rerank countdown banner
+  rendering; touch/mobile info-click on web.
+
+**Previous batch:** F6 (identity: token login, reset) implemented, plus three
 author-caught fixes found via live hand-testing during the same batch
 (`known_bugs.md`, a scratch note the author was actively filling in while I
 worked — checked in as untracked, left alone). Client: added an "Account"
@@ -539,7 +768,15 @@ Implementation notes:
 ---
 
 ## P1 (only after F7)
-- [ ] F8 — likes, island info popup, 5-min re-rank + countdown —
+- [x] F8 — likes, island info popup, 5-min re-rank + countdown — server
+      logic VERIFIED live (`like_island`/`unlike_island` incl.
+      self-like/unknown-island rejection + XP credit/revert; full two-step
+      rerank chain; an ACTUAL slot permutation under a manufactured ranking
+      change — see the batch notes above). Client (popup, Like/Unlike
+      toggle, double-click-to-like gesture, own-island border color/width,
+      "My Isle" footer button, countdown banner) VERIFIED — author
+      hand-tested across three feedback rounds and confirmed it feels good.
+      Builds all clean, package size fine. COMMITTED.
 - [ ] F9 — island links (jam rate id only), link-click XP, time XP —
 
 ## P2 (only if time remains)

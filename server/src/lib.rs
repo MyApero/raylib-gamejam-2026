@@ -1,5 +1,5 @@
 use spacetimedb::rand::Rng;
-use spacetimedb::{Identity, ReducerContext, Table, Timestamp};
+use spacetimedb::{Identity, ReducerContext, ScheduleAt, Table, TimeDuration, Timestamp};
 
 /// Canonical constants — see plan.md "Canonical constants" table. Mirror
 /// these EXACTLY in the native and web clients.
@@ -13,8 +13,13 @@ mod constants {
     pub const PAINT_REFILL_PER_SEC: f32 = 50.0;
     pub const PRESENCE_TIMEOUT_SECS: i64 = 3;
     pub const XP_MERGE_NEW: u64 = 25;
+    pub const XP_LIKE: u64 = 10;
     pub const LEVEL_XP: u64 = 100;
     pub const START_SAT: u8 = 40;
+    /// F8: how often islands re-rank, and how long the client-facing
+    /// countdown warns before slots actually get rewritten.
+    pub const RERANK_PERIOD_SECS: i64 = 300;
+    pub const RERANK_WARNING_SECS: i64 = 5;
     /// How far (degrees, either direction) a painted hue may stray from an
     /// unlocked inventory entry — lets the Hue slider nudge a shade without
     /// bloating the inventory with one row per nudge.
@@ -163,6 +168,10 @@ pub struct Config {
     id: u32,
     frozen: bool,
     admin: Option<Identity>,
+    /// F8: when set, a re-rank is landing at this timestamp — clients render
+    /// a countdown banner from it. `None` outside the `RERANK_WARNING_SECS`
+    /// window before a cycle fires.
+    next_rerank_at: Option<Timestamp>,
 }
 
 #[spacetimedb::table(accessor = user, public)]
@@ -197,6 +206,7 @@ pub struct Inventory {
 }
 
 #[spacetimedb::table(accessor = island, public)]
+#[derive(Clone)]
 pub struct Island {
     #[primary_key]
     #[auto_inc]
@@ -208,6 +218,41 @@ pub struct Island {
     likes: u32,
     itch_rate_id: Option<u32>,
     created_at: Timestamp,
+}
+
+/// F8: one row per (island, liker) — enforced in `like_island` rather than as
+/// a DB-level compound unique constraint (this SDK only supports uniqueness
+/// on a single column).
+#[spacetimedb::table(accessor = island_like, public)]
+pub struct IslandLike {
+    #[primary_key]
+    #[auto_inc]
+    id: u64,
+    #[index(btree)]
+    island_id: u32,
+    liker: Identity,
+}
+
+/// F8 re-rank timer chain: a repeating loop schedules the "warning" step
+/// every `RERANK_PERIOD_SECS`; the warning step sets `config.next_rerank_at`
+/// (for the client countdown) and schedules a ONE-SHOT fire step
+/// `RERANK_WARNING_SECS` later, which does the actual re-sort. Both tables
+/// are server-internal (not `public`) — clients only ever see their effect
+/// through `config.next_rerank_at` and `island.slot`.
+#[spacetimedb::table(accessor = rerank_warn_schedule, scheduled(rerank_warn))]
+pub struct RerankWarnSchedule {
+    #[primary_key]
+    #[auto_inc]
+    scheduled_id: u64,
+    scheduled_at: ScheduleAt,
+}
+
+#[spacetimedb::table(accessor = rerank_fire_schedule, scheduled(rerank_fire))]
+pub struct RerankFireSchedule {
+    #[primary_key]
+    #[auto_inc]
+    scheduled_id: u64,
+    scheduled_at: ScheduleAt,
 }
 
 #[spacetimedb::table(accessor = island_cell, public)]
@@ -590,6 +635,94 @@ pub fn reset_account(ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }
 
+/// F8: like a foreign island once (XP to the owner); the (island, liker)
+/// uniqueness plan.md asks for is enforced here rather than at the DB level
+/// (see `IslandLike`'s comment). Self-likes are rejected — an island's own
+/// "info" popup never renders a functional Like button for its owner
+/// either, this is the server-side backstop for a raw reducer call.
+#[spacetimedb::reducer]
+pub fn like_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
+    let island = ctx.db.island().id().find(island_id).ok_or("unknown island")?;
+    if island.owner == ctx.sender() {
+        return Err("cannot like your own island".to_string());
+    }
+    if ctx.db.island_like().island_id().filter(&island_id).any(|l| l.liker == ctx.sender()) {
+        return Err("already liked".to_string());
+    }
+    ctx.db.island_like().insert(IslandLike { id: 0, island_id, liker: ctx.sender() });
+    ctx.db.island().id().update(Island { likes: island.likes + 1, ..island.clone() });
+    if let Some(owner) = ctx.db.user().identity().find(island.owner) {
+        ctx.db.user().identity().update(User { xp: owner.xp + constants::XP_LIKE, ..owner });
+    }
+    Ok(())
+}
+
+/// F8 follow-up (author-requested): undo a like. Reverts the owner's
+/// `XP_LIKE` grant too — without this, a like/unlike/like cycle would let
+/// one liker re-earn the owner XP indefinitely, since the uniqueness check
+/// in `like_island` only looks at the CURRENT `island_like` rows.
+#[spacetimedb::reducer]
+pub fn unlike_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
+    let island = ctx.db.island().id().find(island_id).ok_or("unknown island")?;
+    let existing = ctx
+        .db
+        .island_like()
+        .island_id()
+        .filter(&island_id)
+        .find(|l| l.liker == ctx.sender())
+        .ok_or("not liked")?;
+    ctx.db.island_like().id().delete(existing.id);
+    ctx.db.island().id().update(Island { likes: island.likes.saturating_sub(1), ..island.clone() });
+    if let Some(owner) = ctx.db.user().identity().find(island.owner) {
+        ctx.db.user().identity().update(User { xp: owner.xp.saturating_sub(constants::XP_LIKE), ..owner });
+    }
+    Ok(())
+}
+
+/// F8 re-rank, step 1/2 (repeating, `RERANK_PERIOD_SECS`): only sets the
+/// countdown clients render, then schedules the actual sort
+/// `RERANK_WARNING_SECS` later. Restricted to the scheduler itself — see the
+/// SDK's documented pattern for scheduled reducers.
+#[spacetimedb::reducer]
+pub fn rerank_warn(ctx: &ReducerContext, _arg: RerankWarnSchedule) -> Result<(), String> {
+    if ctx.sender() != ctx.database_identity() {
+        return Err("rerank_warn may not be invoked by clients".to_string());
+    }
+    let config = ctx.db.config().id().find(0).ok_or("config missing")?;
+    let fire_at = ctx.timestamp + TimeDuration::from_micros(constants::RERANK_WARNING_SECS * 1_000_000);
+    ctx.db.config().id().update(Config { next_rerank_at: Some(fire_at), ..config });
+    ctx.db.rerank_fire_schedule().insert(RerankFireSchedule { scheduled_id: 0, scheduled_at: fire_at.into() });
+    Ok(())
+}
+
+/// F8 re-rank, step 2/2 (one-shot, fired by `rerank_warn`): re-sorts islands
+/// by likes desc, ties by `created_at`, and rewrites `island.slot`
+/// accordingly. Slot 0 (reserved for the P2/F10 admin island) is never
+/// touched — only slots 1.. are re-sorted. Cell coordinates are
+/// island-relative, so moving an island is just this one row write; no
+/// island_cell/margin_cell row ever needs to change.
+#[spacetimedb::reducer]
+pub fn rerank_fire(ctx: &ReducerContext, _arg: RerankFireSchedule) -> Result<(), String> {
+    if ctx.sender() != ctx.database_identity() {
+        return Err("rerank_fire may not be invoked by clients".to_string());
+    }
+    let mut ranked: Vec<Island> = ctx.db.island().iter().filter(|i| i.slot != 0).collect();
+    ranked.sort_by(|a, b| b.likes.cmp(&a.likes).then_with(|| a.created_at.cmp(&b.created_at)));
+    // `slot` is `#[unique]`, so a direct permutation could momentarily
+    // assign a slot another still-unmoved island already holds — reslot in
+    // two passes via a temporary range no real slot ever reaches.
+    for island in &ranked {
+        ctx.db.island().id().update(Island { slot: island.slot + 1_000_000, ..island.clone() });
+    }
+    for (i, island) in ranked.into_iter().enumerate() {
+        ctx.db.island().id().update(Island { slot: i as u32 + 1, ..island });
+    }
+    if let Some(config) = ctx.db.config().id().find(0) {
+        ctx.db.config().id().update(Config { next_rerank_at: None, ..config });
+    }
+    Ok(())
+}
+
 #[spacetimedb::reducer(client_connected)]
 pub fn client_connected(ctx: &ReducerContext) {
     log::info!(
@@ -598,7 +731,16 @@ pub fn client_connected(ctx: &ReducerContext) {
         ctx.connection_id()
     );
     if ctx.db.config().id().find(0).is_none() {
-        ctx.db.config().insert(Config { id: 0, frozen: false, admin: None });
+        ctx.db.config().insert(Config { id: 0, frozen: false, admin: None, next_rerank_at: None });
+    }
+    // Lazy-seeded the same way as the `config` row above (rather than an
+    // `init` reducer) so a republish of an EXISTING database — which does
+    // not re-run `init` — still ends up with the repeating re-rank timer.
+    if ctx.db.rerank_warn_schedule().count() == 0 {
+        ctx.db.rerank_warn_schedule().insert(RerankWarnSchedule {
+            scheduled_id: 0,
+            scheduled_at: TimeDuration::from_micros(constants::RERANK_PERIOD_SECS * 1_000_000).into(),
+        });
     }
 
     if let Some(user) = ctx.db.user().identity().find(ctx.sender()) {
