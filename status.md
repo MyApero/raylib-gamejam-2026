@@ -7,7 +7,23 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F10 Admin (P2, first item — see plan.md's P2 section).
+**Current batch:** Author direct edit (own commit, `61adba2 "feat: admin
+account"`, concurrent with the executor's F10 batch below) — a real bug fix
+found while hand-testing: `main.rs`/`bin/web.rs` each hand-rolled the same
+"which modal is open" check in four places, and the web build's copy was
+missing two of the four flags, letting a hovered island silently close My
+Isle or the Escape/help overlay out from under the player. Consolidated into
+`UiState::any_modal_open()` (single source of truth, checked by both
+clients) + `close_all_modals()`/`modal_dismiss_clicked()` helpers replacing
+the repeated four-flag assignments and close-click checks at every modal's
+open/dismiss site. Author hand-tested and confirmed it works. Not
+independently re-verified by the executor beyond the author's own report —
+logged here for the record, same as previous author-direct-edit batches
+(e.g. `cc6a47b "fix: open colors"`).
+
+---
+
+**Previous batch:** F10 Admin (P2, first item — see plan.md's P2 section).
 Hexaworld.md's Admin spec: "1 identity with a password that is admin, can
 delete tiles, can freeze the game so no one can interact anymore, can
 restore backups, holds the center tile."
