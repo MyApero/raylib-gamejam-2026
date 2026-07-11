@@ -7,7 +7,165 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F11 Flying gift (P2). plan.md's original entry was a
+**Current batch:** F12 Polish, part 4/4 (last part) — itch page styling.
+plan.md's spec: "page styling on itch." Unlike the other three parts, this
+one isn't code — it's content on the itch.io project page itself, which
+lives outside the repo and needs the author's itch.io login (this
+environment has none). Drafted the actual page copy as `itch-page.md`
+(new, repo root): pitch, "the idea" (explains merge in player-facing
+language, reusing the same framing as F12 part 2's in-game help overlay so
+the two stay consistent), a trimmed controls list, the "also playable at
+raylib.mister-esman.uk" link plan.md's F7 already calls for, and a
+tech/credits line. Also left author-facing notes at the bottom of that file
+(screenshots/GIF of an actual merge, itch cover-image sizing, upload
+settings per F7) since a page with copy but no images still undersells the
+game on a jam listing page dominated by thumbnails.
+
+**Verify status:** N/A — no code changed, nothing to build. This is
+explicitly a draft for the author to paste into itch.io's editor (which
+does its own formatting, not Markdown) and finish with real screenshots;
+not something the executor can complete end-to-end without itch.io access.
+
+With this, all four F12 sub-parts have been addressed (bots, help overlay,
+sounds fully implemented; itch styling drafted pending the author). See the
+checklist entry below for the overall NOT committed / pending-hand-test
+status — nothing in this batch or the prior three has been hand-tested or
+committed yet.
+
+---
+
+**Previous batch:** F12 Polish, part 3/4 — sound effects. plan.md's spec:
+"sounds (raylib `LoadSound`, CC0 assets only)".
+
+- **Assets**: raylib's own bundled `examples/audio/resources/` sfx
+  (`coin.wav`/`spring.wav`/`sound.wav`/`weird.wav`), all CC0, made by
+  raysan5 with rFXGen — copied into `client/assets/sfx/{merge,gift,levelup,
+  error}.wav` (mapping + license documented in that dir's own
+  `LICENSE.md`). ~170 KB total, negligible against the 64 MB web cap.
+- **Loading — embedded, not file-path**: new shared module `client/src/
+  sfx.rs` (`#[path]`-included by both binaries, same pattern as `world.rs`/
+  `ui.rs`) loads all four via `include_bytes!` +
+  `RaylibAudio::new_wave_from_memory`/`new_sound_from_wave`, NOT
+  `RaylibAudio::new_sound(path)`. Reasoning: the web target has no real
+  filesystem — a path-based `LoadSound` would need emscripten's
+  `--preload-file` virtual-FS staging, a second asset pipeline that only
+  the web binary would use. Embedding the bytes at compile time means one
+  code path for both targets and nothing to stage in `build-web.sh`.
+- **Device init is a fallible environmental boundary, not a bug condition**:
+  `RaylibAudio::init_audio_device()` returns `Result` — treated as
+  `Option` (`.ok()`) in both `main()`s, so no sound card / a headless
+  environment / a browser autoplay block degrades to silence instead of
+  crashing the game. `sfx.rs`'s OWN wav-parsing calls still `.expect()`,
+  deliberately: those bytes are our own checked-in, known-good assets, so a
+  decode failure there is a build-time asset bug worth crashing loudly on,
+  a different kind of failure than "no audio hardware".
+- **Web lifetime**: `bin/web.rs`'s `State` is intentionally leaked
+  (`Box::into_raw`, never reconstructed/dropped — it lives exactly as long
+  as the tab, driven by `emscripten_set_main_loop_arg`). `Sfx<'aud>`
+  borrows its `RaylibAudio`, so embedding both in the same struct would be
+  self-referential; instead the audio device is `Box::leak`'d to `'static`
+  right alongside `state`'s own leak, and `State` stores `Option<sfx::
+  Sfx<'static>>` — same tradeoff already made for `state` itself, not a new
+  one. Native's `main()` has no such issue (audio device is a plain local
+  living for the whole non-leaked loop).
+- **Wired to the four existing toast events** (one `.play()` call next to
+  each `ui_state.show_*_toast`/`show_info_toast` call, both clients,
+  mirrored exactly): `merge.wav` on a new merge-inventory row, `gift.wav`
+  on a gift-claim inventory row, `levelup.wav` on an XP-level increase,
+  `error.wav` on the eyedropper's "not unlocked" rejection. No new trigger
+  points invented — every sound rides an event that already had a visual
+  toast, so sound and toast can never drift out of sync.
+
+**Verify status:** `cargo build -p server`, `-p client --bin client`, `-p
+client --bin bot` all clean; `./build-web.sh` clean (confirms the
+emscripten link succeeds with real audio FFI calls, not just that the Rust
+compiles — raylib-sys already builds raudio for emscripten by default, no
+build.rs/EMCC_CFLAGS changes needed). `du -sh client/web` = 1.4M, `web.wasm`
+1.1M — up from F11's 980K/740K (the embedded wav bytes plus normal growth),
+nowhere near the 64 MB cap. Audible playback NOT verified — no speakers/
+browser in this environment to hear it, and per this repo's standing
+convention the author drives the actual GUI client; REASONED from the code
+(lifetime/borrow correctness confirmed by the fact that it compiles under
+both targets, including the emscripten self-referential-leak workaround).
+NOT committed.
+
+---
+
+**Previous batch:** F12 Polish, part 2/4 — help overlay explaining merge.
+`ui::draw_help_overlay` (F9.6 item 5) was keybindings-only — nothing in-game
+ever explained the actual theme mechanic ("how do I get new colors?").
+Split it into two sections: a new "Merging colors" blurb (touch cursors to
+blend hues, long-press a tile as the solo-friendly alternative, merging
+earns XP which raises the sat cap) above the existing "Controls" list,
+retitled "How to play". Shared via `ui.rs`'s `#[path]` include, so both
+clients get it automatically — no `bin/web.rs` changes needed. Fits inside
+the existing 600x560 overlay box with room to spare (content ends ~80px
+above the bottom edge).
+
+**Verify status:** `cargo build -p client --bin client` and `./build-web.sh`
+both clean. Visual layout/wording REASONED only (read the geometry math,
+didn't render it) — left for the author's hand-test pass, same convention
+as every prior batch. NOT committed.
+
+---
+
+**Previous batch:** F12 Polish, part 1/4 — bots adapted to the new schema +
+"Merge with me!" center bot + cursor name labels. plan.md's F12 entry lists
+four sub-parts (sounds, bots, help overlay, itch page styling); doing them as
+separate batches per the usual protocol rather than one giant batch.
+
+- **Bots — world-cartesian coordinates**: `client/src/bin/bot.rs`'s
+  heart/hexagon trajectories were still in the pre-F2 fixed-canvas PIXEL
+  space (`CENTER = (360, 360)`, `PATH_RADIUS = 220`) — a leftover from before
+  the hex-island multiplayer world existed. `set_pos` has no
+  ownership/paint-permission check (bots never paint, only move + name
+  themselves), so this was silently harmless to compile (`SetPosArgs` is
+  still just `(cx, cy): f32`) but functionally wrong: the bots were looping
+  in a tiny, meaningless patch near world-cartesian origin instead of
+  orbiting the admin's island. Converted to world units: `CENTER = (0.0,
+  0.0)` (the admin's slot-0 center), `PATH_RADIUS = ISLAND_EDGE_REACH + 10.0`
+  = 36.0 (`ISLAND_EDGE_REACH` = 26.0, mirroring `world::constants::
+  ISLAND_FIT_ZOOM`'s derivation for `ISLAND_RADIUS` = 15 fine hexes) so the
+  loop clears the admin island's painted tiles and traces the margin ring
+  around it.
+- **New "center" bot** (backlog: "bot at the middle with a highlight 'Merge
+  with me!'"): third `Shape::Center`, idles in a tight `CENTER_LOOP_RADIUS` =
+  5.0 loop right at the world origin (inside the admin's own territory — the
+  literal "centre ilot" ask). Its display name IS `"Merge with me!"` — no
+  bot-specific rendering needed once cursor name labels exist (next item).
+  Own creds key `hexmerge-bot-center`, independent identity like the other two.
+- **Cursor name labels** (new, enables the above): `world::draw_cursor_label`
+  draws every online other-player's name in a small box above their cursor
+  (same visual language as `ui::draw_button_tooltip`), gated on
+  `other_cursor_scale >= 0.5` so it doesn't clutter at heavy zoom-out. Wired
+  into both `main.rs` and `bin/web.rs`'s `other_cursors` collection (now
+  carries `name: String` alongside color/locked). Defensively truncated to 18
+  chars client-side — `set_name` has no server-side length cap, and this text
+  now comes from another player's row rendered directly into world space
+  (previously names only ever appeared in the footer/island-popup, which
+  aren't attacker-controlled render surfaces the same way).
+
+**Verify status:** `cargo build -p server`, `-p client --bin client`, `-p
+client --bin bot` all clean; `./build-web.sh` clean. `cargo build --workspace`
+still fails on the `web` bin under the native target — pre-existing,
+expected (`serde_json` is an emscripten-only dependency; `web.rs` only
+builds via `./build-web.sh`'s wasm32-unknown-emscripten target, per F5's
+standing note). **VERIFIED live** against the local instance: ran `cargo run
+-p client --bin bot -- center/heart/hexagon` briefly each, then `spacetime
+sql -s local hexmerge "SELECT name, cx, cy FROM user"` — center bot at
+`(0.33, 4.99)` (radius ≈5, matches `CENTER_LOOP_RADIUS`), heart-bot at
+`(35.5, -12.9)` (radius ≈37.8, consistent with the heart curve's radius at
+that phase), hexagon-bot at `(3.2, 31.2)` (radius ≈31.3 ≈ `PATH_RADIUS *
+cos(30°)`, exactly the hexagon's inradius at a mid-edge sample point) — all
+three land in the expected world-cartesian range, not the old pixel range.
+Name-label rendering itself REASONED (read and traced both clients, which
+mirror each other) but NOT hand-tested visually, per this repo's standing
+convention (author drives the GUI client). NOT committed — pending the
+author's hand-test pass, same as every prior batch.
+
+---
+
+**Previous batch:** F11 Flying gift (P2). plan.md's original entry was a
 one-liner ("scheduled spawn of a drifting pickup, click/tap to claim ->
 random hue or XP") with no author-provided detail, so the executor fleshed
 out the design below and folded it back into plan.md's F11 bullet + the
@@ -2154,7 +2312,20 @@ Implementation notes:
       throwaway WebSocket probe (see the batch notes above); client
       rendering/gesture REASONED, not hand-tested by the executor. NOT
       committed — author hand-test pending per this repo's convention.
-- [ ] F12 polish/bots/sounds —
+- [ ] F12 polish/bots/sounds — all 4 plan.md sub-parts addressed
+      (2026-07-11): (1) bots adapted to world-cartesian coordinates + new
+      "Merge with me!" center bot + cursor name labels — VERIFIED live (bot
+      positions via `spacetime sql`), name-label rendering REASONED; (2)
+      help overlay now explains the merge mechanic, not just keybindings —
+      REASONED; (3) sound effects (4 CC0 sfx wired to the existing
+      merge/gift/levelup/error toasts, embedded via `include_bytes!`, both
+      targets) — build-level REASONED, audible playback not verified (no
+      speakers in this environment); (4) itch page copy drafted
+      (`itch-page.md`) — not itself verifiable, needs the author to paste it
+      into itch.io and add screenshots. See the batch notes above for all
+      four. NOT committed — full author hand-test pass (including actually
+      hearing the sounds) still pending, same convention as every prior
+      batch.
 - [ ] F13 hexa event (6-cursor hexagon: pooled dictionaries, one-time XP, snap rendering) —
 - [x] Customizable island border color/transparency (from backlog, author override
       2026-07-11) — server + both clients VERIFIED via `spacetime call`/`spacetime sql`

@@ -421,3 +421,25 @@ pub fn draw_cursor_scaled(d: &mut impl RaylibDraw, m: Vector2, color: Color, sca
     d.draw_line_ex(left, right, outline_px, Color::BLACK);
     d.draw_line_ex(right, tip, outline_px, Color::BLACK);
 }
+
+/// F12: small name label glued above another player's cursor tip — same
+/// small-box-near-cursor visual language as `ui::draw_button_tooltip`. This
+/// is also the render surface for the backlog's "Merge with me!" center-bot
+/// callout: the bot just sets its display name to that string over
+/// `set_name`, so no bot-specific rendering is needed here. Truncated
+/// defensively since `set_name` has no server-side length cap and this text
+/// comes from another player's row. `d` has no default-font `measure_text`
+/// (only `RaylibHandle` does, see ui.rs) so the background box width is an
+/// estimate rather than a measurement — cosmetic only, a little slack is fine.
+pub fn draw_cursor_label(d: &mut impl RaylibDraw, tip: Vector2, name: &str, scale: f32) {
+    let name: String = name.chars().take(18).collect();
+    if name.is_empty() {
+        return;
+    }
+    let font_size = ((13.0 * scale) as i32).max(9);
+    let width = name.len() as f32 * font_size as f32 * 0.56 + 10.0;
+    let height = font_size as f32 + 6.0;
+    let rect = Rectangle::new(tip.x - width / 2.0, tip.y - height - 6.0, width, height);
+    d.draw_rectangle_rec(rect, Color::new(20, 20, 26, 210));
+    d.draw_text(&name, (rect.x + 5.0) as i32, (rect.y + 3.0) as i32, font_size, Color::RAYWHITE);
+}

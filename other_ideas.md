@@ -78,10 +78,17 @@ border had before its own fix — now `HOVER_BORDER_PX / camera.zoom`
 constant trick, in both clients.)
 
 - [ ] Centre Ilot should have a bot drawing R and a heart
+(Distinct from the entry below — this one wants the bot to actually PAINT a
+mural at the center, not just idle there. Still open; also brushes against
+the unresolved center-island-identity ruling in plan.md's backlog.)
 - [ ] It should also be a battlefield
 - [ ] Outsite it should be only margin, if someone wants to draw a biiiiig thing
 - [ ] Having more XP gives more Ilots?
-- [ ] Bot at the middle with a color and a highlight "Merge with me!"
+- [x] Bot at the middle with a color and a highlight "Merge with me!"
+(F12: a third bot (`client/src/bin/bot.rs` "center" shape) idles in a small
+loop at the world origin; its display name IS "Merge with me!" — F12's new
+cursor name-label rendering (`world::draw_cursor_label`) shows it above the
+cursor for free, no bot-specific client code. See plan.md's F12 entry.)
 - [x] Customise your Isle border color or make it transparent (remove)
 
 - [ ] Put a clear hexel title with a ENTER

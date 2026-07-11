@@ -1524,19 +1524,43 @@ fn draw_lock_icon(d: &mut impl RaylibDraw, r: Rectangle, locked: bool) {
 }
 
 /// F9.6 item 5: minimal controls list, toggled by Escape (see `handle_input`).
+/// F12 (extends F9.6 item 5's minimal keybindings-only version): explains
+/// the actual theme mechanic — merging — above the controls list, since
+/// "how do I even get new colors" was never spelled out anywhere in-game.
 fn draw_help_overlay(d: &mut impl RaylibDraw) {
     d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
 
     let o = overlay_rect();
     d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
     d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
-    d.draw_text("Controls", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+    d.draw_text("How to play", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
 
     let close = overlay_close_rect();
     d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
     d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
 
-    const LINES: &[&str] = &[
+    let section_color = Color::new(180, 200, 255, 255);
+    let mut ty = o.y as i32 + 50;
+
+    d.draw_text("Merging colors", o.x as i32 + 20, ty, 15, section_color);
+    ty += 24;
+    const MERGE_LINES: &[&str] = &[
+        "Hues are your unlockable resource — you start with just one.",
+        "Touch cursors with another player: both brushes blend into a",
+        "  brand-new hue and you both add it to your collection.",
+        "No other player around? Long-press any painted tile instead —",
+        "  you take a merge of your brush and that tile's color.",
+        "Merging earns XP; XP raises how saturated your brush can go.",
+    ];
+    for line in MERGE_LINES {
+        d.draw_text(line, o.x as i32 + 20, ty, 14, Color::RAYWHITE);
+        ty += 22;
+    }
+
+    ty += 14;
+    d.draw_text("Controls", o.x as i32 + 20, ty, 15, section_color);
+    ty += 24;
+    const CONTROL_LINES: &[&str] = &[
         "Left-drag on your island or the margin: paint",
         "X or the Eraser button: toggle paint/erase",
         "Middle-click a painted tile: eyedropper (must be unlocked)",
@@ -1548,8 +1572,7 @@ fn draw_help_overlay(d: &mut impl RaylibDraw) {
         "Mouse wheel / pinch: zoom",
         "Escape: close this / any open panel",
     ];
-    let mut ty = o.y as i32 + 54;
-    for line in LINES {
+    for line in CONTROL_LINES {
         d.draw_text(line, o.x as i32 + 20, ty, 15, Color::RAYWHITE);
         ty += 26;
     }

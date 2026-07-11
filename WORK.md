@@ -178,17 +178,26 @@ Player connect/disconnect events are logged in two places:
 
 ## Trajectory bots
 
-Two always-on bots (`client/src/bin/bot.rs`) hold the board's `heart-bot`
-and `hexagon-bot` players, tracing a parametric heart curve and a hexagon
-outline respectively, so it never looks empty. Each keeps its own
-persisted identity (`~/.spacetimedb_client_credentials/hexmerge-bot-{heart,hexagon}`)
-independent of the human client's.
+Three always-on bots (`client/src/bin/bot.rs`) hold the board's `heart-bot`,
+`hexagon-bot`, and `center` players, tracing a parametric heart curve, a
+hexagon outline, and a small idle loop at the world origin respectively, so
+it never looks empty. Each keeps its own persisted identity
+(`~/.spacetimedb_client_credentials/hexmerge-bot-{heart,hexagon,center}`)
+independent of the human client's. The `center` bot's display name is
+literally `Merge with me!` — the backlog's "bot at the middle with a
+highlight" callout, rendered for free by F12's cursor name labels
+(`world::draw_cursor_label`), no bot-specific client code needed.
+
+F12: positions are world-cartesian units (origin = admin's slot-0 island
+center), not the old fixed-canvas pixel space — re-verify trajectories with
+`spacetime sql -s local hexmerge "SELECT name, cx, cy FROM user"` after any
+geometry-constant change (`ISLAND_RADIUS`/`MARGIN_GAP_TILES` in `shared`).
 
 Running 24/7 via systemd (`/etc/systemd/system/hexmerge-bot@.service`,
 `Restart=always`, enabled at boot):
 
 ```bash
-systemctl status hexmerge-bot@heart.service hexmerge-bot@hexagon.service
+systemctl status hexmerge-bot@heart.service hexmerge-bot@hexagon.service hexmerge-bot@center.service
 journalctl -u hexmerge-bot@heart -f
 ```
 
@@ -196,5 +205,8 @@ After changing `server/src/lib.rs` or `bot.rs`, rebuild and restart:
 
 ```bash
 cargo build -p client --bin bot --release
-sudo systemctl restart hexmerge-bot@heart.service hexmerge-bot@hexagon.service
+sudo systemctl restart hexmerge-bot@heart.service hexmerge-bot@hexagon.service hexmerge-bot@center.service
 ```
+
+(First deploy of the `center` bot: also `sudo systemctl enable --now
+hexmerge-bot@center.service` once, same as the original two were enabled.)

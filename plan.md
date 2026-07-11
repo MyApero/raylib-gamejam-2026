@@ -724,7 +724,28 @@ center bot, customizable island border color.
 - **F12 Polish**: sounds (raylib `LoadSound`, CC0 assets only), bots adapted to the new
   schema (they keep the world alive for raters — include the backlog's "Merge with me!"
   center bot here), help overlay explaining merge (extends F9.6's minimal keybindings
-  overlay), page styling on itch.
+  overlay), page styling on itch. IMPLEMENTED (2026-07-11), all four sub-parts — see
+  status.md's F12 batch notes for the executor's design calls on each:
+  - Bots: `client/src/bin/bot.rs` converted from the pre-F2 fixed-canvas pixel space to
+    world-cartesian coordinates (`PATH_RADIUS` now clears the admin island's ~26-unit
+    reach); new third `center` bot idles at the world origin with display name literally
+    `"Merge with me!"`.
+  - New: cursor name labels (`world::draw_cursor_label`, both clients) — the render
+    surface the center bot's callout needed; a general small-text-above-cursor label for
+    every online player, gated on zoom so it doesn't clutter zoomed out, defensively
+    truncated since `set_name` has no server-side length cap.
+  - Help overlay (`ui::draw_help_overlay`) now has a "Merging colors" section above the
+    existing keybindings list, explaining the actual theme mechanic in-game for the
+    first time.
+  - Sounds: `client/src/sfx.rs` (new shared module), 4 CC0 rFXGen sfx from raylib's own
+    bundled examples, embedded via `include_bytes!` (not file-path `LoadSound`, so the
+    web target needs no emscripten `--preload-file` staging), wired to the existing
+    merge/gift/levelup/"not unlocked" toast events. Audio device init treated as
+    fallible (`Option`), degrades to silence rather than crashing if unavailable.
+  - itch page styling: copy drafted in `itch-page.md` (new, repo root) — publishing it
+    needs the author's itch.io login, which the executor doesn't have.
+  NOT committed — pending the author's hand-test pass (including actually hearing the
+  sounds), same convention as every prior batch.
 - **F13 Hexa event** — the merge mechanic at 6 (author-designed).
   - *Trigger* (server, in `set_pos` after the pairwise-merge scan): count eligible
     cursors — online, `last_seen` < `PRESENCE_TIMEOUT`, not locked — within

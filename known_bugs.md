@@ -77,3 +77,4 @@ eyedropper "+" hint, both of which were classifying `mouse_world` regardless
 of whether the cursor was actually over the map — see status.md)
 
 - [ ] Wrong color in color modal for tile border
+- [ ] Pseudo is not showing the first refresh

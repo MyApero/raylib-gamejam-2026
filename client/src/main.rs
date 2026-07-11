@@ -1,4 +1,5 @@
 mod module_bindings;
+mod sfx;
 mod ui;
 mod world;
 use module_bindings::*;
@@ -290,6 +291,11 @@ fn main() {
     rl.set_target_fps(60);
     rl.hide_cursor(); // we draw our own pointer in the caller's brush color
 
+    // F12: audio device init is an environmental boundary (no sound card,
+    // headless/CI) — degrade to silence instead of crashing the game over it.
+    let audio = RaylibAudio::init_audio_device().ok();
+    let sfx = audio.as_ref().map(sfx::Sfx::load);
+
     let mut camera = Camera2D {
         offset: Vector2::new(360.0, 360.0),
         target: Vector2::new(0.0, 0.0),
@@ -447,11 +453,17 @@ fn main() {
                         // pre-reset entries.
                         if inv.from_gift {
                             ui_state.show_gift_toast(inv.hue);
+                            if let Some(s) = &sfx {
+                                s.gift.play();
+                            }
                         } else if inv.obtained_with.is_none() {
                             ui_state.note_reset_hue(inv.hue);
                         } else {
                             let label = inv.obtained_with.map_or_else(|| "someone".to_string(), |p| player_label(&ctx, p));
                             ui_state.show_merge_toast(inv.hue, &label);
+                            if let Some(s) = &sfx {
+                                s.merge.play();
+                            }
                         }
                     }
                 }
@@ -511,6 +523,9 @@ fn main() {
             // reporting whatever level the player already was).
             if last_level.is_some_and(|prev| level > prev) {
                 ui_state.show_levelup_toast(level, world::sat_cap(level), hue);
+                if let Some(s) = &sfx {
+                    s.levelup.play();
+                }
             }
             last_level = Some(level);
             ui_state.sync_name_once(user.as_ref().and_then(|u| u.name.as_ref()));
@@ -767,6 +782,9 @@ fn main() {
                                     let _ = ctx.reducers.set_brush(hue, sat, val);
                                 } else {
                                     ui_state.show_info_toast("not unlocked — long-press to merge".to_string());
+                                    if let Some(s) = &sfx {
+                                        s.error.play();
+                                    }
                                 }
                             }
                         }
@@ -978,7 +996,7 @@ fn main() {
         // Screen-space projection for other players' cursors, computed here
         // (not inside the draw call) because `rl` can't be borrowed again
         // once `begin_drawing` hands out its mutable borrow below.
-        let other_cursors: Vec<(Vector2, Color, bool)> = ctx
+        let other_cursors: Vec<(Vector2, Color, bool, String)> = ctx
             .db
             .user()
             .iter()
@@ -994,6 +1012,7 @@ fn main() {
                     rl.get_world_to_screen2D(Vector2::new(u.cx, u.cy), camera),
                     world::hsv_color(u.hue, u.sat, u.val),
                     u.locked,
+                    u.name.clone().unwrap_or_default(),
                 )
             })
             .collect();
@@ -1131,8 +1150,11 @@ fn main() {
         // Other players' cursors sit under the HUD (world-space indicators);
         // only the caller's own cursor needs to stay visible over the
         // header/footer/overlay, so it's drawn last, after the HUD.
-        for &(screen, color, locked) in &other_cursors {
-            world::draw_cursor_scaled(&mut d, screen, color, other_cursor_scale, locked);
+        for (screen, color, locked, name) in &other_cursors {
+            world::draw_cursor_scaled(&mut d, *screen, *color, other_cursor_scale, *locked);
+            if other_cursor_scale >= 0.5 {
+                world::draw_cursor_label(&mut d, *screen, name, other_cursor_scale);
+            }
         }
 
         let own_brush = me.map(|me| {

@@ -39,6 +39,8 @@
 mod world;
 #[path = "../ui.rs"]
 mod ui;
+#[path = "../sfx.rs"]
+mod sfx;
 use world::constants::*;
 
 use raylib::prelude::*;
@@ -694,6 +696,14 @@ struct State {
     /// the click that closes an overlay can't also paint the cell behind it
     /// once it's gone.
     suppress_map_until_release: bool,
+    /// F12: `None` if the audio device failed to init (no sound card,
+    /// browser autoplay block, headless) — every call site degrades to
+    /// silence instead of unwrapping. Backed by a leaked `'static`
+    /// `RaylibAudio` (see `main`'s comment) — this `State` itself is never
+    /// freed either (`Box::into_raw`, below), so leaking the audio device
+    /// alongside it for the process's whole lifetime is the same tradeoff,
+    /// not a new one.
+    sfx: Option<sfx::Sfx<'static>>,
 }
 
 fn handle_message(state: &mut State, raw: &str) {
@@ -831,6 +841,9 @@ fn frame(state: &mut State) {
                     // `reset_account`'s reseed, never a merge.
                     if inv.from_gift {
                         state.ui_state.show_gift_toast(inv.hue);
+                        if let Some(s) = &state.sfx {
+                            s.gift.play();
+                        }
                     } else if inv.obtained_with_hex.is_none() {
                         state.ui_state.note_reset_hue(inv.hue);
                     } else {
@@ -839,6 +852,9 @@ fn frame(state: &mut State) {
                             .as_deref()
                             .map_or_else(|| "someone".to_string(), |p| player_label(&state.tables, p));
                         state.ui_state.show_merge_toast(inv.hue, &label);
+                        if let Some(s) = &state.sfx {
+                            s.merge.play();
+                        }
                     }
                 }
             }
@@ -896,6 +912,9 @@ fn frame(state: &mut State) {
         // F9 level-up feedback: mirrors `main.rs` exactly.
         if state.last_level.is_some_and(|prev| level > prev) {
             state.ui_state.show_levelup_toast(level, world::sat_cap(level), hue);
+            if let Some(s) = &state.sfx {
+                s.levelup.play();
+            }
         }
         state.last_level = Some(level);
         state.ui_state.sync_name_once(user.and_then(|u| u.name.as_ref()));
@@ -1151,6 +1170,9 @@ fn frame(state: &mut State) {
                                 call_reducer("set_brush", serde_json::json!([hue, sat, val]));
                             } else {
                                 state.ui_state.show_info_toast("not unlocked — long-press to merge".to_string());
+                                if let Some(s) = &state.sfx {
+                                    s.error.play();
+                                }
                             }
                         }
                     }
@@ -1324,7 +1346,7 @@ fn frame(state: &mut State) {
     // `ISLAND_FIT_ZOOM`), floored so they stay findable when zoomed out.
     let other_cursor_scale = (state.camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
 
-    let other_cursors: Vec<(Vector2, Color, bool)> = state
+    let other_cursors: Vec<(Vector2, Color, bool, String)> = state
         .tables
         .users
         .iter()
@@ -1337,6 +1359,7 @@ fn frame(state: &mut State) {
                 state.rl.get_world_to_screen2D(Vector2::new(u.cx, u.cy), state.camera),
                 world::hsv_color(u.hue, u.sat, u.val),
                 u.locked,
+                u.name.clone().unwrap_or_default(),
             )
         })
         .collect();
@@ -1446,8 +1469,11 @@ fn frame(state: &mut State) {
             });
     }
 
-    for &(screen, color, locked) in &other_cursors {
-        world::draw_cursor_scaled(&mut d, screen, color, other_cursor_scale, locked);
+    for (screen, color, locked, name) in &other_cursors {
+        world::draw_cursor_scaled(&mut d, *screen, *color, other_cursor_scale, *locked);
+        if other_cursor_scale >= 0.5 {
+            world::draw_cursor_label(&mut d, *screen, name, other_cursor_scale);
+        }
     }
 
     let own_brush = me.and_then(|me| state.tables.users.get(me)).map(|u| ((u.hue, u.sat, u.val), u.xp, u.locked));
@@ -1514,6 +1540,11 @@ fn main() {
         .build();
     rl.hide_cursor(); // we draw our own pointer in the caller's brush color
 
+    // F12: leaked alongside `state` below (both live for the process's
+    // whole lifetime under `emscripten_set_main_loop_arg` — see its comment).
+    let audio: Option<&'static RaylibAudio> = RaylibAudio::init_audio_device().ok().map(|a| &*Box::leak(Box::new(a)));
+    let sfx = audio.map(sfx::Sfx::load);
+
     let state = Box::new(State {
         rl,
         thread,
@@ -1544,6 +1575,7 @@ fn main() {
         ws_status: "connecting".to_string(),
         now_micros: 0,
         suppress_map_until_release: false,
+        sfx,
     });
     let arg = Box::into_raw(state) as *mut c_void;
     unsafe {
