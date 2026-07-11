@@ -148,6 +148,15 @@ pub fn world_to_axial(p: Vector2) -> (i32, i32) {
     cube_round(qf, rf)
 }
 
+/// Mirrors `server::geometry::island_cell_id` exactly — lets both clients do
+/// an O(1) point lookup by packed id instead of scanning every painted cell
+/// in the world to find one island's. `q_local`/`r_local` are relative to
+/// the island's own center (see `ISLAND_RADIUS`'s ±13 range, offset by 16 to
+/// stay non-negative in the 5-bit field).
+pub fn island_cell_id(island_id: u32, q_local: i32, r_local: i32) -> u32 {
+    (island_id << 10) | (((q_local + 16) as u32) << 5) | ((r_local + 16) as u32)
+}
+
 pub fn unpack_hsv(color: u32) -> (u16, u8, u8) {
     (((color >> 16) & 0x1FF) as u16, ((color >> 8) & 0xFF) as u8, (color & 0xFF) as u8)
 }

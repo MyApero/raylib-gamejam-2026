@@ -977,9 +977,6 @@ fn frame(state: &mut State) {
     let (view_min_y, view_max_y) = (top_left.y - pad, bottom_right.y + pad);
     let in_view = |p: Vector2| p.x >= view_min_x && p.x <= view_max_x && p.y >= view_min_y && p.y <= view_max_y;
 
-    let island_cell_colors: HashMap<(u32, i32, i32), u32> =
-        state.tables.island_cells.values().map(|c| ((c.island_id, c.q, c.r), c.color)).collect();
-
     // Mirrors `main.rs`'s `seed_hues`: each island's border is drawn in its
     // owner's SEED hue (their starting color, or reset_account's reseed —
     // exactly one `obtained_with_hex.is_none()` row exists per owner at any
@@ -1022,10 +1019,16 @@ fn frame(state: &mut State) {
                 continue;
             }
             let mine = me == Some(island.owner_hex.as_str());
+            // F9.5 (FPS at scale): point-lookup each rendered cell by its
+            // packed id in the already-id-keyed `island_cells` map instead of
+            // collecting a fresh (island_id, q, r) -> color HashMap from
+            // EVERY island_cell row in the world every frame — cost is now
+            // proportional to in-view cells, not total painted cells.
             for &(dq, dr) in world::island_offsets() {
                 let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
-                let fill = island_cell_colors.get(&(island_id, dq, dr)).map_or(Color::new(60, 60, 68, 255), |&c| {
-                    let (h, s, v) = world::unpack_hsv(c);
+                let id = world::island_cell_id(island_id, dq, dr);
+                let fill = state.tables.island_cells.get(&id).map_or(Color::new(60, 60, 68, 255), |c| {
+                    let (h, s, v) = world::unpack_hsv(c.color);
                     world::hsv_color(h, s, v)
                 });
                 world::draw_hex(&mut d2, cell_world, 1.0, fill, Color::new(40, 40, 46, 255));

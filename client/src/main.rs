@@ -608,9 +608,6 @@ fn main() {
         let (view_min_y, view_max_y) = (top_left.y - pad, bottom_right.y + pad);
         let in_view = |p: Vector2| p.x >= view_min_x && p.x <= view_max_x && p.y >= view_min_y && p.y <= view_max_y;
 
-        let island_cell_colors: HashMap<(u32, i32, i32), u32> =
-            ctx.db.island_cell().iter().map(|c| ((c.island_id, c.q, c.r), c.color)).collect();
-
         // Author-requested (F8 follow-up): each island's border is drawn in
         // its owner's SEED hue — the color they started with (or re-rolled
         // via reset), never the live/nudged brush — so the world map is
@@ -657,14 +654,19 @@ fn main() {
                     continue;
                 }
                 let mine = me == Some(island.owner);
+                // F9.5 (FPS at scale): point-lookup each rendered cell by its
+                // packed id via the SDK's own unique-index cache instead of
+                // collecting a HashMap from EVERY island_cell row in the
+                // world every frame — cost is now proportional to in-view
+                // cells (this loop already skipped non-in-view islands
+                // above), not total painted cells across the whole world.
                 for &(dq, dr) in world::island_offsets() {
                     let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
-                    let fill = island_cell_colors
-                        .get(&(island.id, dq, dr))
-                        .map_or(Color::new(60, 60, 68, 255), |&c| {
-                            let (h, s, v) = world::unpack_hsv(c);
-                            world::hsv_color(h, s, v)
-                        });
+                    let id = world::island_cell_id(island.id, dq, dr);
+                    let fill = ctx.db.island_cell().id().find(&id).map_or(Color::new(60, 60, 68, 255), |c| {
+                        let (h, s, v) = world::unpack_hsv(c.color);
+                        world::hsv_color(h, s, v)
+                    });
                     world::draw_hex(&mut d2, cell_world, 1.0, fill, Color::new(40, 40, 46, 255));
                 }
                 // Author-caught: sat/val used to be a fixed (85, 95),

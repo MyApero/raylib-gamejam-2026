@@ -7,7 +7,48 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9.5 item 1 — account import bug (CRITICAL, deployed-build
+**Current batch:** F9.5 item 2 — FPS at scale (author-reported 40fps @ 10
+islands / 30fps @ 18 on the deployed build). Root cause matched plan.md's own
+diagnosis exactly: both clients rebuilt a `HashMap<(island_id, q, r), color>`
+from EVERY `island_cell` row in the world on EVERY frame
+(`main.rs`/`bin/web.rs`, both just before `begin_drawing`), even though the
+render loop right below already skips non-`in_view` islands — so the cost
+scaled with total painted cells across the whole world, not what's on
+screen.
+
+**Fix**: added `world::island_cell_id(island_id, q_local, r_local) -> u32`
+(mirrors `server::geometry::island_cell_id`'s packing exactly) and dropped
+the per-frame HashMap entirely in both clients:
+- `main.rs`: each rendered cell now does `ctx.db.island_cell().id().find(&id)`
+  — an O(1) lookup through the SDK's own unique-index client cache (the same
+  index `merge_target_at`/paint reducers already rely on server-side) instead
+  of a full collect.
+- `bin/web.rs`: `state.tables.island_cells` is already a
+  `HashMap<u32, IslandCellRow>` keyed by the row's OWN id (its parser reads
+  the `id` field as the map key) — which IS the packed cell id — so this one
+  needed no lookup structure at all, just `state.tables.island_cells.get(&id)`
+  directly against the existing per-row cache. The intermediate
+  `(island_id, q, r) -> color` collect was pure redundant work.
+
+Cost is now proportional to in-view cells (island count already filtered by
+`in_view` above this loop, times the fixed 547-cell interior) instead of
+every painted cell in the entire world, matching plan.md's asked-for fix
+("build the map only from islands that are in_view").
+
+**VERIFIED**: `cargo build -p client --bin client --bin bot` clean, no new
+warnings. Rebuilt the web client and drove it with the same
+Playwright-against-local-`spacetime start` setup as item 1's probe: painted a
+multi-cell stroke via simulated mouse drag, screenshotted before/after
+zoom-out — cells render with the correct color at both zoom levels, confirming
+the id-packing/lookup swap didn't silently break rendering. Did **not**
+re-measure actual FPS numbers under many-island load (would need several
+real distinct identities painting concurrently, out of scope for a scripted
+single-session probe) — the author's own hand-test with the deployed
+bot/multi-player load is still the real verification plan.md asks for.
+
+---
+
+**Previous batch:** F9.5 item 1 — account import bug (CRITICAL, deployed-build
 report: "pasting a token creates a NEW account instead of recovering the
 existing one", reproduced by the author everywhere: standalone, itch embed,
 cross-origin, local dev).
