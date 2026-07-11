@@ -49,35 +49,6 @@ use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 use std::time::{Duration, Instant};
 
-/// Client-side cap on paint-reducer calls while dragging; the server's own
-/// token bucket is the real limit, this just avoids spamming calls faster
-/// than a stroke can usefully register. Mirrors `main.rs`'s native client.
-const CLIENT_PAINT_HZ: f32 = 100.0;
-/// Zoom level used whenever the camera centers on the player's own island.
-const ISLAND_FIT_ZOOM: f32 = 13.0;
-const LONG_PRESS_HOLD: Duration = Duration::from_millis(400);
-const LONG_PRESS_TOL_PX: f32 = 8.0;
-/// Author-requested: mirrors `main.rs`'s `DOUBLE_CLICK_WINDOW` exactly.
-const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
-/// Mirrors `main.rs`'s `DOUBLE_CLICK_TOL_PX` exactly — see its comment there.
-/// Matters far more here than on native: this is the actual touch path
-/// (author-reported broken on a real phone), where the canvas's fixed
-/// 720x720 internal resolution gets upscaled from a much smaller on-screen
-/// CSS size on most phones, magnifying inter-tap finger jitter into
-/// game-space pixels well past the 8px mouse-tuned tolerance.
-const DOUBLE_CLICK_TOL_PX: f32 = 28.0;
-/// F9.5 item 7 / decision 17: mirrors `main.rs`'s `HOVER_OPEN_DELAY` exactly.
-const HOVER_OPEN_DELAY: Duration = Duration::from_millis(200);
-/// F9.6 item 2: mirrors `main.rs`'s `MIDDLE_CLICK_TOL_PX` exactly.
-const MIDDLE_CLICK_TOL_PX: f32 = 8.0;
-/// F9.6 item 7: mirrors `main.rs`'s `INTRO_DURATION` exactly.
-const INTRO_DURATION: Duration = Duration::from_millis(1750);
-/// F9.6 item 8: mirrors `main.rs`'s `BORDERLESS_ZOOM_THRESHOLD` exactly.
-const BORDERLESS_ZOOM_THRESHOLD: f32 = 5.0;
-/// F9.6 item 6: mirrors `main.rs`'s `KEY_PAN_SPEED`/`KEY_ZOOM_RATE` exactly.
-const KEY_PAN_SPEED: f32 = 400.0;
-const KEY_ZOOM_RATE: f32 = 1.4;
-
 unsafe extern "C" {
     fn emscripten_run_script_string(script: *const c_char) -> *const c_char;
     fn emscripten_set_main_loop_arg(

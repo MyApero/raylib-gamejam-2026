@@ -12,62 +12,6 @@ use std::time::{Duration, Instant};
 /// Local SpacetimeDB instance (`spacetime start`).
 const HOST: &str = "http://localhost:3000";
 const DB_NAME: &str = "hexmerge";
-/// Client-side cap on paint-reducer calls while dragging; the server's own
-/// token bucket (1000 tiles / 20 s) is the real limit, this just avoids
-/// spamming calls faster than a stroke can usefully register.
-const CLIENT_PAINT_HZ: f32 = 100.0;
-/// Zoom level used whenever the camera centers on the player's own island
-/// (startup and the footer's Center button): fits the 547-cell island
-/// (radius 13, so ~22.5 world units to the furthest edge) inside the
-/// 720x720 window with the header/footer bands and a little padding.
-const ISLAND_FIT_ZOOM: f32 = 13.0;
-/// Long-press-to-merge thresholds: hold LMB steady within `LONG_PRESS_TOL_PX`
-/// screen pixels for `LONG_PRESS_HOLD` to trigger `merge_with_cell`.
-const LONG_PRESS_HOLD: Duration = Duration::from_millis(400);
-const LONG_PRESS_TOL_PX: f32 = 8.0;
-/// Author-requested: two clean single-clicks landing on the SAME foreign
-/// island within this window (and without drifting past
-/// `LONG_PRESS_TOL_PX`) toggle a like/unlike instead of opening the info
-/// popup — see `pending_info_click`.
-const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
-/// Author-reported (mobile hand-test, 2026-07-11): double-click-to-like
-/// wasn't registering on a phone. Root cause: the canvas is fixed at 720x720
-/// internal render resolution (`client/web/game.html`'s `width: 100vmin`),
-/// but on most phone screens that's displayed well under 720 CSS px, so the
-/// browser upscales — any physical finger jitter between the two taps of a
-/// double-tap gets magnified by that same ratio once mapped into game-space
-/// coordinates. `LONG_PRESS_TOL_PX` (8px) was tuned for mouse precision and
-/// is far too tight for two independent finger contacts; this is a separate,
-/// more forgiving tolerance used ONLY to match the second tap's position
-/// against the first (the "is this the same click" check), not for the
-/// existing single-press hold-still/drag detection, which stays as-is.
-const DOUBLE_CLICK_TOL_PX: f32 = 28.0;
-/// F9.5 item 7 / decision 17: how long the cursor must sit continuously over
-/// a foreign island before its info popup opens on its own — long enough
-/// that a paint stroke's cursor briefly sweeping past a neighboring border
-/// doesn't flicker it open.
-const HOVER_OPEN_DELAY: Duration = Duration::from_millis(200);
-/// F9.6 item 2: middle-click eyedropper — a clean middle press+release
-/// within this tolerance/window is a "click"; drifting past it (or holding
-/// past the window without release) is the existing middle-drag PAN gesture
-/// instead, which stays completely unaffected since it's driven separately
-/// by `is_mouse_button_down` every frame regardless of this.
-const MIDDLE_CLICK_TOL_PX: f32 = 8.0;
-/// F9.6 item 7: how long the launch intro's ease from the whole-world view
-/// to the player's island takes, absent any input (which skips it instantly).
-const INTRO_DURATION: Duration = Duration::from_millis(3000);
-/// F9.6 item 8: on-screen hex size (world-unit radius 1.0 * `camera.zoom`,
-/// in pixels) below which the per-tile outline pass is skipped — the
-/// author's "borderless far zoom" note picked ~4-6px; the executor settled
-/// on 5.
-const BORDERLESS_ZOOM_THRESHOLD: f32 = 2.0;
-/// F9.6 item 6: keyboard pan speed, world units/sec at zoom 1.0 (divided by
-/// the current zoom so it feels like a constant SCREEN speed, same trick as
-/// the border-thickness fix above). Q/E zoom rate is a fraction-per-second
-/// multiplier, chosen so a held key covers roughly the same range as a few
-/// mouse-wheel notches per second.
-const KEY_PAN_SPEED: f32 = 400.0;
-const KEY_ZOOM_RATE: f32 = 1.4;
 
 /// `credentials::File` keys its storage path only by this string
 /// (`~/.spacetimedb_client_credentials/<key>`), shared by every process on

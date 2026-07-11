@@ -8,6 +8,8 @@ use raylib::prelude::*;
 use std::sync::OnceLock;
 
 pub mod constants {
+    use std::time::Duration;
+
     pub const ISLAND_RADIUS: i32 = 13;
     /// Gap (in fine hex tiles) left between neighboring islands' paintable
     /// interiors — mirrors `server::constants::MARGIN_GAP_TILES` exactly.
@@ -27,6 +29,75 @@ pub mod constants {
     /// it shrink with the camera like a world-space object would, but never
     /// past "still findable" small.
     pub const CURSOR_MIN_SCALE: f32 = 0.4;
+
+    // --- Shared UI tuning ---
+    // Native (`main.rs`) and web (`bin/web.rs`) used to each declare their
+    // own copies of these, which silently drifted apart (`INTRO_DURATION`
+    // and `BORDERLESS_ZOOM_THRESHOLD` ended up with different values on
+    // each client despite comments claiming they mirrored exactly). Single
+    // source of truth now.
+
+    /// Client-side cap on paint-reducer calls while dragging; the server's
+    /// own token bucket (1000 tiles / 20 s) is the real limit, this just
+    /// avoids spamming calls faster than a stroke can usefully register.
+    pub const CLIENT_PAINT_HZ: f32 = 100.0;
+    /// Zoom level used whenever the camera centers on the player's own
+    /// island (startup and the footer's Center button): fits the 547-cell
+    /// island (radius 13, so ~22.5 world units to the furthest edge) inside
+    /// the 720x720 window with the header/footer bands and a little padding.
+    pub const ISLAND_FIT_ZOOM: f32 = 13.0;
+    /// Long-press-to-merge thresholds: hold LMB steady within
+    /// `LONG_PRESS_TOL_PX` screen pixels for `LONG_PRESS_HOLD` to trigger
+    /// `merge_with_cell`.
+    pub const LONG_PRESS_HOLD: Duration = Duration::from_millis(400);
+    pub const LONG_PRESS_TOL_PX: f32 = 8.0;
+    /// Author-requested: two clean single-clicks landing on the SAME
+    /// foreign island within this window (and without drifting past
+    /// `LONG_PRESS_TOL_PX`) toggle a like/unlike instead of opening the
+    /// info popup — see `pending_info_click`.
+    pub const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
+    /// Author-reported (mobile hand-test, 2026-07-11): double-click-to-like
+    /// wasn't registering on a phone. Root cause: the canvas is fixed at
+    /// 720x720 internal render resolution (`client/web/game.html`'s
+    /// `width: 100vmin`), but on most phone screens that's displayed well
+    /// under 720 CSS px, so the browser upscales — any physical finger
+    /// jitter between the two taps of a double-tap gets magnified by that
+    /// same ratio once mapped into game-space coordinates.
+    /// `LONG_PRESS_TOL_PX` (8px) was tuned for mouse precision and is far
+    /// too tight for two independent finger contacts; this is a separate,
+    /// more forgiving tolerance used ONLY to match the second tap's
+    /// position against the first (the "is this the same click" check),
+    /// not for the existing single-press hold-still/drag detection, which
+    /// stays as-is.
+    pub const DOUBLE_CLICK_TOL_PX: f32 = 28.0;
+    /// F9.5 item 7 / decision 17: how long the cursor must sit continuously
+    /// over a foreign island before its info popup opens on its own — long
+    /// enough that a paint stroke's cursor briefly sweeping past a
+    /// neighboring border doesn't flicker it open.
+    pub const HOVER_OPEN_DELAY: Duration = Duration::from_millis(200);
+    /// F9.6 item 2: middle-click eyedropper — a clean middle press+release
+    /// within this tolerance/window is a "click"; drifting past it (or
+    /// holding past the window without release) is the existing
+    /// middle-drag PAN gesture instead, which stays completely unaffected
+    /// since it's driven separately by `is_mouse_button_down` every frame
+    /// regardless of this.
+    pub const MIDDLE_CLICK_TOL_PX: f32 = 8.0;
+    /// F9.6 item 7: how long the launch intro's ease from the whole-world
+    /// view to the player's island takes, absent any input (which skips it
+    /// instantly). Re-tuned by hand-testing 1750ms -> 3000ms (see status.md).
+    pub const INTRO_DURATION: Duration = Duration::from_millis(3000);
+    /// F9.6 item 8: on-screen hex size (world-unit radius 1.0 *
+    /// `camera.zoom`, in pixels) below which the per-tile outline pass is
+    /// skipped — the author's "borderless far zoom" note picked ~4-6px, the
+    /// executor settled on 5, later re-tuned by hand-testing to 20.
+    pub const BORDERLESS_ZOOM_THRESHOLD: f32 = 20.0;
+    /// F9.6 item 6: keyboard pan speed, world units/sec at zoom 1.0
+    /// (divided by the current zoom so it feels like a constant SCREEN
+    /// speed, same trick as the border-thickness fix above). Q/E zoom rate
+    /// is a fraction-per-second multiplier, chosen so a held key covers
+    /// roughly the same range as a few mouse-wheel notches per second.
+    pub const KEY_PAN_SPEED: f32 = 400.0;
+    pub const KEY_ZOOM_RATE: f32 = 1.4;
 }
 
 pub fn level_of(xp: u64) -> u64 {
