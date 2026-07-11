@@ -12,6 +12,14 @@
 //! `CURSOR_SEND_HZ`) stay local to that side.
 
 pub mod constants {
+    /// Radius (in fine hex tiles) of an island's paintable interior —
+    /// `hexdist <= ISLAND_RADIUS` from the island's own center. Single
+    /// source of truth: previously hand-mirrored in both the server and
+    /// client with a doc comment promising sync, which let them drift to
+    /// 13 (client) vs 15 (server) after a radius bump only landed on one
+    /// side.
+    pub const ISLAND_RADIUS: i32 = 15;
+
     /// Gap (in fine hex tiles) left between neighboring islands' paintable
     /// interiors. MUST be even: the placement radius is bumped by
     /// `MARGIN_GAP_TILES / 2` on top of `ISLAND_RADIUS`, and that bump

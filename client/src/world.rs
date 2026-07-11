@@ -13,11 +13,13 @@ use std::sync::OnceLock;
 pub mod constants {
     use std::time::Duration;
 
-    pub const ISLAND_RADIUS: i32 = 13;
     /// Gap (in fine hex tiles) left between neighboring islands' paintable
     /// interiors. Single source of truth in the `shared` crate — see its
     /// doc comment for why it MUST be even.
     pub use shared::constants::MARGIN_GAP_TILES;
+    /// Single source of truth in the `shared` crate — see its doc comment
+    /// for why this is no longer hand-mirrored.
+    pub use shared::constants::ISLAND_RADIUS;
     /// Client-side send-rate cap for `set_pos`; the server has no matching
     /// limit (cursor spam is cheap), this just avoids flooding the socket.
     pub const CURSOR_SEND_HZ: f32 = 20.0;
@@ -45,10 +47,13 @@ pub mod constants {
     /// avoids spamming calls faster than a stroke can usefully register.
     pub const CLIENT_PAINT_HZ: f32 = 100.0;
     /// Zoom level used whenever the camera centers on the player's own
-    /// island (startup and the footer's Center button): fits the 547-cell
-    /// island (radius 13, so ~22.5 world units to the furthest edge) inside
+    /// island (startup and the footer's Center button): fits the 721-cell
+    /// island (radius 15, so ~26.0 world units to the furthest edge) inside
     /// the 720x720 window with the header/footer bands and a little padding.
-    pub const ISLAND_FIT_ZOOM: f32 = 13.0;
+    /// Scaled down from the old radius-13 value (13.0) by 13/15 to keep the
+    /// same on-screen fit — REASONED, not hand-verified; re-tune if the
+    /// island looks clipped or too small after playtesting.
+    pub const ISLAND_FIT_ZOOM: f32 = 11.267;
     /// Long-press-to-merge thresholds: hold LMB steady within
     /// `LONG_PRESS_TOL_PX` screen pixels for `LONG_PRESS_HOLD` to trigger
     /// `merge_with_cell`.
@@ -231,7 +236,7 @@ pub fn in_any_island_territory(q: i32, r: i32) -> bool {
     false
 }
 
-/// All local `(q, r)` offsets of an island's 547-cell interior
+/// All local `(q, r)` offsets of an island's 721-cell interior
 /// (`hexdist <= ISLAND_RADIUS`), computed once and cached.
 pub fn island_offsets() -> &'static [(i32, i32)] {
     static OFFSETS: OnceLock<Vec<(i32, i32)>> = OnceLock::new();
@@ -264,7 +269,7 @@ pub fn world_to_axial(p: Vector2) -> (i32, i32) {
 /// Mirrors `server::geometry::island_cell_id` exactly — lets both clients do
 /// an O(1) point lookup by packed id instead of scanning every painted cell
 /// in the world to find one island's. `q_local`/`r_local` are relative to
-/// the island's own center (see `ISLAND_RADIUS`'s ±13 range, offset by 16 to
+/// the island's own center (see `ISLAND_RADIUS`'s ±15 range, offset by 16 to
 /// stay non-negative in the 5-bit field).
 pub fn island_cell_id(island_id: u32, q_local: i32, r_local: i32) -> u32 {
     (island_id << 10) | (((q_local + 16) as u32) << 5) | ((r_local + 16) as u32)
