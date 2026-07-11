@@ -74,6 +74,9 @@ enum Paintable {
     OwnIsland(i32, i32),
     /// Absolute world coords in the margin.
     Margin(i32, i32),
+    /// F14 (decision 20): local offset into the slot-0 community island —
+    /// paintable by anyone, not just its (sentinel) "owner".
+    Community(i32, i32),
     /// Someone else's island, or no island yet — not paintable.
     None,
 }
@@ -86,6 +89,14 @@ fn classify(ctx: &DbConnection, me: Identity, world_q: i32, world_r: i32) -> Pai
         if world::hexdist(lq, lr) <= ISLAND_RADIUS {
             return Paintable::OwnIsland(lq, lr);
         }
+    }
+    // F14: slot 0 is always the origin (fixed geometry, never a real
+    // player's island — see `lowest_free_slot`), so no island lookup needed.
+    let (q0, r0) = world::slot_coords(0);
+    let (ccx0, ccy0) = world::slot_center(q0, r0);
+    let (lq0, lr0) = (world_q - ccx0, world_r - ccy0);
+    if world::hexdist(lq0, lr0) <= ISLAND_RADIUS {
+        return Paintable::Community(lq0, lr0);
     }
     if !world::in_any_island_territory(world_q, world_r) {
         return Paintable::Margin(world_q, world_r);
@@ -158,6 +169,12 @@ fn short_hex(id: Identity) -> String {
 /// doubles as their account-recovery token, decision 11), so it must never
 /// leak to another player, not even truncated.
 fn player_label(ctx: &DbConnection, id: Identity) -> String {
+    // F14 (decision 20): the community island's sentinel owner isn't a real
+    // player — name it "Free Isle" rather than falling through to the
+    // generic "another player".
+    if id == Identity::ZERO {
+        return "Free Isle".to_string();
+    }
     ctx.db
         .user()
         .identity()
@@ -282,6 +299,8 @@ fn main() {
         "SELECT * FROM island_cell",
         "SELECT * FROM margin_cell",
         "SELECT * FROM gift",
+        "SELECT * FROM hexa_event",
+        "SELECT * FROM hexa_cluster",
     ]);
 
     let (mut rl, thread) = raylib::init()
@@ -353,6 +372,11 @@ fn main() {
     // `panning` below), which runs off `is_mouse_button_down` every frame
     // regardless — a real click's incidental pan delta is imperceptible.
     let mut middle_click: Option<Vector2> = None;
+    // F13 (Hexa event): persisted display positions for hexagon-vertex-
+    // snapped cursors (including the local player's own, per the author —
+    // see `world::hexa_advance_display`'s doc comment), lerped frame to
+    // frame from the server's authoritative `hexa_cluster` rows.
+    let mut hexa_display: HashMap<Identity, Vector2> = HashMap::new();
 
     while !rl.window_should_close() {
         if let Err(e) = ctx.frame_tick() {
@@ -457,7 +481,22 @@ fn main() {
                                 s.gift.play();
                             }
                         } else if inv.obtained_with.is_none() {
-                            ui_state.note_reset_hue(inv.hue);
+                            // F13: a Hexa-pooled grant ALSO leaves
+                            // `obtained_with: None` (same as a fresh seed
+                            // hue or a `reset_account` reseed) — told apart
+                            // by joining against a `hexa_event` row stamped
+                            // with the exact same `ctx.timestamp` the server
+                            // wrote both rows with in the same call (see
+                            // `apply_hexa`'s comment on why this is a
+                            // timestamp join rather than a new field).
+                            if ctx.db.hexa_event().iter().any(|e| e.at == inv.obtained_at) {
+                                ui_state.show_hexa_toast(inv.hue);
+                                if let Some(s) = &sfx {
+                                    s.merge.play();
+                                }
+                            } else {
+                                ui_state.note_reset_hue(inv.hue);
+                            }
                         } else {
                             let label = inv.obtained_with.map_or_else(|| "someone".to_string(), |p| player_label(&ctx, p));
                             ui_state.show_merge_toast(inv.hue, &label);
@@ -725,6 +764,7 @@ fn main() {
                     let target = match classify(&ctx, me, wq, wr) {
                         Paintable::OwnIsland(lq, lr) => Some((0u8, lq, lr)),
                         Paintable::Margin(q, r) => Some((1u8, q, r)),
+                        Paintable::Community(lq, lr) => Some((2u8, lq, lr)),
                         Paintable::None => None,
                     };
                     if let Some(key) = target {
@@ -743,6 +783,12 @@ fn main() {
                                 }
                                 ((1, q, r), true) => {
                                     let _ = ctx.reducers.erase_margin_cell(q, r);
+                                }
+                                ((2, lq, lr), false) => {
+                                    let _ = ctx.reducers.paint_community_cell(lq, lr);
+                                }
+                                ((2, lq, lr), true) => {
+                                    let _ = ctx.reducers.erase_community_cell(lq, lr);
                                 }
                                 _ => unreachable!(),
                             }
@@ -816,6 +862,9 @@ fn main() {
                     // its info popup instead of painting. Your own island
                     // stays paint-only; its popup now opens via the "My
                     // Isle" footer button instead (`actions.open_own_island`).
+                    // F14: the community island (owner == Identity::ZERO)
+                    // opens the same popup, `player_label` renders its
+                    // owner as "Free Isle" instead of a real player's name.
                     info_target: island_at(&ctx, wq, wr)
                         .filter(|(island, _, _)| island.owner != me)
                         .map(|(island, _, _)| island.id),
@@ -918,7 +967,9 @@ fn main() {
             .then(|| {
                 me.and_then(|me| {
                     let (hq, hr) = world::world_to_axial(mouse_world);
-                    island_at(&ctx, hq, hr).filter(|(island, _, _)| island.owner != me).map(|(island, _, _)| island.id)
+                    island_at(&ctx, hq, hr)
+                        .filter(|(island, _, _)| island.owner != me)
+                        .map(|(island, _, _)| island.id)
                 })
             })
             .flatten();
@@ -993,6 +1044,40 @@ fn main() {
         // findable even zoomed far out.
         let other_cursor_scale = (camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
 
+        // F13 (Hexa event): server-authoritative cluster membership — group
+        // `hexa_cluster` rows by `cluster_id`, then place each member on
+        // `hexagon_vertex_positions` at ITS OWN `vertex_index` (paired
+        // per-row, not by list position, so a momentarily incomplete
+        // subscription snapshot can't misassign slots). `me`'s own row is
+        // included here like everyone else's — per the author, the LOCAL
+        // player's own cursor should visibly move to its hexagon slot too,
+        // not stay glued to the mouse while everyone else's snaps (see the
+        // local-cursor draw call below).
+        let mut hexa_groups: HashMap<u64, Vec<HexaCluster>> = HashMap::new();
+        for row in ctx.db.hexa_cluster().iter() {
+            hexa_groups.entry(row.cluster_id).or_default().push(row);
+        }
+        let mut cluster_targets: Vec<(Vec<Identity>, Vec<Vector2>)> = Vec::new();
+        // World-space hexagon edges (drawn inside `d2` below, same trick
+        // `draw_gift_icon` uses). `ignited` mirrors the server's own
+        // `member_count >= HEXA_SIZE` check.
+        let mut hexa_polygons: Vec<(Vec<Vector2>, bool)> = Vec::new();
+        for rows in hexa_groups.into_values() {
+            let Some(first) = rows.first() else { continue };
+            let vertices = world::hexagon_vertex_positions(Vector2::new(first.cx, first.cy), first.member_count as usize);
+            let mut keys: Vec<Identity> = Vec::with_capacity(rows.len());
+            let mut targets: Vec<Vector2> = Vec::with_capacity(rows.len());
+            for row in &rows {
+                if let Some(&v) = vertices.get(row.vertex_index as usize) {
+                    keys.push(row.identity);
+                    targets.push(v);
+                }
+            }
+            hexa_polygons.push((vertices, first.ignited));
+            cluster_targets.push((keys, targets));
+        }
+        hexa_display = world::hexa_advance_display(&hexa_display, &cluster_targets, rl.get_frame_time());
+
         // Screen-space projection for other players' cursors, computed here
         // (not inside the draw call) because `rl` can't be borrowed again
         // once `begin_drawing` hands out its mutable borrow below.
@@ -1008,14 +1093,28 @@ fn main() {
             // actively moving.
             .filter(|u| u.online && Some(u.identity) != me)
             .map(|u| {
+                // F13: a hexagon-cluster member renders at its lerped
+                // snapped display position instead of its raw cursor
+                // position — the real network position is untouched
+                // (detection above keeps using it), this is purely a render
+                // override.
+                let world_pos = hexa_display.get(&u.identity).copied().unwrap_or(Vector2::new(u.cx, u.cy));
                 (
-                    rl.get_world_to_screen2D(Vector2::new(u.cx, u.cy), camera),
+                    rl.get_world_to_screen2D(world_pos, camera),
                     world::hsv_color(u.hue, u.sat, u.val),
                     u.locked,
                     u.name.clone().unwrap_or_default(),
                 )
             })
             .collect();
+
+        // F13 (author follow-up): the LOCAL player's own cursor also
+        // renders at its lerped hexagon-snap position while participating —
+        // precomputed here for the same reason `other_cursors` is (`rl`
+        // can't be borrowed again once `begin_drawing` hands out its
+        // mutable borrow below). `None` (not clustered, or `me` unknown
+        // yet) falls back to the literal mouse position at the draw call.
+        let my_hexa_screen: Option<Vector2> = me.and_then(|me| hexa_display.get(&me)).map(|&pos| rl.get_world_to_screen2D(pos, camera));
 
         let hover_takeable;
         let mut d = rl.begin_drawing(&thread);
@@ -1037,6 +1136,14 @@ fn main() {
                     continue;
                 }
                 let mine = me == Some(island.owner);
+                // F14 (decision 20): the community island's unpainted tiles
+                // are white, not the usual gray placeholder — visually marks
+                // it as the shared "Free Isle" canvas at a glance.
+                let unpainted_fill = if island.owner == Identity::ZERO {
+                    Color::new(255, 255, 255, 255)
+                } else {
+                    Color::new(60, 60, 68, 255)
+                };
                 // F9.5 (FPS at scale): point-lookup each rendered cell by its
                 // packed id via the SDK's own unique-index cache instead of
                 // collecting a HashMap from EVERY island_cell row in the
@@ -1046,7 +1153,7 @@ fn main() {
                 for &(dq, dr) in world::island_offsets() {
                     let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
                     let id = world::island_cell_id(island.id, dq, dr);
-                    let fill = ctx.db.island_cell().id().find(&id).map_or(Color::new(60, 60, 68, 255), |c| {
+                    let fill = ctx.db.island_cell().id().find(&id).map_or(unpainted_fill, |c| {
                         let (h, s, v) = world::unpack_hsv(c.color);
                         world::hsv_color(h, s, v)
                     });
@@ -1112,6 +1219,12 @@ fn main() {
             // with everything else.
             if let Some((_, pos, elapsed)) = active_gift {
                 world::draw_gift_icon(&mut d2, pos, elapsed);
+            }
+
+            // F13 (Hexa event): world-space hexagon edges for each detected
+            // cluster — see the computation above.
+            for (vertices, ignited) in &hexa_polygons {
+                world::draw_hexa_polygon(&mut d2, vertices, *ignited);
             }
 
             // Hover highlight: only on cells the caller could actually paint
@@ -1197,7 +1310,10 @@ fn main() {
             // distinct from paint mode at a glance.
             let (hue, sat, val) = brush;
             let cursor_color = if ui_state.eraser_on { Color::new(210, 210, 216, 255) } else { world::hsv_color(hue, sat, val) };
-            world::draw_cursor(&mut d, mouse_screen, cursor_color, locked);
+            // F13 (author follow-up): visually snaps to the hexagon slot
+            // while merging — painting/hover logic above still uses the
+            // real `mouse_world`/`mouse_screen`, only this draw call moves.
+            world::draw_cursor(&mut d, my_hexa_screen.unwrap_or(mouse_screen), cursor_color, locked);
         }
         if ui_state.eraser_on {
             world::draw_eraser_badge(&mut d, mouse_screen);

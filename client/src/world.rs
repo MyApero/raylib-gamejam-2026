@@ -122,6 +122,18 @@ pub mod constants {
     /// converted from screen pixels, so "close enough" means the same thing
     /// here as it does server-side) and the visual affordance radius.
     pub use shared::constants::GIFT_CLAIM_DIST;
+
+    /// F13: world-unit radius of the rendered hexagon a cluster's cursors
+    /// snap their DISPLAY position onto — client-only cosmetic (cluster
+    /// DETECTION is server-authoritative, via `hexa_cluster` rows; this only
+    /// controls how big the resulting shape reads on screen), picked a
+    /// little over one hex tile so it's clear without the snapped cursors
+    /// overlapping the tiles underneath.
+    pub const HEXA_VERTEX_RADIUS: f32 = 1.4;
+    /// F13: how long a display position takes to lerp to a newly (re)assigned
+    /// hexagon vertex slot — instant snapping reads as jarring teleportation
+    /// once six cursors converge; this smooths it into a settle.
+    pub const HEXA_SNAP_LERP_SECS: f32 = 0.35;
 }
 
 pub fn level_of(xp: u64) -> u64 {
@@ -442,4 +454,76 @@ pub fn draw_cursor_label(d: &mut impl RaylibDraw, tip: Vector2, name: &str, scal
     let rect = Rectangle::new(tip.x - width / 2.0, tip.y - height - 6.0, width, height);
     d.draw_rectangle_rec(rect, Color::new(20, 20, 26, 210));
     d.draw_text(&name, (rect.x + 5.0) as i32, (rect.y + 3.0) as i32, font_size, Color::RAYWHITE);
+}
+
+/// F13: regular-hexagon vertex slots around `center`, `count` of them.
+/// Client-only cosmetic (the server has no notion of a vertex layout, only
+/// `HEXA_RADIUS`'s detection circle) — `HEXA_VERTEX_RADIUS` is picked purely
+/// for how the shape reads on screen. `count` past `HEXA_SIZE` (a rare
+/// geometric edge case: a cluster briefly bigger than 6 at this radius)
+/// wraps onto an already-occupied slot rather than growing a 7+-gon; angle
+/// offset puts slot 0 straight up.
+/// Author follow-up: vertex ASSIGNMENT (which slot a given member renders
+/// at) is now server-authoritative (`HexaCluster.vertex_index`), so both
+/// clients read the identical slot for a given member instead of each
+/// re-sorting the group themselves — this function only turns a
+/// (center, count) pair into the actual on-screen positions.
+pub fn hexagon_vertex_positions(center: Vector2, count: usize) -> Vec<Vector2> {
+    (0..count)
+        .map(|i| {
+            let angle = -std::f32::consts::FRAC_PI_2 + (i % 6) as f32 * std::f32::consts::FRAC_PI_3;
+            Vector2::new(center.x + constants::HEXA_VERTEX_RADIUS * angle.cos(), center.y + constants::HEXA_VERTEX_RADIUS * angle.sin())
+        })
+        .collect()
+}
+
+/// F13: advances the previous frame's persisted per-member DISPLAY position
+/// toward this frame's hexagon-vertex targets (read straight off the
+/// server's `hexa_cluster` rows — see that table's doc comment) — frame-rate
+/// independent exponential smoothing, reaching `HEXA_SNAP_LERP_SECS`-ish
+/// settle time regardless of `dt`. `clusters` pairs each group's member keys
+/// with its `hexagon_vertex_positions` output (same length, same order,
+/// index-matched by each member's own `vertex_index`). The returned map
+/// contains ONLY currently-clustered keys (a member no longer in any
+/// cluster is silently dropped, not lerped back to nothing), so it never
+/// grows past however many cursors are hexagon-snapped RIGHT NOW — this
+/// includes the LOCAL player's own key when they're a participant: per the
+/// author, your own cursor should visibly move to its hexagon slot too, not
+/// stay glued to the literal mouse position while everyone else's snaps.
+/// A key's first frame in a cluster starts already AT its target (no
+/// animating in from a stale or absent prior position).
+pub fn hexa_advance_display<K: Clone + Eq + std::hash::Hash>(
+    prev: &std::collections::HashMap<K, Vector2>,
+    clusters: &[(Vec<K>, Vec<Vector2>)],
+    dt: f32,
+) -> std::collections::HashMap<K, Vector2> {
+    let rate = (1.0 - (-dt / constants::HEXA_SNAP_LERP_SECS.max(0.001)).exp()).clamp(0.0, 1.0);
+    let mut next = std::collections::HashMap::new();
+    for (keys, targets) in clusters {
+        for (key, &target) in keys.iter().zip(targets) {
+            let pos = prev.get(key).copied().unwrap_or(target);
+            next.insert(key.clone(), Vector2::new(pos.x + (target.x - pos.x) * rate, pos.y + (target.y - pos.y) * rate));
+        }
+    }
+    next
+}
+
+/// F13: connects a cluster's hexagon vertex slots pairwise — world-space, so
+/// it naturally pans/zooms with everything else (same as `draw_gift_icon`).
+/// A full 6-member cluster closes into a hexagon; fewer members draw an open
+/// chain (e.g. 2 members = one edge), reading as "waiting for the rest" per
+/// the author's spec. `ignited` (member_count >= `HEXA_SIZE`) draws it
+/// bright and thick; below that, a faint preview.
+pub fn draw_hexa_polygon(d: &mut impl RaylibDraw, vertices: &[Vector2], ignited: bool) {
+    let n = vertices.len().min(6);
+    if n < 2 {
+        return;
+    }
+    let (color, thickness) = if ignited { (Color::new(255, 245, 200, 230), 0.12) } else { (Color::new(255, 255, 255, 90), 0.05) };
+    for i in 0..n {
+        if i + 1 == n && n < 6 {
+            break;
+        }
+        d.draw_line_ex(vertices[i], vertices[(i + 1) % n], thickness, color);
+    }
 }

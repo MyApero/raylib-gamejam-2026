@@ -49,6 +49,8 @@ next one starts.
 9. XP amounts are constants in one place, tuned later by playtesting.
 10. Island = hexagon of side 14 → radius 13 → 547 tiles. One island per player,
     created at first connection. Admin island reserved at the world center (slot 0).
+    (Superseded by decision 20, 2026-07-11: slot 0 is now the ownerless community
+    canvas, not a personal island — admin is no longer physically placed there.)
 11. The reconnection identifier is the SpacetimeDB token (Cookie-Clicker style import),
     persisted in `localStorage` (works inside itch.io's game iframe; strict-privacy
     browser modes may partition/purge it, and the itch embed and the standalone site
@@ -78,6 +80,27 @@ next one starts.
 19. (2026-07-11) Middle-click eyedropper adopts a tile's color only if that tile's hue
     is already in the caller's inventory; it never grants hues — long-press merge
     remains the only acquisition path. Sat is re-clamped to the caller's cap.
+20. (2026-07-11, author ruling — resolves the backlog's "center-island identity"
+    question) Slot 0 (world center) is a permanent, ownerless COMMUNITY island:
+    anyone connected may paint/erase there, not just its "owner" — decision 3's
+    own-island-only rule is superseded for this one island specifically; the margins
+    clause is unaffected. It exists from the first `client_connected` after this
+    feature ships (lazy-seeded, same convention `config`/the scheduled-reducer rows
+    already use, so a `--delete-data=never` republish of an existing database doesn't
+    need a fresh `init` to get it). Ownership is represented by the sentinel
+    `Identity::ZERO` (never a real connecting player's identity) rather than
+    `Option<Identity>`, to avoid changing the `owner` column's type everywhere it's
+    already read. Consequence for decision 10 / F10: `claim_admin` no longer relocates
+    the claimant's island to slot 0 — admin is now purely a role (freeze/moderation
+    powers), decoupled from any physical island. Its info popup/hover-tooltip work
+    like any other island's, labeled **"Free Isle"** (author-requested, 2026-07-11)
+    rather than a real player's name or the generic "another player" fallback — both
+    clients' `player_label` special-cases the sentinel identity. Its unpainted tiles
+    render white (author-requested, same date), not the usual gray placeholder, so
+    it reads as the shared canvas at a glance even before anyone's painted on it.
+    Long-press tile-merge and the eyedropper work on it like any other painted cell —
+    it's the theme's shared canvas, not a rateable profile, though liking/XP-crediting
+    it is a harmless no-op left as-is (no real player ever owns it to receive the XP).
 
 ## Canonical constants — single source of truth
 
@@ -110,6 +133,7 @@ pointing here).
 | `HEXA_SIZE` | 6 | cursors needed to ignite a Hexa event (P2) |
 | `HEXA_RADIUS` | 2.0 | cluster radius for Hexa detection, world units (P2) |
 | `XP_HEXA` | 150 | one-time-per-player Hexa bonus (P2) |
+| `HEXA_SWEEP_PERIOD_SECS` | 2 | `hexa_cluster` stale-row safety-net sweep interval, server-only (P2, F13 follow-up) |
 | `GIFT_SPAWN_PERIOD_SECS` | 45 | flying-gift spawn/expire tick interval, server-only (P2, F11) |
 | `GIFT_LIFETIME_SECS` | 25 | how long an unclaimed gift lasts before the tick sweeps it (P2, F11) |
 | `GIFT_DRIFT_RADIUS` | 1.2 | world-unit radius of the gift's circular drift around its spawn point — shared client/server (P2, F11) |
@@ -746,38 +770,167 @@ center bot, customizable island border color.
     needs the author's itch.io login, which the executor doesn't have.
   NOT committed — pending the author's hand-test pass (including actually hearing the
   sounds), same convention as every prior batch.
-- **F13 Hexa event** — the merge mechanic at 6 (author-designed).
+- **F13 Hexa event** — the merge mechanic at 6 (author-designed). IMPLEMENTED
+  (2026-07-11) — see status.md's F13 batch note for the executor's design calls;
+  summary:
   - *Trigger* (server, in `set_pos` after the pairwise-merge scan): count eligible
     cursors — online, `last_seen` < `PRESENCE_TIMEOUT`, not locked — within
     `HEXA_RADIUS` of the caller whose brush hue matches the caller's within
     `HUE_TOLERANCE` (circular distance; exact equality would break with the ±5° hue
-    slider). Count includes the caller; at `HEXA_SIZE` (6), ignite.
+    slider). Count includes the caller; at `HEXA_SIZE` (6), ignite. Implemented
+    exactly as specified in `set_pos`/`apply_hexa` (`server/src/lib.rs`).
   - *Effect*: the participants' color dictionaries are pooled — every hue owned by any
     participant is granted to every participant missing it (a 6-player hexagon shares
     everything its members know). `XP_HEXA` to each participant, ONCE per player ever.
     Pooling is idempotent for a fixed group (a second ignition grants nothing new), so
     no cooldown is needed. (Author-confirmed: pooling is among the 6 participants
-    only — never server-wide.)
+    only — never server-wide.) Executor design call: that same idempotence also gates
+    the `hexa_event` log row itself (`apply_hexa`'s `changed` flag) — a cluster that
+    stays formed keeps re-matching its own trigger every `set_pos` tick it holds, so
+    without the gate every one of those ticks would insert a fresh event row and spam
+    the clients' ignition flash; only a pass that actually grants something new logs
+    one. No cap on cluster size past `HEXA_SIZE`: a 7+-member same-hue cluster pools
+    among all of them, not just the nearest 6 (not a scope the author's "among the 6
+    only" ruling addressed — that ruling was about never pooling server-wide, not
+    about capping cluster size — so this is the executor's read of it, flag if wrong).
   - *Schema*: per the freeze window rule, F13 ships either before the deadline
     (unlikely) or after voting ends — in both cases server + all clients redeploy
     together, so no compatibility constraint applies. Keep dedicated tables anyway,
     for cleanliness: `hexa_reward(identity pk, at)` = who already received the
-    one-time XP; `hexa_event(id auto_inc, at, cx, cy, member_count)` for the ignition
-    animation. Granted inventory rows use `obtained_with = None` + a `hexa_event`
-    timestamp join for the special "obtained in a Hexa" mention.
+    one-time XP (server-internal, NOT `public` — clients only ever observe its effect
+    through `User.xp`/`Inventory`, same as every other XP grant); `hexa_event(id
+    auto_inc, at, cx, cy, member_count)` for the ignition animation (`public`).
+    Granted inventory rows use `obtained_with = None` + a `hexa_event` timestamp join
+    for the special "obtained in a Hexa" mention (both stamped with the same
+    `ctx.timestamp` in the same reducer call, so the join is an exact match, not a
+    tolerance window). Author follow-up, same day: also `hexa_cluster(identity pk,
+    cluster_id, cx, cy, member_count, vertex_index, ignited)`, `public` — see
+    *Rendering* below for why.
   - *Rendering* (client-only; the frozen itch build simply won't show it): cursors
     currently merged (same hue within tolerance, within `HEXA_RADIUS`) are DISPLAYED
     snapped onto the vertices of a regular hexagon around the cluster centroid — real
     network positions are untouched (detection keeps using them); display positions
-    lerp to their vertex slot; vertex assignment is stable (sort members by identity).
-    After a pairwise merge your cursor visibly settles beside your partner's: two
-    vertices of an incomplete hexagon, waiting for four more. At 6: ignition — flash
-    the hexagon edges, toast, inventory visibly fills.
+    lerp to their vertex slot (new client-only `HEXA_SNAP_LERP_SECS`/
+    `HEXA_VERTEX_RADIUS` constants in `world.rs`, not shared with the server — it has
+    no notion of a vertex layout); vertex assignment is stable (sort members by
+    identity). After a pairwise merge your cursor visibly settles beside your
+    partner's: two vertices of an incomplete hexagon, waiting for four more. At 6:
+    ignition — the hexagon edges render bright/thick instead of a faint preview chain,
+    toast, inventory visibly fills.
+
+    **Author follow-up (2026-07-11), superseding the first pass's two rendering
+    calls**: (a) the LOCAL player's own cursor must also visibly move to its hexagon
+    slot while merging, not stay glued to the mouse; (b) cluster membership should be
+    server-authoritative — "the server would tell that there is an HEXA happening and
+    give an id and position to players so that everyone sees they are merging" — not
+    each client guessing its own approximate clustering. Reworked accordingly:
+    `set_pos`'s existing per-caller detection scan (used for the ignition trigger
+    either way) now ALSO upserts a `hexa_cluster` row for EVERY detected member (not
+    just the caller) whenever the caller's own cluster has >= 2 members — `cluster_id`
+    is a hash of the sorted member identities (`hexa_cluster_id`), not an arbitrary
+    counter, so independent callers' own scans naturally agree on it without
+    cross-call synchronization, and it changes the instant membership actually
+    changes; `vertex_index` (assigned from that same sorted order) is which hexagon
+    slot a member renders at, so clients no longer derive vertex assignment
+    themselves — they just read `hexagon_vertex_positions(centroid, member_count)
+    [vertex_index]`. A caller whose own cluster drops below 2 deletes their own row.
+    Since a departing/disconnecting member might never call `set_pos` again to clear
+    their row, a new repeating `hexa_sweep` tick (`HEXA_SWEEP_PERIOD_SECS`, 2s,
+    private `hexa_sweep_schedule` table) deletes any `hexa_cluster` row whose owner
+    has gone offline or stale. Both clients dropped their own client-side clustering
+    algorithm entirely (`world::hexa_clusters`/`HexaCandidate` removed) — they group
+    `hexa_cluster` rows by `cluster_id` and render directly from server truth,
+    including their OWN identity's row for the local-cursor override (painting/hover
+    logic still reads the real mouse position; only the cursor DRAW call moves).
+    "Flash" is still a sustained bright/thick hexagon while `ignited` holds, not a
+    timed pulse, and the ignition toast still reuses the existing merge sfx cue
+    (neither of those two calls changed).
   - *Verify*: 6 clients (native instances + web iframes + adapted bots) with distinct
     hues converge → pairwise merges cascade, snap rendering forms the hexagon, at 6
     every participant's inventory becomes the union (`spacetime sql`: identical hue
     sets per participant), XP granted exactly once (re-form the hexagon → no new XP,
-    `hexa_reward` row count unchanged).
+    `hexa_reward` row count unchanged). Server-side VERIFIED live (not hand-tested in
+    the GUI, per the author's own testing protocol) via a throwaway 6-identity SDK
+    probe (same precedent as F11's throwaway WebSocket probe, deleted after use): 6
+    distinct identities homogenized to the exact same live brush hue via a legitimate
+    tile-merge/eyedropper off one shared painted cell (so the same-hue detection check
+    passes without needing 6 colliding random seed hues), clustered at the world
+    origin, `set_pos` fired in sequence — the 6th call's own trigger scan saw all 6
+    fresh + same-hue + close and ignited. Confirmed via `spacetime sql`: exactly 6
+    `hexa_reward` rows (one per identity) and exactly 1 `hexa_event` row after
+    ignition; each participant's inventory grew to the union of the 6 distinct seed
+    hues plus the shared eyedropped hue (6 rows each); XP matched `XP_MERGE_NEW` (from
+    the eyedropper) + `XP_HEXA` exactly. Re-triggered `set_pos` on the still-formed
+    cluster afterward: `hexa_reward` count and every participant's `xp` were BOTH
+    unchanged, and `hexa_event` stayed at exactly 1 row — confirms the idempotence
+    gate. Client rendering (both native `main.rs` and web `bin/web.rs`, plus
+    `game.html`'s subscription list) REASONED, not hand-tested — `cargo build` (server,
+    native client, bot) and `./build-web.sh` all clean; the author drives actual GUI
+    testing per the established protocol.
+
+    **Follow-up verify (same day, after the server-authoritative rework above)**:
+    re-ran a similar 6-identity probe against `hexa_cluster` specifically —
+    clustering all 6 confirmed identical `cluster_id` and stable, distinct
+    `vertex_index` values (0..5) across every member's own row, `ignited: true` on
+    all 6 exactly once `member_count` hit 6. Walking one identity far away and
+    nudging a remaining member confirmed: the departed identity's own row was
+    deleted immediately, the other 5's rows refreshed to `member_count: 5`,
+    `ignited: false`, and a NEW `cluster_id` (membership genuinely changed, so the
+    hash changed too) — confirms live shrink-on-departure, not just grow-on-join.
+    Leaving the group idle (no further `set_pos` from anyone) for ~6s confirmed the
+    `hexa_sweep` safety net clears every remaining row once `last_seen` goes stale —
+    `spacetime sql`'s `hexa_cluster` table was empty afterward. Client rendering
+    (the local-cursor snap override, dropping `world::hexa_clusters` in favor of
+    reading `hexa_cluster` rows directly) again REASONED via clean builds, not
+    hand-tested in the GUI.
+
+- **F14 Community island (playground)** — author ruling 2026-07-11 (see decision 20),
+  resolving the backlog's "center-island identity" question below. Slot 0 becomes a
+  permanent, ownerless canvas anyone can paint or erase, ending its dependence on
+  `claim_admin`:
+  - *Schema*: none. Reuses the existing `island`/`island_cell` tables — the community
+    canvas is just the `Island` row at `slot == 0` with `owner == Identity::ZERO`
+    (a real, never-issued sentinel value; native client code compares it directly,
+    web's hand-parsed hex path compares against its 64-zero hex string).
+  - *Server*: `client_connected` lazy-seeds the slot-0 `Island` row if missing (same
+    pattern already used there for `config`/the four scheduled-reducer rows — a
+    `--delete-data=never` republish of the live database doesn't re-run `init`, so
+    lazy-seeding on connect is the only way an existing database picks up the row).
+    Two new reducers, `paint_community_cell`/`erase_community_cell(q_local, r_local)`:
+    same bound check (`hexdist <= ISLAND_RADIUS` from slot 0) and same paint-token
+    charge as `paint_island_cell`/`erase_island_cell`, but with NO ownership check —
+    any connected caller may write. `claim_admin` had its island-relocation block
+    removed entirely (it only ever swapped the claimant's OWN island into slot 0;
+    with slot 0 permanently occupied by the community island, that swap no longer
+    makes sense) — it now only verifies the password and sets `config.admin`.
+  - *Client* (both native `main.rs` and web `bin/web.rs`, mirrored): the per-cell
+    `classify`/paintability check gets a third case — inside slot 0's territory but
+    not matching "own island" or "margin" — dispatched to
+    `paint_community_cell`/`erase_community_cell` exactly like the existing two paint
+    kinds (extends the `(kind: u8, q, r)` dispatch with a new `kind = 2`). The
+    foreign-island info popup / hover-tooltip (decision 17, F9.5 item 7) opens for the
+    community island exactly like any other foreign island — `player_label` special-
+    cases the sentinel identity (native: `Identity::ZERO`; web:
+    `COMMUNITY_OWNER_HEX`, its 64-zero hex form) to render as **"Free Isle"** instead
+    of falling back to "another player" (author-requested naming, 2026-07-11). Its
+    unpainted tiles render WHITE (`Color::new(255,255,255,255)`) instead of the usual
+    gray placeholder fill, in both clients — a visual tell that this is the shared
+    canvas, at a glance, before a single pixel's been painted (author-requested,
+    2026-07-11). Long-press tile-merge and the middle-click eyedropper are UNCHANGED
+    (both already operate generically on any painted cell via `island_at`, which the
+    community island's real `Island` row satisfies for free) — so merging with a
+    stranger's community-canvas
+    brushstroke, or eyedropping its color, both work exactly like on any other island.
+  - *Verify*: `spacetime sql hexmerge "SELECT id, owner, slot FROM island WHERE slot
+    = 0"` shows the sentinel row after one `client_connected`; `paint_community_cell`/
+    `erase_community_cell` succeed for an identity that owns no island there and fail
+    outside the radius bound; painting/erasing on one's own island and the margins is
+    unaffected; `claim_admin` no longer moves any island (`island.slot` for the
+    claimant's own island is unchanged after claiming); hovering/clicking the
+    community island opens its popup labeled "Free Isle" (never a real player's
+    name or "another player") in either client; its unpainted tiles render white,
+    distinct from every other island's gray placeholder; `./build-web.sh` and
+    `cargo build` (server, both clients, bot) stay clean.
 
 ---
 
@@ -790,11 +943,11 @@ submitted, and only if the freeze window rule still allows a redeploy.
 - **Dead-player cleanup** — SCHEDULED: promoted to F9.5 item 10 (2026-07-11), with
   the "no action taken" definition pinned there (empty island AND inventory ≤ 1 row).
 - **Center-island identity** ("bot drawing R and a heart" / "should also be a
-  battlefield"): partially live already — `heart-bot` and `hexagon-bot` (see
-  `WORK.md`) trace curves as always-on players, just not on the admin's own slot-0
-  island specifically. Making the actual center island contested territory conflicts
-  with decision 3 (a player paints only their own island) unless slot 0 is
-  special-cased — needs an explicit author ruling before it's scheduled as a feature.
+  battlefield"): RESOLVED and SCHEDULED as F14 (2026-07-11, decision 20) — the author
+  ruling was "the middle island should be a playground where anyone can draw
+  anything." `heart-bot`/`hexagon-bot`/the F12 "Merge with me!" center bot already
+  drew near the world center as always-on players; F14 makes the actual slot-0 island
+  itself a shared, ownerless canvas rather than just having bots idle nearby.
 - **"Outside is only margin, for big drawings"**: already true by design (the geometry
   spec's margin definition + decision 3) — no action needed, idea already satisfied by
   F1.

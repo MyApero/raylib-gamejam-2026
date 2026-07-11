@@ -7,7 +7,288 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F12 Polish, part 4/4 (last part) — itch page styling.
+**Current batch:** F13 Hexa event — author follow-up (2026-07-11, same day),
+superseding two of the first pass's rendering design calls. Author feedback
+verbatim: "I'm expecting my cursor to literally go at that place when doing
+HEXA" and "it would be rendered by the client but the server would tell
+that there is an HEXA happening and give an id and position to players so
+that everyone see they are merging." Both addressed by moving cluster
+DETECTION server-side (previously client-side-only, an approximate
+connected-components guess) and having the local player's own cursor snap
+too (previously excluded, glued to the literal mouse position).
+
+- **Server** (`server/src/lib.rs`): new `hexa_cluster(identity pk,
+  cluster_id, cx, cy, member_count, vertex_index, ignited)` table, `public`.
+  `set_pos`'s existing per-caller detection scan (already needed for the
+  ignition trigger) now also collects each eligible member's POSITION (not
+  just identity), and — whenever the caller's own cluster has >= 2 members —
+  calls a new `upsert_hexa_cluster` helper that writes/updates EVERY
+  member's own row in one pass, not just the caller's, so a single mover's
+  `set_pos` call refreshes the whole visible group at once rather than
+  waiting for each member to happen to move themselves. `cluster_id` is a
+  hash of the sorted member identities (`hexa_cluster_id`, `DefaultHasher`
+  over `Identity`'s `Hash` impl) — deliberately NOT an arbitrary counter, so
+  independent callers' own scans naturally agree on the same id as long as
+  they detect the same membership (no cross-call synchronization needed),
+  and the id changes the instant membership actually changes (verified live,
+  see below). `vertex_index` is each member's position in that same sorted
+  order — clients read it directly instead of re-deriving vertex assignment
+  themselves. A caller whose own cluster drops below 2 members deletes their
+  own row. The existing `>= HEXA_SIZE` ignition/reward path (`apply_hexa`)
+  is UNCHANGED, just fed from the same already-computed member list.
+  New repeating `hexa_sweep` tick (`HEXA_SWEEP_PERIOD_SECS`, 2s, private
+  `hexa_sweep_schedule` table, same lazy-seed pattern as every other
+  schedule) deletes any `hexa_cluster` row whose owner has gone offline or
+  stale — a departing/disconnecting member might never call `set_pos` again
+  to clear their own row, which would otherwise linger showing a hexagon
+  that no longer really exists.
+- **Both clients** (`world.rs`, `main.rs`, `bin/web.rs`, `game.html`):
+  dropped the entire client-side clustering algorithm (`world::
+  hexa_clusters`/`HexaCandidate`, an undirected-graph connected-components
+  pass over guessed candidates) — no longer needed now that the server is
+  authoritative. Both clients now group `hexa_cluster` rows by `cluster_id`
+  (pairing each row with its OWN `vertex_index`-derived position, not by
+  list order, so a momentarily incomplete subscription snapshot can't
+  misassign slots) and feed that straight into the unchanged
+  `hexagon_vertex_positions`/`hexa_advance_display`/`draw_hexa_polygon`
+  render helpers. New `"SELECT * FROM hexa_cluster"` subscription (native
+  list + `game.html`). Local-cursor snap: both `main.rs` and `bin/web.rs`
+  precompute a `my_hexa_screen: Option<Vector2>` (same "must compute before
+  `begin_drawing` borrows `rl`" constraint `other_cursors` already has) from
+  `hexa_display.get(&me)`, and the local player's own `draw_cursor` call now
+  uses `my_hexa_screen.unwrap_or(mouse_screen)` instead of always
+  `mouse_screen` — painting/hover logic elsewhere is UNCHANGED, still reads
+  the real mouse position; only this one draw call's position moves.
+- **Verify — server, VERIFIED live**: re-ran a 6-identity SDK probe
+  (`client/src/bin/hexa_probe.rs`, deleted after use, third throwaway probe
+  this project — same precedent as F11/F13's first pass) against the
+  reworked schema. Clustering all 6 (reusing the same probe identities/hues
+  from the first pass's verification, `--delete-data=never` having kept
+  them around) showed identical `cluster_id` and stable, distinct
+  `vertex_index` values (0..5) across every member's own row, `ignited:
+  true` on all 6 the instant `member_count` hit 6. Walked one identity far
+  away (500, 500) and nudged a remaining member: the departed identity's own
+  row was deleted immediately; the other 5's rows refreshed to
+  `member_count: 5`, `ignited: false`, and — confirming the hash-based id
+  isn't just a counter — a NEW `cluster_id` (genuinely different membership,
+  genuinely different hash). Left the group idle (no further `set_pos` from
+  anyone) for ~6s: `hexa_sweep` cleared every remaining row once each
+  member's `last_seen` went stale past `PRESENCE_TIMEOUT_SECS` —
+  `spacetime sql`'s `hexa_cluster` table was empty afterward, confirming the
+  safety net (a real player's client sends `set_pos` continuously while
+  the mouse moves, so this only ever fires for genuinely idle/gone players).
+- **Verify — client, REASONED, not hand-tested**: `cargo check -p server`,
+  `cargo build -p client --bin client --bin bot`, and `./build-web.sh` all
+  clean (zero warnings) after the rework, including alongside F14's
+  concurrently-landed community-island changes (both present in the working
+  tree by the time these builds ran). The local-cursor snap and
+  hexa_cluster-row grouping logic itself is REASONED from the code, not run
+  in the GUI — per this repo's established protocol the author drives
+  actual client hand-testing.
+
+**Verify status:** server mechanic (live cluster broadcast, id stability,
+shrink-on-departure, sweep cleanup) VERIFIED live; both clients' rendering
+(including the new local-cursor snap) REASONED only. NOT committed — full
+author hand-test pass pending, same as every prior batch, PLUS this is the
+piece that most needs an actual GUI look (does the local cursor snapping
+away from the literal mouse position feel right, or disorienting, while
+painting/hovering nearby is still mouse-driven underneath it).
+
+---
+
+**Previous batch:** F14 Community island (playground) — author ruling
+2026-07-11 (plan.md decision 20), resolving the backlog's "center-island
+identity" question: "the middle island should be a playground where anyone
+can draw anything." Slot 0 is now a permanent, ownerless canvas open to
+every connected player, and `claim_admin` no longer relocates any island
+to it.
+
+- **Server** (`server/src/lib.rs`): `client_connected` lazy-seeds an `Island`
+  row at `slot == 0` if missing — same lazy-seeding convention already used
+  there for `config` and the four scheduled-reducer rows, chosen specifically
+  because a `--delete-data=never` republish of an EXISTING database (this
+  one) does not re-run `init`, so an `init`-only approach would never have
+  backfilled it here. Owner is `Identity::ZERO`, a real constant on the SDK's
+  `Identity` type — chosen over `Option<Identity>` to avoid changing the
+  `owner` column's type (and every one of the ~10 call sites that read it)
+  everywhere it's already used; `Identity::ZERO` can never be a real
+  connecting player's identity, and `lowest_free_slot` already starts its
+  scan at 1, so it was never at risk of being handed to a real player either
+  way. Two new reducers mirror `paint_island_cell`/`erase_island_cell`
+  exactly (same `hexdist <= ISLAND_RADIUS` bound, same `take_paint_token`
+  charge) but look the island up by `slot().find(0)` instead of
+  `owner().find(ctx.sender())`, and have NO ownership check — any connected
+  caller may write. `claim_admin`'s island-relocation block (the
+  bump-through-a-temporary-slot swap) was deleted entirely; it now only
+  checks the password and sets `config.admin` — admin is purely a role
+  (freeze/`delete_island_cells` powers) with no physical placement anymore.
+- **Clients** (`main.rs` native, `bin/web.rs` web — mirrored identically):
+  `classify`/`Paintable` gained a third case, checked after "own island" and
+  before "margin": inside slot 0's territory (always the world origin, a
+  fixed constant — no island lookup needed to classify it) dispatches to
+  `paint_community_cell`/`erase_community_cell` via a new `kind = 2` in the
+  existing `(kind, q, r)` dispatch tuple. The foreign-island info-popup/
+  hover-tooltip (decision 17, F9.5 item 7) opens for the community island
+  exactly like any other foreign island (see the naming follow-up below for
+  what it displays). Long-press tile-merge and the middle-click eyedropper
+  needed NO changes — both already operate generically on any painted cell
+  via `island_at`, which the community island's real (if ownerless) `Island`
+  row satisfies for free.
+- **Follow-up, same session (author-requested): naming + white background.**
+  `player_label` (both clients) now special-cases the sentinel identity
+  (native: `id == Identity::ZERO`; web: a new `COMMUNITY_OWNER_HEX` constant,
+  the 64-zero hex form matching `normalize_identity`'s lowercase-no-`0x`
+  output) to return `"Free Isle"` instead of falling through to the generic
+  "another player" — this is the only place `island.owner`'s label was ever
+  rendered (the info popup's "Owner: X" line), so the earlier design call to
+  exclude the community island from that popup entirely was reverted: it now
+  opens on hover/click like any other foreign island, just labeled "Free
+  Isle". Unpainted community-island tiles now render pure white
+  (`Color::new(255,255,255,255)`) instead of the usual `(60,60,68)` gray
+  placeholder, in both clients' per-cell fill lookup — a visible tell even
+  before anyone's painted on it. Liking the Free Isle / its (never-set)
+  itch link are left as harmless no-ops (already gracefully handled
+  server-side since `Identity::ZERO` has no `user` row to credit) — not
+  specifically disabled, since that wasn't asked for.
+- **Verify — server, VERIFIED live**: a throwaway 2-identity SDK probe
+  (`client/src/bin/community_probe.rs`, same precedent as F11/F13's deleted
+  probes, deleted after use) connected two fresh identities (neither owning
+  any island at slot 0). `spacetime sql` confirmed: the community `Island`
+  row exists at `slot = 0` with `owner =
+  0x0000...0000` (64 zeros); identity A's `paint_community_cell(3, -2)`
+  landed a cell; identity B's `paint_community_cell(4, -2)` landed a
+  *different* cell under B's own `painted_by`, proving a non-owner can
+  paint; B's `erase_community_cell(3, -2)` then deleted A's cell — proving
+  erasing isn't ownership-gated either, matching decision 18's "permitted
+  exactly where painting is permitted"; identity A's out-of-bounds
+  `paint_community_cell(50, 50)` produced no row (bound check rejected it,
+  as `paint_island_cell`'s already does). `claim_admin`'s relocation removal
+  is REASONED only (code inspection — the block is gone, `cargo check`
+  passes; the live password's plaintext isn't available to verify the
+  reducer end-to-end, only its SHA-256 is ever committed, by design).
+- **Verify — client, REASONED, not hand-tested**: `cargo build -p server`,
+  `cargo build -p client --bin client --bin bot`, and `./build-web.sh` all
+  clean (re-confirmed after the naming/white-fill follow-up too). Rendering/
+  input behavior (the new dispatch branch, the popup now opening with the
+  "Free Isle" label, the white unpainted fill) is REASONED from the code,
+  not run in the GUI — per this repo's established protocol the author
+  drives actual client hand-testing.
+
+**Verify status:** server mechanic (lazy-seed, paint/erase by non-owners,
+bound check, admin decoupling) VERIFIED live; client dispatch/gating
+REASONED only. NOT committed — full author hand-test pass pending, same
+convention as every prior batch. Given the freeze window starts
+2026-07-12 18:00 UTC, this needs a hand-test-and-redeploy pass before then
+to count as shipped; otherwise it waits for after voting ends per the
+freeze rule.
+
+---
+
+**Previous batch:** F13 Hexa event (P2, last plan.md feature) — the
+6-same-hue-cursor mechanic plan.md already fully spec'd (unlike F11, this
+wasn't a one-liner the executor had to flesh out). Implemented server
+schema + trigger + effect, both clients' rendering, and verified the
+server-side mechanic live.
+
+- **Shared constants** (`shared/src/lib.rs`): `HEXA_SIZE` (6), `HEXA_RADIUS`
+  (2.0 world units), `XP_HEXA` (150) — matches plan.md's canonical constants
+  table exactly (already had the right values pre-filled).
+- **Server** (`server/src/lib.rs`): two new tables — `HexaReward(identity pk,
+  at)`, server-internal (not `public`, same treatment as a schedule table —
+  clients only ever see its effect through `User.xp`); `HexaEvent(id
+  auto_inc, at, cx, cy, member_count)`, `public`, for the client ignition
+  animation. Trigger lives in `set_pos`, AFTER the existing pairwise-merge
+  block (re-fetches the caller's `User` row first, since that block may have
+  just changed the caller's own hue) — scans for online/fresh/unlocked users
+  within `HEXA_RADIUS` whose hue is within `HUE_TOLERANCE` of the caller's,
+  same shape as the existing pairwise scan just above it. At `cluster.len()
+  >= HEXA_SIZE` calls a new `apply_hexa` helper (next to `apply_merge`):
+  unions every participant's owned hues, grants whoever's missing one a new
+  `Inventory` row (`obtained_with: None`, same as a seed/reset row — see the
+  join note below), grants `XP_HEXA` once per identity ever (gated on a
+  `HexaReward` row existing), and only inserts a `HexaEvent` row if that pass
+  actually granted something new. Design call (not explicit in plan.md):
+  gating the event-log insert on "something changed" reuses the same
+  idempotence plan.md already grants the pooling effect — without it, a
+  cluster that stays formed would insert a fresh `HexaEvent` row (and so
+  re-trigger the clients' flash) on every single `set_pos` tick it holds.
+  No hard cap at exactly 6 participants — a same-hue cluster bigger than
+  `HEXA_SIZE` pools among all of them, not just the nearest 6 (flagged in
+  plan.md as the executor's read of the author's "among the 6 only" ruling,
+  which was about never pooling server-wide, not about a hard cap).
+- **`Inventory` grant identification**: a Hexa-pooled row and a
+  `reset_account` reseed both leave `obtained_with: None`, so they need
+  telling apart. Per plan.md's own spec, NOT a new bool field (unlike
+  F11's `from_gift`) — instead both `main.rs` and `bin/web.rs`'s existing
+  inventory-insert watch check whether any `hexa_event` row's `at` exactly
+  matches the new row's `obtained_at` (same `ctx.timestamp`, written in the
+  same reducer call, so it's an exact match, not a tolerance window) before
+  falling back to the reset-hue path. `bin/web.rs`'s hand-rolled
+  `InventoryRow` had to grow an `obtained_at_micros` field for this — every
+  other consumer of that struct had skipped `obtained_at` until now.
+- **Client rendering** (`world.rs`, shared by both binaries): `HexaCandidate<K>`
+  (generic over identity type — native's SDK `Identity`, web's hex
+  `String` — so this module stays usable by both) + `hexa_clusters`, an
+  undirected-graph connected-components pass over ALL present online+
+  unlocked cursors. Deliberately a DIFFERENT, looser algorithm than the
+  server's caller-centered trigger scan — rendering has no single "caller"
+  to center on, and it skips the `PRESENCE_TIMEOUT` freshness check (never
+  mirrored client-side; plain cursor rendering already made that same call,
+  see `draw_cursor_label`'s "stay visible the whole time online" precedent)
+  — so it's a display-only approximation of what the server actually
+  ignited on, not a re-derivation of it. `hexagon_vertex_positions` (new
+  client-only `HEXA_VERTEX_RADIUS` constant, not shared — the server has no
+  vertex-layout concept) + `hexa_advance_display` (frame-rate-independent
+  exponential lerp toward the current target, new client-only
+  `HEXA_SNAP_LERP_SECS`; drops any key no longer clustered instead of
+  lerping it back to nothing, so the persisted map never grows past however
+  many cursors are hexagon-snapped right now) + `draw_hexa_polygon` (open
+  chain below `HEXA_SIZE` members, closed bright hexagon at/above it — "flash"
+  is a sustained bright/thick state, not a timed pulse). Wired into both
+  `main.rs` and `bin/web.rs` identically: candidates include `me` (for
+  correct centroid math) but only OTHER players' cursors get their render
+  position overridden — the local player's own cursor stays glued to the
+  literal mouse pointer, unchanged. New `UiState::show_hexa_toast` (`ui.rs`,
+  shared) reuses the existing merge sfx cue rather than a new sound asset.
+  `"SELECT * FROM hexa_event"` added to both the native subscription list
+  and `game.html`'s (`hexa_reward` is not public, so nothing to subscribe
+  to there).
+- **Verify — server, VERIFIED live**: a throwaway 6-identity SDK probe
+  (`client/src/bin/hexa_probe.rs`, same precedent as F11's throwaway
+  WebSocket probe, deleted after use) connected 6 distinct identities,
+  homogenized them to the exact same live brush hue via a legitimate
+  tile-merge/eyedropper off one shared painted cell (avoids needing 6
+  colliding random seed hues), clustered them at the world origin, and
+  fired `set_pos` in sequence. The 6th call's own trigger scan saw all 6
+  fresh + same-hue + close and ignited. `spacetime sql` against the local
+  instance confirmed: exactly 6 `hexa_reward` rows (one per identity) and
+  exactly 1 `hexa_event` row (`member_count: 6`); every participant's
+  inventory grew to 6 rows (the union of the 6 distinct seed hues + the one
+  shared eyedropped hue); XP matched `XP_MERGE_NEW` (25, from the
+  eyedropper) + `XP_HEXA` (150) exactly for the 5 identities that eyedropped,
+  and just `XP_HEXA` for the seed identity. Re-triggered `set_pos` on the
+  still-formed cluster afterward: `hexa_reward` row count and every
+  participant's `xp` were unchanged, and `hexa_event` stayed at exactly 1
+  row — confirms the idempotence gate (both the "no new grants" AND "no
+  event spam" halves of it).
+- **Verify — client, REASONED, not hand-tested**: `cargo build -p server -p
+  client --bin client --bin bot` and `./build-web.sh` all clean (no
+  warnings after trimming `bin/web.rs`'s hand-rolled `HexaEventRow` down to
+  the one field it actually reads). Rendering/gesture behavior itself is
+  REASONED (traced the logic, not run in the GUI) — per this repo's
+  established protocol the author drives actual client hand-testing, not
+  the executor.
+
+**Verify status:** server mechanic (trigger/pooling/one-time-XP/idempotence)
+VERIFIED live; both clients' rendering REASONED only. NOT committed — full
+author hand-test pass pending, same convention as every prior batch (F13
+also specifically needs the author to actually SEE 6 cursors converge and
+confirm the hexagon-snap rendering reads correctly, which no amount of
+`spacetime sql` can substitute for).
+
+---
+
+**Previous batch:** F12 Polish, part 4/4 (last part) — itch page styling.
 plan.md's spec: "page styling on itch." Unlike the other three parts, this
 one isn't code — it's content on the itch.io project page itself, which
 lives outside the repo and needs the author's itch.io login (this
@@ -2326,7 +2607,20 @@ Implementation notes:
       four. NOT committed — full author hand-test pass (including actually
       hearing the sounds) still pending, same convention as every prior
       batch.
-- [ ] F13 hexa event (6-cursor hexagon: pooled dictionaries, one-time XP, snap rendering) —
+- [ ] F13 hexa event (6-cursor hexagon: pooled dictionaries, one-time XP, snap
+      rendering) — IMPLEMENTED (2026-07-11): server trigger/pooling/one-time-XP
+      VERIFIED live via a throwaway 6-identity probe (`spacetime sql`: exactly
+      6 `hexa_reward` rows, exactly 1 `hexa_event` row, idempotent on
+      re-trigger); both clients' hexagon-vertex-snap rendering + ignition
+      toast REASONED, not hand-tested (`cargo build`/`./build-web.sh` clean).
+      Follow-up (2026-07-11, author feedback): cluster detection moved
+      SERVER-side (`hexa_cluster` table + `hexa_sweep` safety net) instead of
+      each client guessing its own, and the local player's own cursor now
+      snaps to its hexagon slot too, not just other players'. VERIFIED live
+      (cluster id/vertex stability, shrink-on-departure, sweep cleanup); both
+      clients' rendering REASONED only, same as the first pass. See the
+      batch notes at the top of this file. NOT committed — full author
+      hand-test pass pending, same convention as every prior batch.
 - [x] Customizable island border color/transparency (from backlog, author override
       2026-07-11) — server + both clients VERIFIED via `spacetime call`/`spacetime sql`
       against the local instance; client rendering (including the follow-up
@@ -2335,6 +2629,20 @@ Implementation notes:
       publish requires VPS shell access this environment doesn't have; the
       author will run it (see the commands left in the prior turn). See the
       batch notes at the top of this file and plan.md's backlog entry.
+- [ ] F14 community island (playground), named "Free Isle" — author ruling
+      2026-07-11 (decision 20): slot 0 is now a permanent, ownerless canvas
+      anyone can paint/erase; `claim_admin` no longer relocates islands to
+      it. Its info popup/hover-tooltip shows "Free Isle" (never "another
+      player"), and its unpainted tiles render white instead of the usual
+      gray. Server mechanic VERIFIED live via a throwaway 2-identity probe
+      (`spacetime sql`: the slot-0 row exists with the `Identity::ZERO`
+      sentinel owner, a non-owner painted a cell, a DIFFERENT non-owner
+      erased it, an out-of-bounds paint was rejected). Client dispatch +
+      naming + white fill REASONED, not hand-tested (`cargo build`/
+      `./build-web.sh` clean). See the batch notes at the top of this file.
+      NOT committed — author hand-test pass pending, same convention as
+      every prior batch; also not yet published
+      to the production VPS.
 
 ## Notes / deviations from plan.md
 - **New at F6 (author-directed, not in plan.md's original text):** players
@@ -2404,3 +2712,28 @@ Implementation notes:
   long-press can fire) and the author ruled it out entirely rather than
   patching around it — see the batch note at the top of this file. Margin is
   no longer a long-press-merge target in either client or the server.
+- **F10 follow-up (2026-07-11): admin password moved from a hand-pasted hash
+  to a build-time env var.** Author lost track of the plaintext behind the
+  originally-committed `ADMIN_PASSWORD_SHA256` literal and could no longer
+  claim admin. `server/build.rs` now reads `ADMIN_PASSWORD` (from the
+  process env, or a gitignored `server/.env` — parses simple `KEY=value`
+  lines itself, no `dotenvy` dependency added) and emits it hashed via
+  `cargo:rustc-env=ADMIN_PASSWORD_SHA256=...`; `constants::ADMIN_PASSWORD_SHA256`
+  in `server/src/lib.rs` is now `env!("ADMIN_PASSWORD_SHA256")` instead of a
+  literal. `server/.env.example` is the committed template; `.env` was added
+  to the root `.gitignore`. To change the admin password going forward: edit
+  `server/.env`, rebuild, republish — no more manual SHA-256'ing by hand.
+  **Behavior change to flag**: a fresh clone can no longer build `server`
+  until `.env` exists with `ADMIN_PASSWORD` set (build.rs panics with a
+  message pointing at `.env.example` otherwise) — previously any clone built
+  out of the box since the hash was hardcoded. VERIFIED: `cargo build -p
+  server --target wasm32-unknown-unknown` succeeds with `server/.env`
+  present and fails with the intended message when it's absent; rest of the
+  workspace (`client`'s native `client`/`bot` bins, `shared`) still builds
+  clean — `client`'s `web` bin still fails on the default host target, but
+  that's the pre-existing, intentional emscripten-only exception (target-gated
+  `serde_json` dep in `client/Cargo.toml`), not caused by this change. A new
+  random password was generated into `server/.env` (not committed) so the
+  author has a working admin login again; not itself hand-tested by
+  `claim_admin` against a live instance this session — only the build/hash
+  pipeline was verified.

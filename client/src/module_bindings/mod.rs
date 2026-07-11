@@ -13,11 +13,18 @@ pub mod config_table;
 pub mod config_type;
 pub mod delete_island_cells_reducer;
 pub mod disable_island_border_reducer;
+pub mod erase_community_cell_reducer;
 pub mod erase_island_cell_reducer;
 pub mod erase_margin_cell_reducer;
 pub mod gift_schedule_type;
 pub mod gift_table;
 pub mod gift_type;
+pub mod hexa_cluster_table;
+pub mod hexa_cluster_type;
+pub mod hexa_event_table;
+pub mod hexa_event_type;
+pub mod hexa_reward_type;
+pub mod hexa_sweep_schedule_type;
 pub mod inventory_table;
 pub mod inventory_type;
 pub mod island_cell_table;
@@ -32,6 +39,7 @@ pub mod like_island_reducer;
 pub mod margin_cell_table;
 pub mod margin_cell_type;
 pub mod merge_with_cell_reducer;
+pub mod paint_community_cell_reducer;
 pub mod paint_island_cell_reducer;
 pub mod paint_margin_cell_reducer;
 pub mod reap_schedule_type;
@@ -58,11 +66,18 @@ pub use config_table::*;
 pub use config_type::Config;
 pub use delete_island_cells_reducer::delete_island_cells;
 pub use disable_island_border_reducer::disable_island_border;
+pub use erase_community_cell_reducer::erase_community_cell;
 pub use erase_island_cell_reducer::erase_island_cell;
 pub use erase_margin_cell_reducer::erase_margin_cell;
 pub use gift_schedule_type::GiftSchedule;
 pub use gift_table::*;
 pub use gift_type::Gift;
+pub use hexa_cluster_table::*;
+pub use hexa_cluster_type::HexaCluster;
+pub use hexa_event_table::*;
+pub use hexa_event_type::HexaEvent;
+pub use hexa_reward_type::HexaReward;
+pub use hexa_sweep_schedule_type::HexaSweepSchedule;
 pub use inventory_table::*;
 pub use inventory_type::Inventory;
 pub use island_cell_table::*;
@@ -77,6 +92,7 @@ pub use like_island_reducer::like_island;
 pub use margin_cell_table::*;
 pub use margin_cell_type::MarginCell;
 pub use merge_with_cell_reducer::merge_with_cell;
+pub use paint_community_cell_reducer::paint_community_cell;
 pub use paint_island_cell_reducer::paint_island_cell;
 pub use paint_margin_cell_reducer::paint_margin_cell;
 pub use reap_schedule_type::ReapSchedule;
@@ -109,10 +125,12 @@ pub enum Reducer {
     ClickLink { island_id: u32 },
     DeleteIslandCells { island_id: u32 },
     DisableIslandBorder,
+    EraseCommunityCell { q_local: i32, r_local: i32 },
     EraseIslandCell { q_local: i32, r_local: i32 },
     EraseMarginCell { q: i32, r: i32 },
     LikeIsland { island_id: u32 },
     MergeWithCell { cell_kind: u8, cell_id: u32 },
+    PaintCommunityCell { q_local: i32, r_local: i32 },
     PaintIslandCell { q_local: i32, r_local: i32 },
     PaintMarginCell { q: i32, r: i32 },
     ResetAccount,
@@ -139,10 +157,12 @@ impl __sdk::Reducer for Reducer {
             Reducer::ClickLink { .. } => "click_link",
             Reducer::DeleteIslandCells { .. } => "delete_island_cells",
             Reducer::DisableIslandBorder => "disable_island_border",
+            Reducer::EraseCommunityCell { .. } => "erase_community_cell",
             Reducer::EraseIslandCell { .. } => "erase_island_cell",
             Reducer::EraseMarginCell { .. } => "erase_margin_cell",
             Reducer::LikeIsland { .. } => "like_island",
             Reducer::MergeWithCell { .. } => "merge_with_cell",
+            Reducer::PaintCommunityCell { .. } => "paint_community_cell",
             Reducer::PaintIslandCell { .. } => "paint_island_cell",
             Reducer::PaintMarginCell { .. } => "paint_margin_cell",
             Reducer::ResetAccount => "reset_account",
@@ -184,6 +204,12 @@ impl __sdk::Reducer for Reducer {
             Reducer::DisableIslandBorder => {
                 __sats::bsatn::to_vec(&disable_island_border_reducer::DisableIslandBorderArgs {})
             }
+            Reducer::EraseCommunityCell { q_local, r_local } => {
+                __sats::bsatn::to_vec(&erase_community_cell_reducer::EraseCommunityCellArgs {
+                    q_local: q_local.clone(),
+                    r_local: r_local.clone(),
+                })
+            }
             Reducer::EraseIslandCell { q_local, r_local } => {
                 __sats::bsatn::to_vec(&erase_island_cell_reducer::EraseIslandCellArgs {
                     q_local: q_local.clone(),
@@ -205,6 +231,12 @@ impl __sdk::Reducer for Reducer {
                 __sats::bsatn::to_vec(&merge_with_cell_reducer::MergeWithCellArgs {
                     cell_kind: cell_kind.clone(),
                     cell_id: cell_id.clone(),
+                })
+            }
+            Reducer::PaintCommunityCell { q_local, r_local } => {
+                __sats::bsatn::to_vec(&paint_community_cell_reducer::PaintCommunityCellArgs {
+                    q_local: q_local.clone(),
+                    r_local: r_local.clone(),
                 })
             }
             Reducer::PaintIslandCell { q_local, r_local } => {
@@ -271,6 +303,8 @@ impl __sdk::Reducer for Reducer {
 pub struct DbUpdate {
     config: __sdk::TableUpdate<Config>,
     gift: __sdk::TableUpdate<Gift>,
+    hexa_cluster: __sdk::TableUpdate<HexaCluster>,
+    hexa_event: __sdk::TableUpdate<HexaEvent>,
     inventory: __sdk::TableUpdate<Inventory>,
     island: __sdk::TableUpdate<Island>,
     island_cell: __sdk::TableUpdate<IslandCell>,
@@ -292,6 +326,12 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "gift" => db_update
                     .gift
                     .append(gift_table::parse_table_update(table_update)?),
+                "hexa_cluster" => db_update
+                    .hexa_cluster
+                    .append(hexa_cluster_table::parse_table_update(table_update)?),
+                "hexa_event" => db_update
+                    .hexa_event
+                    .append(hexa_event_table::parse_table_update(table_update)?),
                 "inventory" => db_update
                     .inventory
                     .append(inventory_table::parse_table_update(table_update)?),
@@ -345,6 +385,12 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.gift = cache
             .apply_diff_to_table::<Gift>("gift", &self.gift)
             .with_updates_by_pk(|row| &row.id);
+        diff.hexa_cluster = cache
+            .apply_diff_to_table::<HexaCluster>("hexa_cluster", &self.hexa_cluster)
+            .with_updates_by_pk(|row| &row.identity);
+        diff.hexa_event = cache
+            .apply_diff_to_table::<HexaEvent>("hexa_event", &self.hexa_event)
+            .with_updates_by_pk(|row| &row.id);
         diff.inventory = cache
             .apply_diff_to_table::<Inventory>("inventory", &self.inventory)
             .with_updates_by_pk(|row| &row.id);
@@ -378,6 +424,12 @@ impl __sdk::DbUpdate for DbUpdate {
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "gift" => db_update
                     .gift
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "hexa_cluster" => db_update
+                    .hexa_cluster
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "hexa_event" => db_update
+                    .hexa_event
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "inventory" => db_update
                     .inventory
@@ -419,6 +471,12 @@ impl __sdk::DbUpdate for DbUpdate {
                 "gift" => db_update
                     .gift
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "hexa_cluster" => db_update
+                    .hexa_cluster
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "hexa_event" => db_update
+                    .hexa_event
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "inventory" => db_update
                     .inventory
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
@@ -457,6 +515,8 @@ impl __sdk::DbUpdate for DbUpdate {
 pub struct AppliedDiff<'r> {
     config: __sdk::TableAppliedDiff<'r, Config>,
     gift: __sdk::TableAppliedDiff<'r, Gift>,
+    hexa_cluster: __sdk::TableAppliedDiff<'r, HexaCluster>,
+    hexa_event: __sdk::TableAppliedDiff<'r, HexaEvent>,
     inventory: __sdk::TableAppliedDiff<'r, Inventory>,
     island: __sdk::TableAppliedDiff<'r, Island>,
     island_cell: __sdk::TableAppliedDiff<'r, IslandCell>,
@@ -479,6 +539,12 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
     ) {
         callbacks.invoke_table_row_callbacks::<Config>("config", &self.config, event);
         callbacks.invoke_table_row_callbacks::<Gift>("gift", &self.gift, event);
+        callbacks.invoke_table_row_callbacks::<HexaCluster>(
+            "hexa_cluster",
+            &self.hexa_cluster,
+            event,
+        );
+        callbacks.invoke_table_row_callbacks::<HexaEvent>("hexa_event", &self.hexa_event, event);
         callbacks.invoke_table_row_callbacks::<Inventory>("inventory", &self.inventory, event);
         callbacks.invoke_table_row_callbacks::<Island>("island", &self.island, event);
         callbacks.invoke_table_row_callbacks::<IslandCell>("island_cell", &self.island_cell, event);
@@ -1152,6 +1218,8 @@ impl __sdk::SpacetimeModule for RemoteModule {
     fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
         config_table::register_table(client_cache);
         gift_table::register_table(client_cache);
+        hexa_cluster_table::register_table(client_cache);
+        hexa_event_table::register_table(client_cache);
         inventory_table::register_table(client_cache);
         island_table::register_table(client_cache);
         island_cell_table::register_table(client_cache);
@@ -1163,6 +1231,8 @@ impl __sdk::SpacetimeModule for RemoteModule {
     const ALL_TABLE_NAMES: &'static [&'static str] = &[
         "config",
         "gift",
+        "hexa_cluster",
+        "hexa_event",
         "inventory",
         "island",
         "island_cell",

@@ -61,11 +61,13 @@ mod constants {
     /// XP is deliberately not part of the test, since idle time-XP ticks may
     /// have granted a few by the time they're stale enough to qualify).
     pub const REAP_MAX_INVENTORY_ROWS: usize = 1;
-    /// F10 (Hexaworld.md's Admin section): SHA-256 of the admin password —
-    /// never the plaintext, since this repo is public. `claim_admin` hashes
-    /// the caller's input and compares hex digests.
-    pub const ADMIN_PASSWORD_SHA256: &str =
-        "f0e4b0d252ed221c13e08c7814be13da5fb34a22d3145a8e6d7d4cc15d9fe1cc";
+    /// F10 (Hexaworld.md's Admin section): SHA-256 of the admin password,
+    /// baked in at compile time by `build.rs` from the `ADMIN_PASSWORD` env
+    /// var / gitignored `.env` (see `server/.env.example`) — never the
+    /// plaintext, since this repo is public. `claim_admin` hashes the
+    /// caller's input and compares hex digests. To change the admin
+    /// password: edit `.env`, rebuild, republish.
+    pub const ADMIN_PASSWORD_SHA256: &str = env!("ADMIN_PASSWORD_SHA256");
     /// F11 (flying gift): SHARED with the client — `claim_gift`'s distance
     /// check and both clients' drift rendering must derive the identical
     /// position/range, so these three (unlike the tuning knobs above) live
@@ -82,6 +84,18 @@ mod constants {
     /// branch's own fallback if 8 random rerolls all collide with a hue the
     /// claimant already owns, so a win is never silently wasted.
     pub const XP_GIFT: u64 = 20;
+    /// F13 (Hexa event): SHARED with the client — its rendering reads the
+    /// server-broadcast `hexa_cluster` rows, which are keyed by this same
+    /// detection radius/size, so these two (unlike the tuning knobs above)
+    /// live in the `shared` crate. `XP_HEXA` is server-only but kept
+    /// alongside them as the third F13 canonical constant.
+    pub use shared::constants::{HEXA_RADIUS, HEXA_SIZE, XP_HEXA};
+    /// F13: how often the `hexa_cluster` safety-net sweep runs — deletes a
+    /// row whose owner went stale (offline, or `last_seen` past
+    /// `PRESENCE_TIMEOUT_SECS`) without ever calling `set_pos` again to
+    /// clear their own row (a departing/disconnecting member's row would
+    /// otherwise linger, showing a hexagon that no longer really exists).
+    pub const HEXA_SWEEP_PERIOD_SECS: i64 = 2;
 }
 
 /// Axial hex geometry, slot-lattice mapping and cell-id packing — see
@@ -491,6 +505,78 @@ pub struct GiftSchedule {
     scheduled_at: ScheduleAt,
 }
 
+/// F13 (Hexa event): who has ever received the one-time `XP_HEXA` bonus —
+/// `identity` as the primary key doubles as the "already granted?" index,
+/// same trick `IslandLike`'s per-(island, liker) dedup uses one level up.
+/// Server-internal bookkeeping only (not `public`): clients only ever
+/// observe its effect through `User.xp` and `Inventory` rows, same as every
+/// other XP grant in this file.
+#[spacetimedb::table(accessor = hexa_reward)]
+pub struct HexaReward {
+    #[primary_key]
+    identity: Identity,
+    at: Timestamp,
+}
+
+/// F13: one row per ignition, purely so clients can animate it (flash the
+/// hexagon edges, play the sfx) — `public` for that reason, unlike
+/// `HexaReward` above. `cx`/`cy` are the cluster centroid at ignition time;
+/// `member_count` lets the animation distinguish a fresh 6 from a cluster
+/// that's grown past it. Also doubles as the "was this `None`-obtained-with
+/// `Inventory` row a Hexa grant, not a `reset_account` reseed?" join key for
+/// the client's existing inventory-insert watch — see `apply_hexa`'s
+/// comment on why that's a timestamp join rather than a new `Inventory`
+/// field.
+#[spacetimedb::table(accessor = hexa_event, public)]
+pub struct HexaEvent {
+    #[primary_key]
+    #[auto_inc]
+    id: u64,
+    at: Timestamp,
+    cx: f32,
+    cy: f32,
+    member_count: u32,
+}
+
+/// F13 author follow-up: the server broadcasts LIVE cluster-forming state
+/// (not just the ignition moment `HexaEvent` logs) — "the server would tell
+/// that there is an HEXA happening and give an id and position to players
+/// so that everyone sees they are merging." One row per CURRENTLY-clustered
+/// user (>= 2 same-hue, mutually-close members; deleted once that stops
+/// being true), `public` so every client renders the exact same authoritative
+/// group instead of each guessing its own approximate clustering.
+/// `cluster_id` is a hash of the sorted member identities (see
+/// `hexa_cluster_id`), not an arbitrary counter — independent `set_pos`
+/// calls that detect the same membership naturally agree on it without any
+/// cross-call synchronization, and it changes the instant membership
+/// actually changes. `cx`/`cy` is the live centroid of every member's
+/// current position, shared by the whole group; `vertex_index` (0..
+/// `member_count`, stable — sorted by identity) is which hexagon-vertex
+/// slot this member renders at, so clients don't need to re-derive vertex
+/// assignment themselves. `ignited` mirrors `member_count >= HEXA_SIZE`.
+#[spacetimedb::table(accessor = hexa_cluster, public)]
+pub struct HexaCluster {
+    #[primary_key]
+    identity: Identity,
+    cluster_id: u64,
+    cx: f32,
+    cy: f32,
+    member_count: u32,
+    vertex_index: u32,
+    ignited: bool,
+}
+
+/// F13: repeating safety-net sweep (see `HEXA_SWEEP_PERIOD_SECS`'s doc
+/// comment) — server-internal, not `public`, same as every other schedule
+/// table here.
+#[spacetimedb::table(accessor = hexa_sweep_schedule, scheduled(hexa_sweep))]
+pub struct HexaSweepSchedule {
+    #[primary_key]
+    #[auto_inc]
+    scheduled_id: u64,
+    scheduled_at: ScheduleAt,
+}
+
 /// Author decision (F6 follow-up): the merge toast used to fall back to a
 /// partner's short identity hex when they hadn't picked a name, which leaks
 /// enough of the identity to correlate a player across merges — the same
@@ -667,7 +753,99 @@ pub fn set_pos(ctx: &ReducerContext, cx: f32, cy: f32) -> Result<(), String> {
             apply_merge(ctx, caller, partner, merged, true);
         }
     }
+
+    // F13 (Hexa event): AFTER the pairwise-merge scan above, since it may
+    // have just updated the caller's own hue — the cluster scan below must
+    // see that fresh value, not the one `set_pos` was called with. Same
+    // eligibility filter as the pairwise scan (online, fresh, unlocked),
+    // plus same-hue-as-caller (within HUE_TOLERANCE) and within
+    // HEXA_RADIUS; count includes the caller itself.
+    let me = ctx.db.user().identity().find(caller).ok_or("unknown user")?;
+    if !me.locked {
+        let mut cluster: Vec<(Identity, f32, f32)> = vec![(caller, cx, cy)];
+        for other in ctx.db.user().iter() {
+            if other.identity == caller || !other.online || other.locked {
+                continue;
+            }
+            if ctx
+                .timestamp
+                .duration_since(other.last_seen)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(i64::MAX)
+                >= constants::PRESENCE_TIMEOUT_SECS
+            {
+                continue;
+            }
+            if hue_dist(other.hue, me.hue) > constants::HUE_TOLERANCE {
+                continue;
+            }
+            let d2 = (other.cx - cx).powi(2) + (other.cy - cy).powi(2);
+            if d2 >= constants::HEXA_RADIUS * constants::HEXA_RADIUS {
+                continue;
+            }
+            cluster.push((other.identity, other.cx, other.cy));
+        }
+        if cluster.len() >= 2 {
+            // Author follow-up: broadcast the live forming/formed cluster to
+            // EVERY member, not just the caller — see `HexaCluster`'s doc
+            // comment. Ignition (reward-granting) stays a SEPARATE check
+            // right below, unaffected by this broadcast.
+            upsert_hexa_cluster(ctx, &cluster);
+        } else {
+            ctx.db.hexa_cluster().identity().delete(caller);
+        }
+        if cluster.len() >= constants::HEXA_SIZE {
+            let ids: Vec<Identity> = cluster.iter().map(|&(id, _, _)| id).collect();
+            apply_hexa(ctx, &ids, cx, cy);
+        }
+    }
     Ok(())
+}
+
+/// F13: deterministic id for a specific cluster MEMBERSHIP — a hash of the
+/// sorted participant identities, not an arbitrary counter, so independent
+/// callers' own `set_pos`-triggered scans naturally agree on the same id as
+/// long as they detect the same member set (no cross-call synchronization
+/// needed), and the id changes the instant membership actually changes.
+fn hexa_cluster_id(sorted_members: &[Identity]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for id in sorted_members {
+        id.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// F13: writes/updates EVERY member's own `HexaCluster` row in one pass
+/// (not just the caller's) — a single mover's `set_pos` call refreshes the
+/// whole visible group at once, rather than waiting for each member to
+/// happen to move themselves. `members` is the caller's own detected
+/// cluster (>= 2, itself included) with each member's current position, so
+/// the centroid/vertex assignment below reflect this instant's true state.
+fn upsert_hexa_cluster(ctx: &ReducerContext, members: &[(Identity, f32, f32)]) {
+    let mut sorted: Vec<Identity> = members.iter().map(|&(id, _, _)| id).collect();
+    sorted.sort();
+    let cluster_id = hexa_cluster_id(&sorted);
+    let n = members.len() as f32;
+    let cx = members.iter().map(|&(_, x, _)| x).sum::<f32>() / n;
+    let cy = members.iter().map(|&(_, _, y)| y).sum::<f32>() / n;
+    let ignited = members.len() >= constants::HEXA_SIZE;
+    for (idx, &identity) in sorted.iter().enumerate() {
+        let row = HexaCluster {
+            identity,
+            cluster_id,
+            cx,
+            cy,
+            member_count: members.len() as u32,
+            vertex_index: idx as u32,
+            ignited,
+        };
+        if ctx.db.hexa_cluster().identity().find(identity).is_some() {
+            ctx.db.hexa_cluster().identity().update(row);
+        } else {
+            ctx.db.hexa_cluster().insert(row);
+        }
+    }
 }
 
 /// Shared merge procedure for both cursor-merge and tile-merge. `cursor`
@@ -709,6 +887,58 @@ fn apply_merge(ctx: &ReducerContext, a: Identity, b: Identity, merged_hue: u16, 
     } else if let Some(u) = ctx.db.user().identity().find(a) {
         let sat = u.sat.min(sat_cap(level_of(u.xp)));
         ctx.db.user().identity().update(User { hue: merged_hue, sat, ..u });
+    }
+}
+
+/// F13 (Hexa event): pools every participant's owned hues (union, granted to
+/// whoever's missing it) and grants `XP_HEXA` to any participant who's never
+/// received it. Pooling is idempotent for a fixed group — re-running this on
+/// a cluster that's already fully pooled and rewarded grants nothing new —
+/// so `set_pos` calling it on every tick a cluster holds needs no cooldown
+/// (author-confirmed design). That same idempotence is reused here to gate
+/// the `HexaEvent` log row itself: only written when this pass actually
+/// granted something, so a cluster that just sits there formed doesn't spam
+/// a fresh ignition-flash event every frame. Granted rows use
+/// `obtained_with: None` (same as a fresh seed hue or a `reset_account`
+/// reseed) — the client tells them apart from those by joining
+/// `Inventory.obtained_at` against this same call's `HexaEvent.at` (both
+/// stamped with the same `ctx.timestamp`), rather than a fourth `Inventory`
+/// meaning needing its own dedicated bool field.
+fn apply_hexa(ctx: &ReducerContext, participants: &[Identity], cx: f32, cy: f32) {
+    let mut union_hues: Vec<u16> = Vec::new();
+    for &p in participants {
+        union_hues.extend(ctx.db.inventory().owner().filter(&p).map(|inv| inv.hue));
+    }
+    union_hues.sort_unstable();
+    union_hues.dedup();
+
+    let mut changed = false;
+    for &who in participants {
+        for &hue in &union_hues {
+            let already_has = ctx.db.inventory().owner().filter(&who).any(|inv| inv.hue == hue);
+            if !already_has {
+                ctx.db.inventory().insert(Inventory {
+                    id: 0,
+                    owner: who,
+                    hue,
+                    obtained_at: ctx.timestamp,
+                    obtained_with: None,
+                    from_gift: false,
+                });
+                changed = true;
+            }
+        }
+        if ctx.db.hexa_reward().identity().find(who).is_none() {
+            ctx.db.hexa_reward().insert(HexaReward { identity: who, at: ctx.timestamp });
+            if let Some(u) = ctx.db.user().identity().find(who) {
+                ctx.db.user().identity().update(User { xp: u.xp + constants::XP_HEXA, ..u });
+            }
+            changed = true;
+        }
+    }
+
+    if changed {
+        ctx.db.hexa_event().insert(HexaEvent { id: 0, at: ctx.timestamp, cx, cy, member_count: participants.len() as u32 });
     }
 }
 
@@ -849,6 +1079,56 @@ pub fn erase_island_cell(ctx: &ReducerContext, q_local: i32, r_local: i32) -> Re
         .owner()
         .find(ctx.sender())
         .ok_or("you do not own an island")?;
+    take_paint_token(ctx)?;
+    let id = geometry::island_cell_id(island.id, q_local, r_local);
+    ctx.db.island_cell().id().delete(id);
+    Ok(())
+}
+
+/// F14 (decision 20, 2026-07-11): the community island at slot 0 — same
+/// bound check and paint-token charge as `paint_island_cell`, but with NO
+/// ownership check, since it belongs to everyone. `client_connected`
+/// guarantees the slot-0 row exists before any client could plausibly reach
+/// here (`ok_or` is defensive, not expected to fire).
+#[spacetimedb::reducer]
+pub fn paint_community_cell(ctx: &ReducerContext, q_local: i32, r_local: i32) -> Result<(), String> {
+    check_not_frozen(ctx)?;
+    if geometry::hexdist(q_local, r_local) > constants::ISLAND_RADIUS {
+        return Err("cell is outside the island".to_string());
+    }
+    let island = ctx.db.island().slot().find(0).ok_or("community island not initialized")?;
+    let (_, color) = take_paint_token(ctx)?;
+    let id = geometry::island_cell_id(island.id, q_local, r_local);
+    if let Some(cell) = ctx.db.island_cell().id().find(id) {
+        ctx.db.island_cell().id().update(IslandCell {
+            color,
+            painted_by: ctx.sender(),
+            painted_at: ctx.timestamp,
+            ..cell
+        });
+    } else {
+        ctx.db.island_cell().insert(IslandCell {
+            id,
+            island_id: island.id,
+            q: q_local,
+            r: r_local,
+            color,
+            painted_by: ctx.sender(),
+            painted_at: ctx.timestamp,
+        });
+    }
+    Ok(())
+}
+
+/// F14 (decision 20, 2026-07-11): erase counterpart to `paint_community_cell`
+/// — same relationship `erase_island_cell` has to `paint_island_cell`.
+#[spacetimedb::reducer]
+pub fn erase_community_cell(ctx: &ReducerContext, q_local: i32, r_local: i32) -> Result<(), String> {
+    check_not_frozen(ctx)?;
+    if geometry::hexdist(q_local, r_local) > constants::ISLAND_RADIUS {
+        return Err("cell is outside the island".to_string());
+    }
+    let island = ctx.db.island().slot().find(0).ok_or("community island not initialized")?;
     take_paint_token(ctx)?;
     let id = geometry::island_cell_id(island.id, q_local, r_local);
     ctx.db.island_cell().id().delete(id);
@@ -1047,14 +1327,10 @@ pub fn show_island_border(ctx: &ReducerContext) -> Result<(), String> {
 /// admin" — grants `config.admin` to whoever proves knowledge of the
 /// password by hashing their input and comparing against
 /// `constants::ADMIN_PASSWORD_SHA256`. Idempotent for the current admin.
-/// `client_connected` already gave the caller an island (everyone gets one),
-/// so claiming admin just relocates it to the reserved world-center slot 0
-/// — swapping slots with whichever island currently holds it (there may be
-/// none yet, or a previous admin's if the author re-claims under a new
-/// identity) rather than deleting anything. `slot` is `#[unique]`, so the
-/// claimant is bumped through a temporary out-of-range value first, same
-/// technique `rerank_fire` uses, to avoid colliding with the island it's
-/// swapping with.
+/// F14 (decision 20, 2026-07-11): no longer relocates any island — slot 0 is
+/// now the permanent, ownerless community island (see `paint_community_cell`
+/// below), so admin is purely a role (freeze/moderation powers) with no
+/// physical placement.
 #[spacetimedb::reducer]
 pub fn claim_admin(ctx: &ReducerContext, password: String) -> Result<(), String> {
     if hash_password(&password) != constants::ADMIN_PASSWORD_SHA256 {
@@ -1064,15 +1340,7 @@ pub fn claim_admin(ctx: &ReducerContext, password: String) -> Result<(), String>
     if config.admin == Some(ctx.sender()) {
         return Ok(());
     }
-    let claimant = ctx.db.island().owner().find(ctx.sender()).ok_or("you do not own an island")?;
-    if claimant.slot != 0 {
-        let vacated_slot = claimant.slot;
-        ctx.db.island().id().update(Island { slot: vacated_slot + 1_000_000, ..claimant.clone() });
-        if let Some(prev) = ctx.db.island().slot().find(0) {
-            ctx.db.island().id().update(Island { slot: vacated_slot, ..prev });
-        }
-        ctx.db.island().id().update(Island { slot: 0, ..claimant });
-    }
+    ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
     ctx.db.config().id().update(Config { admin: Some(ctx.sender()), ..config });
     Ok(())
 }
@@ -1307,6 +1575,42 @@ pub fn gift_tick(ctx: &ReducerContext, _arg: GiftSchedule) -> Result<(), String>
     Ok(())
 }
 
+/// F13: repeating safety-net sweep (same lazy-seeding pattern as the other
+/// schedules) — `upsert_hexa_cluster`/`set_pos`'s own `cluster.len() < 2`
+/// branch only clear a member's row on THAT member's own next `set_pos`
+/// call, so a member who goes offline (or just stops moving) while the rest
+/// of their cluster drifts apart would otherwise leave a stale row showing
+/// a hexagon that no longer really exists. Deletes any `hexa_cluster` row
+/// whose owner is no longer online or has gone stale. Restricted to the
+/// scheduler itself, same as every other scheduled reducer here.
+#[spacetimedb::reducer]
+pub fn hexa_sweep(ctx: &ReducerContext, _arg: HexaSweepSchedule) -> Result<(), String> {
+    if ctx.sender() != ctx.database_identity() {
+        return Err("hexa_sweep may not be invoked by clients".to_string());
+    }
+    let stale: Vec<Identity> = ctx
+        .db
+        .hexa_cluster()
+        .iter()
+        .filter(|row| {
+            ctx.db.user().identity().find(row.identity).is_none_or(|u| {
+                !u.online
+                    || ctx
+                        .timestamp
+                        .duration_since(u.last_seen)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(i64::MAX)
+                        >= constants::PRESENCE_TIMEOUT_SECS
+            })
+        })
+        .map(|row| row.identity)
+        .collect();
+    for identity in stale {
+        ctx.db.hexa_cluster().identity().delete(identity);
+    }
+    Ok(())
+}
+
 /// F8 re-rank, step 1/2 (repeating, `RERANK_PERIOD_SECS`): only sets the
 /// countdown clients render, then schedules the actual sort
 /// `RERANK_WARNING_SECS` later. Restricted to the scheduler itself — see the
@@ -1381,6 +1685,23 @@ pub fn client_connected(ctx: &ReducerContext) {
     if ctx.db.config().id().find(0).is_none() {
         ctx.db.config().insert(Config { id: 0, frozen: false, admin: None, next_rerank_at: None });
     }
+    // F14 (decision 20): the community island, lazy-seeded the same way as
+    // `config` — slot 0 is never assigned to a real player (`client_connected`
+    // below only ever picks "next free slot >= 1"), so `Identity::ZERO` is a
+    // safe, permanent sentinel meaning "no owner" without needing to touch
+    // the `owner` column's type everywhere else it's read.
+    if ctx.db.island().slot().find(0).is_none() {
+        ctx.db.island().insert(Island {
+            id: 0,
+            owner: Identity::ZERO,
+            slot: 0,
+            likes: 0,
+            itch_rate_id: None,
+            created_at: ctx.timestamp,
+            border_color: None,
+            border_hidden: false,
+        });
+    }
     // Lazy-seeded the same way as the `config` row above (rather than an
     // `init` reducer) so a republish of an EXISTING database — which does
     // not re-run `init` — still ends up with the repeating re-rank timer.
@@ -1409,6 +1730,13 @@ pub fn client_connected(ctx: &ReducerContext) {
         ctx.db.gift_schedule().insert(GiftSchedule {
             scheduled_id: 0,
             scheduled_at: TimeDuration::from_micros(constants::GIFT_SPAWN_PERIOD_SECS * 1_000_000).into(),
+        });
+    }
+    // F13: same lazy-seeding pattern as the schedules above.
+    if ctx.db.hexa_sweep_schedule().count() == 0 {
+        ctx.db.hexa_sweep_schedule().insert(HexaSweepSchedule {
+            scheduled_id: 0,
+            scheduled_at: TimeDuration::from_micros(constants::HEXA_SWEEP_PERIOD_SECS * 1_000_000).into(),
         });
     }
 

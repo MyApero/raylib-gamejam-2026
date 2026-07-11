@@ -300,6 +300,15 @@ impl UiState {
         self.note_used_hue(hue);
     }
 
+    /// F13: called by the caller when it sees a fresh `inventory` row that
+    /// time-joins a `hexa_event` row — a Hexa-event pooled hue, distinct
+    /// from both a merge (which always names a partner) and a gift/reset
+    /// (neither of which has an event to join).
+    pub fn show_hexa_toast(&mut self, hue: u16) {
+        self.toast = Some(Toast { text: "Hexa event! colors pooled with 5 others".to_string(), hue: Some(hue), shown_at: Instant::now() });
+        self.note_used_hue(hue);
+    }
+
     /// Seeds the name field from the server row exactly once. After that the
     /// field belongs to local editing — the subscription echoing our own
     /// `set_name` call back must not clobber in-progress typing.

@@ -91,6 +91,12 @@ struct UserRow {
 struct InventoryRow {
     owner_hex: String,
     hue: u16,
+    /// F13: needed (unlike everywhere else that's skipped `obtained_at` —
+    /// see `GiftRow`'s comment) to join a `None`-`obtained_with_hex` row
+    /// against a `hexa_event` row stamped with the identical `ctx.timestamp`
+    /// — see `apply_hexa`'s server-side comment on why this is a timestamp
+    /// join rather than a new bool field.
+    obtained_at_micros: i64,
     obtained_with_hex: Option<String>,
     /// F11: mirrors `main.rs`'s `Inventory.from_gift` — a flying-gift hue
     /// grant, distinct from `reset_account`'s reseed even though both leave
@@ -106,6 +112,28 @@ struct GiftRow {
     x: f32,
     y: f32,
     spawned_at_micros: i64,
+}
+
+/// F13: mirrors `main.rs`'s `HexaEvent` binding, trimmed to the one field
+/// this client actually reads — the inventory-toast join described on
+/// `InventoryRow::obtained_at_micros` (the ignited-hexagon flash is driven
+/// by `HexaClusterRow.ignited` instead, so `cx`/`cy`/`member_count` aren't
+/// needed here).
+struct HexaEventRow {
+    at_micros: i64,
+}
+
+/// F13: mirrors `main.rs`'s `HexaCluster` binding — one row per currently-
+/// clustered user, server-authoritative (see the server-side table's doc
+/// comment for why: every client renders the exact same group instead of
+/// each guessing its own approximate clustering).
+struct HexaClusterRow {
+    cluster_id: u64,
+    cx: f32,
+    cy: f32,
+    member_count: u32,
+    vertex_index: u32,
+    ignited: bool,
 }
 
 struct IslandRow {
@@ -153,6 +181,11 @@ fn normalize_identity(hex: &str) -> String {
 fn short_hex(id: &str) -> &str {
     &id[..8.min(id.len())]
 }
+
+/// F14 (decision 20): the community island's sentinel owner (`Identity::ZERO`
+/// server-side), as it comes over the wire — 64 hex zeros, lowercase, no
+/// `0x` prefix (matches `normalize_identity`'s output).
+const COMMUNITY_OWNER_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// A table row as delivered over the wire is either a named JSON object
 /// (InitialSubscription) or a positional JSON array matching schema field
@@ -241,6 +274,7 @@ fn parse_inventory(v: &Value) -> Option<(u64, InventoryRow)> {
         InventoryRow {
             owner_hex: identity_hex(r.field("owner", 1)?)?,
             hue: r.field("hue", 2)?.as_u64()? as u16,
+            obtained_at_micros: timestamp_micros(r.field("obtained_at", 3)?),
             obtained_with_hex: r.field("obtained_with", 4)?.pipe(opt_value).and_then(identity_hex),
             from_gift: r.field("from_gift", 5)?.as_bool()?,
         },
@@ -325,6 +359,28 @@ fn parse_gift(v: &Value) -> Option<(u64, GiftRow)> {
     ))
 }
 
+fn parse_hexa_event(v: &Value) -> Option<(u64, HexaEventRow)> {
+    let r = row_view(v)?;
+    let id = r.field("id", 0)?.as_u64()?;
+    Some((id, HexaEventRow { at_micros: timestamp_micros(r.field("at", 1)?) }))
+}
+
+fn parse_hexa_cluster(v: &Value) -> Option<(String, HexaClusterRow)> {
+    let r = row_view(v)?;
+    let identity = identity_hex(r.field("identity", 0)?)?;
+    Some((
+        identity,
+        HexaClusterRow {
+            cluster_id: r.field("cluster_id", 1)?.as_u64()?,
+            cx: r.field("cx", 2)?.as_f64()? as f32,
+            cy: r.field("cy", 3)?.as_f64()? as f32,
+            member_count: r.field("member_count", 4)?.as_u64()? as u32,
+            vertex_index: r.field("vertex_index", 5)?.as_u64()? as u32,
+            ignited: r.field("ignited", 6)?.as_bool()?,
+        },
+    ))
+}
+
 /// Small pipe-forward helper so the `Option<&Value>` chains above (field ->
 /// unwrap tag -> read payload) read left to right instead of nesting.
 trait Pipe: Sized {
@@ -350,6 +406,8 @@ struct Tables {
     island_likes: HashMap<u64, IslandLikeRow>,
     configs: HashMap<u32, ConfigRow>,
     gifts: HashMap<u64, GiftRow>,
+    hexa_events: HashMap<u64, HexaEventRow>,
+    hexa_clusters: HashMap<String, HexaClusterRow>,
 }
 
 impl Tables {
@@ -363,6 +421,8 @@ impl Tables {
             island_likes: HashMap::new(),
             configs: HashMap::new(),
             gifts: HashMap::new(),
+            hexa_events: HashMap::new(),
+            hexa_clusters: HashMap::new(),
         }
     }
 
@@ -375,6 +435,8 @@ impl Tables {
         self.island_likes.clear();
         self.configs.clear();
         self.gifts.clear();
+        self.hexa_events.clear();
+        self.hexa_clusters.clear();
     }
 
     fn apply(&mut self, db_update: &Value) {
@@ -397,6 +459,8 @@ impl Tables {
                 "island_like" => apply_updates(&mut self.island_likes, updates, parse_island_like),
                 "config" => apply_updates(&mut self.configs, updates, parse_config),
                 "gift" => apply_updates(&mut self.gifts, updates, parse_gift),
+                "hexa_event" => apply_updates(&mut self.hexa_events, updates, parse_hexa_event),
+                "hexa_cluster" => apply_updates(&mut self.hexa_clusters, updates, parse_hexa_cluster),
                 _ => {}
             }
         }
@@ -463,6 +527,8 @@ fn call_reducer(name: &str, args: Value) {
 enum Paintable {
     OwnIsland(i32, i32),
     Margin(i32, i32),
+    /// F14 (decision 20): the slot-0 community island — paintable by anyone.
+    Community(i32, i32),
     None,
 }
 
@@ -484,6 +550,14 @@ fn classify(tables: &Tables, me: &str, world_q: i32, world_r: i32) -> Paintable 
         if world::hexdist(lq, lr) <= ISLAND_RADIUS {
             return Paintable::OwnIsland(lq, lr);
         }
+    }
+    // F14: slot 0 is always the origin (fixed geometry, never a real
+    // player's island), so no island lookup needed.
+    let (q0, r0) = world::slot_coords(0);
+    let (ccx0, ccy0) = world::slot_center(q0, r0);
+    let (lq0, lr0) = (world_q - ccx0, world_r - ccy0);
+    if world::hexdist(lq0, lr0) <= ISLAND_RADIUS {
+        return Paintable::Community(lq0, lr0);
     }
     if !world::in_any_island_territory(world_q, world_r) {
         return Paintable::Margin(world_q, world_r);
@@ -559,6 +633,11 @@ fn world_fit(tables: &Tables, fallback: Vector2, fallback_zoom: f32) -> (Vector2
 /// Falls back to a generic label, never the partner's identity — mirrors
 /// `main.rs`'s `player_label`, see its comment for why.
 fn player_label(tables: &Tables, id: &str) -> String {
+    // F14 (decision 20): mirrors `main.rs` — the community island's sentinel
+    // owner isn't a real player.
+    if id == COMMUNITY_OWNER_HEX {
+        return "Free Isle".to_string();
+    }
     tables
         .users
         .get(id)
@@ -665,6 +744,11 @@ struct State {
     ui_state: ui::UiState,
     known_inventory_ids: HashSet<u64>,
     inventory_seeded: bool,
+    /// F13: mirrors `main.rs`'s `hexa_display` — persisted, lerped hexagon-
+    /// vertex snap positions (including the local player's own, per the
+    /// author) keyed by identity hex string (this client has no SDK
+    /// `Identity` type).
+    hexa_display: HashMap<String, Vector2>,
     /// F9 level-up toast: mirrors `main.rs`'s `last_level` — `None` until the
     /// first frame `me` is known, so connecting already at some level
     /// doesn't fire a spurious toast.
@@ -845,7 +929,20 @@ fn frame(state: &mut State) {
                             s.gift.play();
                         }
                     } else if inv.obtained_with_hex.is_none() {
-                        state.ui_state.note_reset_hue(inv.hue);
+                        // F13: mirrors `main.rs` — a Hexa-pooled grant also
+                        // leaves `obtained_with_hex: None`; told apart from a
+                        // `reset_account` reseed by joining against a
+                        // `hexa_event` row stamped with the identical
+                        // `ctx.timestamp` (see `apply_hexa`'s server-side
+                        // comment).
+                        if state.tables.hexa_events.values().any(|e| e.at_micros == inv.obtained_at_micros) {
+                            state.ui_state.show_hexa_toast(inv.hue);
+                            if let Some(s) = &state.sfx {
+                                s.merge.play();
+                            }
+                        } else {
+                            state.ui_state.note_reset_hue(inv.hue);
+                        }
                     } else {
                         let label = inv
                             .obtained_with_hex
@@ -1123,6 +1220,7 @@ fn frame(state: &mut State) {
                 let target = match classify(&state.tables, me, wq, wr) {
                     Paintable::OwnIsland(lq, lr) => Some((0u8, lq, lr)),
                     Paintable::Margin(q, r) => Some((1u8, q, r)),
+                    Paintable::Community(lq, lr) => Some((2u8, lq, lr)),
                     Paintable::None => None,
                 };
                 if let Some(key) = target {
@@ -1134,6 +1232,8 @@ fn frame(state: &mut State) {
                             ((0, lq, lr), true) => call_reducer("erase_island_cell", serde_json::json!([lq, lr])),
                             ((1, q, r), false) => call_reducer("paint_margin_cell", serde_json::json!([q, r])),
                             ((1, q, r), true) => call_reducer("erase_margin_cell", serde_json::json!([q, r])),
+                            ((2, lq, lr), false) => call_reducer("paint_community_cell", serde_json::json!([lq, lr])),
+                            ((2, lq, lr), true) => call_reducer("erase_community_cell", serde_json::json!([lq, lr])),
                             _ => unreachable!(),
                         }
                         state.stroke_last = Some(key);
@@ -1197,6 +1297,8 @@ fn frame(state: &mut State) {
                 // F8 (author follow-up): anywhere on a FOREIGN island's
                 // territory, not just its center. Mirrors `main.rs`; own
                 // island's popup now opens via the "My Isle" footer button.
+                // F14: the community island opens the same popup;
+                // `player_label` renders its owner as "Free Isle".
                 info_target: island_at(&state.tables, wq, wr)
                     .filter(|&(id, _, _)| state.tables.islands.get(&id).is_some_and(|isl| isl.owner_hex != me))
                     .map(|(id, _, _)| id),
@@ -1346,6 +1448,35 @@ fn frame(state: &mut State) {
     // `ISLAND_FIT_ZOOM`), floored so they stay findable when zoomed out.
     let other_cursor_scale = (state.camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
 
+    // F13 (Hexa event): mirrors `main.rs` — server-authoritative cluster
+    // membership, grouped by `cluster_id`, each member placed at ITS OWN
+    // `vertex_index` (paired per-row, not by list position). `me`'s own row
+    // is included like everyone else's — per the author, the LOCAL player's
+    // own cursor should visibly move to its hexagon slot too (see the
+    // local-cursor draw call below).
+    let mut hexa_groups: HashMap<u64, Vec<(&String, &HexaClusterRow)>> = HashMap::new();
+    for (id, row) in &state.tables.hexa_clusters {
+        hexa_groups.entry(row.cluster_id).or_default().push((id, row));
+    }
+    let mut cluster_targets: Vec<(Vec<String>, Vec<Vector2>)> = Vec::new();
+    // World-space hexagon edges (drawn inside `d2` below, mirrors `main.rs`).
+    let mut hexa_polygons: Vec<(Vec<Vector2>, bool)> = Vec::new();
+    for rows in hexa_groups.into_values() {
+        let Some(&(_, first)) = rows.first() else { continue };
+        let vertices = world::hexagon_vertex_positions(Vector2::new(first.cx, first.cy), first.member_count as usize);
+        let mut keys: Vec<String> = Vec::with_capacity(rows.len());
+        let mut targets: Vec<Vector2> = Vec::with_capacity(rows.len());
+        for &(id, row) in &rows {
+            if let Some(&v) = vertices.get(row.vertex_index as usize) {
+                keys.push(id.clone());
+                targets.push(v);
+            }
+        }
+        hexa_polygons.push((vertices, first.ignited));
+        cluster_targets.push((keys, targets));
+    }
+    state.hexa_display = world::hexa_advance_display(&state.hexa_display, &cluster_targets, state.rl.get_frame_time());
+
     let other_cursors: Vec<(Vector2, Color, bool, String)> = state
         .tables
         .users
@@ -1354,15 +1485,26 @@ fn frame(state: &mut State) {
         // after a player stopped moving; a stationary-but-connected player
         // should stay visible the whole time they're online.
         .filter(|(id, u)| u.online && Some(id.as_str()) != me)
-        .map(|(_, u)| {
+        .map(|(id, u)| {
+            // F13: mirrors `main.rs` — a hexagon-cluster member renders at
+            // its lerped snapped display position instead of its raw
+            // cursor position.
+            let world_pos = state.hexa_display.get(id).copied().unwrap_or(Vector2::new(u.cx, u.cy));
             (
-                state.rl.get_world_to_screen2D(Vector2::new(u.cx, u.cy), state.camera),
+                state.rl.get_world_to_screen2D(world_pos, state.camera),
                 world::hsv_color(u.hue, u.sat, u.val),
                 u.locked,
                 u.name.clone().unwrap_or_default(),
             )
         })
         .collect();
+
+    // F13 (author follow-up): mirrors `main.rs`'s `my_hexa_screen` — the
+    // LOCAL player's own cursor also renders at its lerped hexagon-snap
+    // position while participating. `None` (not clustered, or `me` unknown
+    // yet) falls back to the literal mouse position at the draw call.
+    let my_hexa_screen: Option<Vector2> =
+        me.and_then(|me| state.hexa_display.get(me)).map(|&pos| state.rl.get_world_to_screen2D(pos, state.camera));
 
     let camera = state.camera;
     // F9.6 item 8: mirrors `main.rs` — skip the per-tile outline pass past
@@ -1383,6 +1525,13 @@ fn frame(state: &mut State) {
                 continue;
             }
             let mine = me == Some(island.owner_hex.as_str());
+            // F14 (decision 20): the community island's unpainted tiles are
+            // white, not the usual gray placeholder — mirrors `main.rs`.
+            let unpainted_fill = if island.owner_hex == COMMUNITY_OWNER_HEX {
+                Color::new(255, 255, 255, 255)
+            } else {
+                Color::new(60, 60, 68, 255)
+            };
             // F9.5 (FPS at scale): point-lookup each rendered cell by its
             // packed id in the already-id-keyed `island_cells` map instead of
             // collecting a fresh (island_id, q, r) -> color HashMap from
@@ -1391,7 +1540,7 @@ fn frame(state: &mut State) {
             for &(dq, dr) in world::island_offsets() {
                 let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
                 let id = world::island_cell_id(island_id, dq, dr);
-                let fill = state.tables.island_cells.get(&id).map_or(Color::new(60, 60, 68, 255), |c| {
+                let fill = state.tables.island_cells.get(&id).map_or(unpainted_fill, |c| {
                     let (h, s, v) = world::unpack_hsv(c.color);
                     world::hsv_color(h, s, v)
                 });
@@ -1444,6 +1593,11 @@ fn frame(state: &mut State) {
         // F11 (flying gift): world-space, mirrors `main.rs`.
         if let Some((_, pos, elapsed)) = active_gift {
             world::draw_gift_icon(&mut d2, pos, elapsed);
+        }
+
+        // F13 (Hexa event): world-space hexagon edges, mirrors `main.rs`.
+        for (vertices, ignited) in &hexa_polygons {
+            world::draw_hexa_polygon(&mut d2, vertices, *ignited);
         }
 
         let (hq, hr) = world::world_to_axial(mouse_world);
@@ -1509,7 +1663,10 @@ fn frame(state: &mut State) {
         let (hue, sat, val) = brush;
         let cursor_color =
             if state.ui_state.eraser_on { Color::new(210, 210, 216, 255) } else { world::hsv_color(hue, sat, val) };
-        world::draw_cursor(&mut d, mouse_screen, cursor_color, locked);
+        // F13 (author follow-up): mirrors `main.rs` — visually snaps to the
+        // hexagon slot while merging; painting/hover logic still uses the
+        // real `mouse_world`/`mouse_screen`, only this draw call moves.
+        world::draw_cursor(&mut d, my_hexa_screen.unwrap_or(mouse_screen), cursor_color, locked);
     }
     if state.ui_state.eraser_on {
         world::draw_eraser_badge(&mut d, mouse_screen);
@@ -1562,6 +1719,7 @@ fn main() {
         ui_state: ui::UiState::new(),
         known_inventory_ids: HashSet::new(),
         inventory_seeded: false,
+        hexa_display: HashMap::new(),
         last_level: None,
         long_press: None,
         pending_info_click: None,
