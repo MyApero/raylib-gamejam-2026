@@ -17,15 +17,10 @@ pub mod constants {
     pub const LEVEL_XP: u64 = 100;
 }
 
-// level_of/sat_cap/pack_hsv are unused until F3's inventory/level HUD and F4's
-// tile-merge unpack round-trip; kept here (mirrored from server) so both
-// clients share one definition when that lands.
-#[allow(dead_code)]
 pub fn level_of(xp: u64) -> u64 {
     xp / constants::LEVEL_XP
 }
 
-#[allow(dead_code)]
 pub fn sat_cap(level: u64) -> u8 {
     (40 + 3 * level).min(100) as u8
 }

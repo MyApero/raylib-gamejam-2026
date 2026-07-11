@@ -7,9 +7,8 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F1 + F2 hand-tested by the author (two-instance: islands,
-cursors, painting, rate limit, hover highlight) and committed. Ready to
-start F3.
+**Current batch:** F3 (`ui.rs` header/footer/inventory overlay) implemented,
+builds clean; not yet hand-tested by the author.
 **Blockers:** none.
 
 ---
@@ -76,9 +75,78 @@ opened, connected, and only failed once the instance was stopped
   underlying schema mismatch), per the author-approved decision above.
 
 ## F3 — Color picker, inventory, HUD (native)
-- [ ] `ui.rs` header/footer/overlay, fits 720×720, modal overlay blocks map input —
-- [ ] set_brush / set_name / set_lock wired; sat slider capped at SAT_CAP(level) —
-- [ ] Name persists across restart (sql check) —
+- [x] `ui.rs` created: 28px header (short identity hex + level/xp, online/total
+      count), 44px footer (center-on-island button, last-3-hue swatches,
+      inventory toggle, name text field, Lock toggle), modal inventory
+      overlay (unlocked-hue grid at `sat_cap`, saturation slider capped at
+      `SAT_CAP(level)`, value/luminosity slider 0–100 uncapped) — REASONED
+      (fits 720×720 by construction: all rects hand-placed against the fixed
+      720 screen size; overlay is modal via `map_input_allowed =
+      !ui_state.overlay_open` gating zoom/pan/cursor-heartbeat/painting in
+      `main.rs`, checked by inspection, not yet run). `cargo build -p client
+      --bin client` clean, no warnings.
+- [x] `set_brush`/`set_name`/`set_lock` wired from `ui::Actions` in
+      `main.rs` — REASONED from code, not yet exercised live. Sat slider's
+      `max` argument is `info.sat_cap` (`world::sat_cap(level)`), so it's
+      structurally impossible to drag past the cap; last-3/swatch clicks
+      re-clamp `sat.min(sat_cap)` defensively for the same reason.
+- [ ] Name persists across restart (sql check) — BLOCKED on author hand-test
+      (needs a live `spacetime start` + two-instance run, same as F2).
+
+Implementation notes:
+- Text field editing captures `rl.get_char_pressed()`/backspace directly in
+  `ui::handle_input`, called once per frame before `begin_drawing` (mirrors
+  the existing `other_cursors` pattern in `main.rs` — draw-handle borrows
+  can't coexist with `&mut RaylibHandle` input calls). Name commits to
+  `set_name` on Enter or on click-away (blur); the field is seeded from the
+  server's `user.name` exactly once (`sync_name_once`) so the subscription
+  echoing our own edit back doesn't clobber in-progress typing.
+- No `measure_text` available on the draw handle (that method is inherent to
+  `RaylibHandle`, not part of the `RaylibDraw` trait, so it's unreachable
+  once `begin_drawing` hands out its borrow) — the header's right-side
+  online/total label uses a fixed x position instead of right-aligning to
+  measured width. Cosmetic only, flagged in case the author wants a tighter
+  layout later.
+- Removed the F2 placeholder TAB-cycle/+/- brush controls per plan.md
+  ("replaced in F3"); the help text is gone too since the footer/header now
+  show that information directly.
+- **Fix (author-caught):** hover highlight in `main.rs` used to draw over
+  ANY cell under the mouse, including other players' islands and while the
+  inventory overlay was open — misleadingly implying a paint the server
+  would reject. Now gated on `classify(...) != Paintable::None` and
+  `map_input_allowed` — VERIFIED via `cargo build -p client --bin client`
+  clean; visual behavior not yet re-run live.
+- **Fix (author-caught):** own cursor was drawn BEFORE `ui::draw`, so the
+  header/footer/overlay painted over it — impossible to see your own
+  pointer while hovering the HUD. Reordered so `ui::draw` runs first and the
+  own-cursor triangle is drawn last (other players' cursors stay under the
+  HUD, only the caller's own needs top z-order) — cargo build clean, not yet
+  re-run live.
+- **Fix (author-caught):** swatches (footer last-3, inventory grid) were
+  rendered at fixed `(sat_cap, 90)` regardless of the live slider values, so
+  dragging saturation/value only visibly changed the cursor, not the HUD.
+  Added `swatch_color()`: the swatch matching the CURRENT brush hue now
+  renders at the actual `info.brush.1/.2`, live with the sliders; other
+  (non-selected) hues stay static previews at the sat cap since they aren't
+  the active brush — cargo build clean, not yet re-run live.
+- **Fix (author-caught):** centering (startup + footer button) only moved
+  `camera.target`, leaving zoom untouched — so "center" didn't actually put
+  the island in view at a useful scale, and the startup zoom (2.0, a
+  leftover placeholder) was far too zoomed out regardless. Added
+  `ISLAND_FIT_ZOOM = 13.0` (sized from `ISLAND_RADIUS`'s ~22.5-world-unit
+  reach against the 720×720 window minus header/footer bands) and set
+  `camera.zoom` to it at both the initial auto-center and the Center-button
+  press. Also renamed the footer button label `"[+]"` → `"Center"` (widened
+  its rect from 30px to 54px and shifted every rect to its right by 24px so
+  nothing overlaps) — cargo build clean, exact fit not yet eyeballed live.
+- **Fix (author-caught):** Center button zoom was right but the island
+  landed off-screen-center. Root cause: mouse-wheel zoom re-anchors
+  `camera.offset` to the cursor position (the zoom-toward-cursor recipe), so
+  after any prior scroll `offset` was left wherever the mouse last
+  scrolled — centering only reset `target`/`zoom`, not `offset`. Both
+  centering spots (startup auto-center, Center button) now also reset
+  `camera.offset` back to screen-center `(360, 360)` — cargo build clean,
+  not yet re-run live.
 
 ## F4 — Merge, both kinds (native)
 - [ ] Cursor merge: both players get same new hue, inventory rows + XP (sql check) —
