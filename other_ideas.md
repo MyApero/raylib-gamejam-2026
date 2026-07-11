@@ -1,2 +1,4 @@
 - [ ] Centre Ilot should have a bot drawing R and a heart
 - [ ] It should also be a battlefield
+- [ ] Outsite it should be only margin, if someone wants to draw a biiiiig thing
+- [ ] Having more XP gives more Ilots?
