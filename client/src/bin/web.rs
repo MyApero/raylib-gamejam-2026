@@ -172,20 +172,17 @@ struct ConfigRow {
     next_rerank_at_micros: Option<i64>,
 }
 
-/// Strips the "0x" prefix and lowercases, so identities compare equal no
-/// matter which encoding they arrived in.
+/// Delegates to shared `world::normalize_identity_hex` (also left-pads to the
+/// full 64-hex-char `Identity` width — the wire's minimal-hex encoding of
+/// `Identity::ZERO` is `"0x0"`, not 64 zeros, which used to make every
+/// zero-identity comparison silently fail on web).
 fn normalize_identity(hex: &str) -> String {
-    hex.strip_prefix("0x").unwrap_or(hex).to_lowercase()
+    world::normalize_identity_hex(hex)
 }
 
 fn short_hex(id: &str) -> &str {
     &id[..8.min(id.len())]
 }
-
-/// F14 (decision 20): the community island's sentinel owner (`Identity::ZERO`
-/// server-side), as it comes over the wire — 64 hex zeros, lowercase, no
-/// `0x` prefix (matches `normalize_identity`'s output).
-const COMMUNITY_OWNER_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// A table row as delivered over the wire is either a named JSON object
 /// (InitialSubscription) or a positional JSON array matching schema field
@@ -635,7 +632,7 @@ fn world_fit(tables: &Tables, fallback: Vector2, fallback_zoom: f32) -> (Vector2
 fn player_label(tables: &Tables, id: &str) -> String {
     // F14 (decision 20): mirrors `main.rs` — the community island's sentinel
     // owner isn't a real player.
-    if id == COMMUNITY_OWNER_HEX {
+    if id == world::COMMUNITY_OWNER_HEX {
         return "Free Isle".to_string();
     }
     tables
@@ -1297,10 +1294,14 @@ fn frame(state: &mut State) {
                 // F8 (author follow-up): anywhere on a FOREIGN island's
                 // territory, not just its center. Mirrors `main.rs`; own
                 // island's popup now opens via the "My Isle" footer button.
-                // F14: the community island opens the same popup;
-                // `player_label` renders its owner as "Free Isle".
+                // F14 author reversal: the community island is excluded here
+                // — no info popup, no like, matching the hover exclusion
+                // below. Its sentinel owner would otherwise pass this
+                // `owner_hex != me` check like any other foreign island.
                 info_target: island_at(&state.tables, wq, wr)
-                    .filter(|&(id, _, _)| state.tables.islands.get(&id).is_some_and(|isl| isl.owner_hex != me))
+                    .filter(|&(id, _, _)| {
+                        state.tables.islands.get(&id).is_some_and(|isl| isl.owner_hex != me && isl.owner_hex != world::COMMUNITY_OWNER_HEX)
+                    })
                     .map(|(id, _, _)| id),
                 fired: false,
             });
@@ -1382,7 +1383,9 @@ fn frame(state: &mut State) {
             me.and_then(|me| {
                 let (wq, wr) = world::world_to_axial(mouse_world);
                 island_at(&state.tables, wq, wr)
-                    .filter(|&(id, _, _)| state.tables.islands.get(&id).is_some_and(|isl| isl.owner_hex != me))
+                    .filter(|&(id, _, _)| {
+                        state.tables.islands.get(&id).is_some_and(|isl| isl.owner_hex != me && isl.owner_hex != world::COMMUNITY_OWNER_HEX)
+                    })
                     .map(|(id, _, _)| id)
             })
         })
@@ -1525,13 +1528,7 @@ fn frame(state: &mut State) {
                 continue;
             }
             let mine = me == Some(island.owner_hex.as_str());
-            // F14 (decision 20): the community island's unpainted tiles are
-            // white, not the usual gray placeholder — mirrors `main.rs`.
-            let unpainted_fill = if island.owner_hex == COMMUNITY_OWNER_HEX {
-                Color::new(255, 255, 255, 255)
-            } else {
-                Color::new(60, 60, 68, 255)
-            };
+            let unpainted_fill = world::unpainted_island_fill(island.owner_hex == world::COMMUNITY_OWNER_HEX);
             // F9.5 (FPS at scale): point-lookup each rendered cell by its
             // packed id in the already-id-keyed `island_cells` map instead of
             // collecting a fresh (island_id, q, r) -> color HashMap from

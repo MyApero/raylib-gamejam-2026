@@ -907,29 +907,41 @@ center bot, customizable island border color.
     `classify`/paintability check gets a third case — inside slot 0's territory but
     not matching "own island" or "margin" — dispatched to
     `paint_community_cell`/`erase_community_cell` exactly like the existing two paint
-    kinds (extends the `(kind: u8, q, r)` dispatch with a new `kind = 2`). The
-    foreign-island info popup / hover-tooltip (decision 17, F9.5 item 7) opens for the
-    community island exactly like any other foreign island — `player_label` special-
-    cases the sentinel identity (native: `Identity::ZERO`; web:
-    `COMMUNITY_OWNER_HEX`, its 64-zero hex form) to render as **"Free Isle"** instead
-    of falling back to "another player" (author-requested naming, 2026-07-11). Its
+    kinds (extends the `(kind: u8, q, r)` dispatch with a new `kind = 2`). Its
     unpainted tiles render WHITE (`Color::new(255,255,255,255)`) instead of the usual
     gray placeholder fill, in both clients — a visual tell that this is the shared
     canvas, at a glance, before a single pixel's been painted (author-requested,
-    2026-07-11). Long-press tile-merge and the middle-click eyedropper are UNCHANGED
-    (both already operate generically on any painted cell via `island_at`, which the
-    community island's real `Island` row satisfies for free) — so merging with a
-    stranger's community-canvas
-    brushstroke, or eyedropping its color, both work exactly like on any other island.
+    2026-07-11); shared as `world::unpainted_island_fill`. Long-press tile-merge and
+    the middle-click eyedropper are UNCHANGED (both already operate generically on
+    any painted cell via `island_at`, which the community island's real `Island` row
+    satisfies for free) — so merging with a stranger's community-canvas brushstroke,
+    or eyedropping its color, both work exactly like on any other island.
+  - **Author reversal (2026-07-12, pre-submission session)**: hover-tooltip,
+    single-click/double-click info popup, and like/unlike are now DISABLED on the
+    community island — its sentinel owner (`Identity::ZERO` / `COMMUNITY_OWNER_HEX`)
+    otherwise passes every `owner != me` foreign-island filter like a real player's
+    island. Both clients' `info_target` and `currently_hovered_foreign` filters gained
+    an explicit sentinel-owner exclusion; server-side `like_island`/`unlike_island`
+    reject `owner == Identity::ZERO` as a backstop against raw reducer calls.
+    `player_label`'s "Free Isle" naming stays (still used by the merge/eyedrop toast
+    path), it just no longer has a popup to render inside.
+  - **Web zero-identity bug fix (2026-07-12)**: the wire encodes `Identity` as
+    *minimal* hex (`Identity::ZERO` arrives as `"0x0"`, not 64 zeros), so web's old
+    `normalize_identity` (strip `0x` + lowercase only) never produced a value equal to
+    `COMMUNITY_OWNER_HEX` — silently breaking the white unpainted-fill and the "Free
+    Isle" label on web only (native compares typed `Identity` values, unaffected).
+    Fixed by moving normalization into shared `world::normalize_identity_hex`, which
+    also left-pads to 64 hex chars; web's `normalize_identity` now delegates to it.
   - *Verify*: `spacetime sql hexmerge "SELECT id, owner, slot FROM island WHERE slot
     = 0"` shows the sentinel row after one `client_connected`; `paint_community_cell`/
     `erase_community_cell` succeed for an identity that owns no island there and fail
     outside the radius bound; painting/erasing on one's own island and the margins is
     unaffected; `claim_admin` no longer moves any island (`island.slot` for the
-    claimant's own island is unchanged after claiming); hovering/clicking the
-    community island opens its popup labeled "Free Isle" (never a real player's
-    name or "another player") in either client; its unpainted tiles render white,
-    distinct from every other island's gray placeholder; `./build-web.sh` and
+    claimant's own island is unchanged after claiming); the community island's
+    unpainted tiles render white (distinct from every other island's gray
+    placeholder) in both clients; hovering/clicking/double-clicking it opens NO
+    popup and registers NO like in either client, and a raw `like_island`/
+    `unlike_island` reducer call on it is rejected server-side; `./build-web.sh` and
     `cargo build` (server, both clients, bot) stay clean.
 
 ---

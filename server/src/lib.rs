@@ -1241,6 +1241,12 @@ pub fn like_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
     if island.owner == ctx.sender() {
         return Err("cannot like your own island".to_string());
     }
+    // F14 author reversal: the community island (ownerless, Identity::ZERO)
+    // isn't a real player's island — no likes. Server-side backstop; both
+    // clients already exclude it from the like gesture entirely.
+    if island.owner == Identity::ZERO {
+        return Err("cannot like the community island".to_string());
+    }
     if ctx.db.island_like().island_id().filter(&island_id).any(|l| l.liker == ctx.sender()) {
         return Err("already liked".to_string());
     }
@@ -1260,6 +1266,9 @@ pub fn like_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
 pub fn unlike_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
     check_not_frozen(ctx)?;
     let island = ctx.db.island().id().find(island_id).ok_or("unknown island")?;
+    if island.owner == Identity::ZERO {
+        return Err("cannot like the community island".to_string());
+    }
     let existing = ctx
         .db
         .island_like()

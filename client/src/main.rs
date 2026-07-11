@@ -862,11 +862,13 @@ fn main() {
                     // its info popup instead of painting. Your own island
                     // stays paint-only; its popup now opens via the "My
                     // Isle" footer button instead (`actions.open_own_island`).
-                    // F14: the community island (owner == Identity::ZERO)
-                    // opens the same popup, `player_label` renders its
-                    // owner as "Free Isle" instead of a real player's name.
+                    // F14 author reversal: the community island (owner ==
+                    // Identity::ZERO) is excluded here — no info popup, no
+                    // like, matching the hover exclusion below. Its sentinel
+                    // owner would otherwise pass every `owner != me` check
+                    // like any other foreign island.
                     info_target: island_at(&ctx, wq, wr)
-                        .filter(|(island, _, _)| island.owner != me)
+                        .filter(|(island, _, _)| island.owner != me && island.owner != Identity::ZERO)
                         .map(|(island, _, _)| island.id),
                     fired: false,
                 });
@@ -968,7 +970,7 @@ fn main() {
                 me.and_then(|me| {
                     let (hq, hr) = world::world_to_axial(mouse_world);
                     island_at(&ctx, hq, hr)
-                        .filter(|(island, _, _)| island.owner != me)
+                        .filter(|(island, _, _)| island.owner != me && island.owner != Identity::ZERO)
                         .map(|(island, _, _)| island.id)
                 })
             })
@@ -1136,14 +1138,7 @@ fn main() {
                     continue;
                 }
                 let mine = me == Some(island.owner);
-                // F14 (decision 20): the community island's unpainted tiles
-                // are white, not the usual gray placeholder — visually marks
-                // it as the shared "Free Isle" canvas at a glance.
-                let unpainted_fill = if island.owner == Identity::ZERO {
-                    Color::new(255, 255, 255, 255)
-                } else {
-                    Color::new(60, 60, 68, 255)
-                };
+                let unpainted_fill = world::unpainted_island_fill(island.owner == Identity::ZERO);
                 // F9.5 (FPS at scale): point-lookup each rendered cell by its
                 // packed id via the SDK's own unique-index cache instead of
                 // collecting a HashMap from EVERY island_cell row in the

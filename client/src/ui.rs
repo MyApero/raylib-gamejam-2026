@@ -1270,21 +1270,21 @@ fn draw_island_tooltip(d: &mut impl RaylibDraw, popup: &IslandInfo, mouse: Vecto
     }
 }
 
-/// Author-requested: a floating "+1"/"-1" pop where a double-click
-/// like/unlike landed, since that gesture (unlike the popup button) has no
-/// other visible feedback. Grows slightly and fades out over
+/// Author-requested: a floating heart pop where a double-click like/unlike
+/// landed, since that gesture (unlike the popup button) has no other visible
+/// feedback — filled red heart for a like, empty grey outline heart for an
+/// unlike (matching `world::draw_heart`'s filled/outline convention used
+/// elsewhere for the like state). Grows slightly and fades out over
 /// `LIKE_ANIM_DURATION`; screen-space, drawn over everything else.
 fn draw_like_anims(d: &mut impl RaylibDraw, state: &UiState) {
     for anim in &state.like_anims {
         let t = (anim.started_at.elapsed().as_secs_f32() / LIKE_ANIM_DURATION.as_secs_f32()).clamp(0.0, 1.0);
         let alpha = ((1.0 - t) * 255.0) as u8;
         let rise = t * 26.0;
-        let radius = 10.0 + t * 6.0;
+        let size = 20.0 + t * 10.0;
         let cy = anim.pos.y - rise;
-        let ring = if anim.liked { Color::new(230, 70, 90, alpha) } else { Color::new(160, 160, 168, alpha) };
-        d.draw_circle(anim.pos.x as i32, cy as i32, radius, ring);
-        let label = if anim.liked { "+1" } else { "-1" };
-        d.draw_text(label, anim.pos.x as i32 - 8, cy as i32 - 8, 16, Color::new(255, 255, 255, alpha));
+        let color = if anim.liked { Color::new(230, 70, 90, alpha) } else { Color::new(160, 160, 168, alpha) };
+        world::draw_heart(d, Vector2::new(anim.pos.x, cy), size, anim.liked, color);
     }
 }
 

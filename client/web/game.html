@@ -33,8 +33,19 @@
     <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
     <pre id="output"></pre>
     <script>
+      // Cache-busting: browsers (and some CDNs) aggressively cache
+      // web.js/web.wasm by filename, so a clean `./build-web.sh` rebuild can
+      // silently keep serving a stale wasm binary until a hard-reload — this
+      // was the actual cause of the "hearts don't show on web" symptom, not
+      // a code bug (heart rendering already lives in shared ui.rs). Bump
+      // BUILD_VERSION on every deploy so both the script tag below and the
+      // wasm fetch (via Module.locateFile) get a fresh URL each time.
+      var BUILD_VERSION = '20260712a';
       var Module = {
         canvas: document.getElementById('canvas'),
+        locateFile: function (path) {
+          return path.endsWith('.wasm') ? path + '?v=' + BUILD_VERSION : path;
+        },
         print: (function () {
           var el = document.getElementById('output');
           return function (text) {
@@ -258,6 +269,6 @@
       })();
     </script>
     <!-- Built by: cargo build -p client --bin web --target wasm32-unknown-emscripten --release -->
-    <script src="web.js"></script>
+    <script>document.write('<script src="web.js?v=' + BUILD_VERSION + '"><' + '/script>');</script>
   </body>
 </html>

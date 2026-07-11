@@ -136,6 +136,57 @@ pub mod constants {
     pub const HEXA_SNAP_LERP_SECS: f32 = 0.35;
 }
 
+/// Strips an optional "0x" prefix, lowercases, then left-pads with `'0'` to
+/// the full 64-hex-char `Identity` width. The wire encodes `Identity` as
+/// *minimal* hex (e.g. `Identity::ZERO` arrives as `"0x0"`, not 64 zeros), so
+/// without the padding step a constant like `COMMUNITY_OWNER_HEX` never
+/// compares equal to what a real zero-identity row decodes to — real
+/// (non-zero) identities happen to already be full-width, so only constant
+/// comparisons were silently breaking. Single source of truth for the web
+/// client's `normalize_identity` (native never needs this: it compares typed
+/// `Identity` values, never their hex form).
+#[allow(dead_code)]
+pub fn normalize_identity_hex(s: &str) -> String {
+    let stripped = s.strip_prefix("0x").unwrap_or(s).to_lowercase();
+    format!("{:0>64}", stripped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_identity_hex_pads_minimal_zero() {
+        assert_eq!(normalize_identity_hex("0x0"), "0".repeat(64));
+    }
+
+    #[test]
+    fn normalize_identity_hex_leaves_full_width_unchanged() {
+        let full = "AB".repeat(32);
+        assert_eq!(normalize_identity_hex(&format!("0x{full}")), full.to_lowercase());
+    }
+}
+
+/// F14 (decision 20): the community island's sentinel owner
+/// (`Identity::ZERO` server-side), fully-padded hex as it compares after
+/// `normalize_identity_hex`. Single source of truth for web (native keeps
+/// comparing typed `Identity::ZERO` directly, never this string).
+#[allow(dead_code)]
+pub const COMMUNITY_OWNER_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// F14 (decision 20): the community island's unpainted tiles render white
+/// instead of the usual gray placeholder, marking it as the shared "Free
+/// Isle" canvas at a glance. Each client computes `is_community` from its own
+/// sentinel-owner check (typed `Identity::ZERO` natively, `COMMUNITY_OWNER_HEX`
+/// on web) before calling this.
+pub fn unpainted_island_fill(is_community: bool) -> Color {
+    if is_community {
+        Color::new(255, 255, 255, 255)
+    } else {
+        Color::new(60, 60, 68, 255)
+    }
+}
+
 pub fn level_of(xp: u64) -> u64 {
     xp / constants::LEVEL_XP
 }

@@ -2737,3 +2737,63 @@ Implementation notes:
   author has a working admin login again; not itself hand-tested by
   `claim_admin` against a live instance this session — only the build/hash
   pipeline was verified.
+
+---
+
+**Batch (2026-07-12, pre-submission session): F14 community-island fixes +
+web zero-identity bug + web build hygiene.** Three author asks plus a
+handoff from a previous session (`HANDOFF-web-native-sharing.md`, now
+absorbed and deleted). See plan.md's F14 entry for the author-reversal and
+bug-fix writeups; this is the evidence log.
+
+- **Web zero-identity normalization bug** — ROOT CAUSE VERIFIED: a raw
+  SQL-API dump of the slot-0 row showed `[["0x0"],1,0]` — the wire's minimal-
+  hex encoding never produces the full 64-zero form web's old
+  `normalize_identity` expected `COMMUNITY_OWNER_HEX` to match. FIX VERIFIED:
+  moved normalization into shared `client/src/world.rs::normalize_identity_hex`
+  (strip `0x`, lowercase, left-pad to 64 chars); added `#[cfg(test)]` tests
+  (`"0x0"` -> 64 zeros; a full-width mixed-case value -> lowercased, unchanged
+  length) — `cargo test -p client --bin client` passes both. `web.rs`'s
+  `normalize_identity` now delegates to it.
+- **Shared decision helpers** — `world::COMMUNITY_OWNER_HEX` (moved from
+  web.rs) and `world::unpainted_island_fill(is_community: bool) -> Color`
+  (replaces the mirrored white-vs-gray blocks in `main.rs`/`web.rs`) — part
+  of the standing "share, don't hand-mirror" directive.
+- **Hover/like disabled on the community island** (author reversal — F14
+  originally spec'd the popup/hover/like to work on it like any foreign
+  island; the sentinel owner passed every `owner != me` filter, which the
+  author decided reads wrong for an ownerless playground). VERIFIED:
+  native (`main.rs`) `info_target` and `currently_hovered_foreign` filters
+  gained `&& island.owner != Identity::ZERO`; web (`web.rs`) the equivalent
+  `owner_hex != world::COMMUNITY_OWNER_HEX` guard on both. Server backstop
+  in `like_island`/`unlike_island` (`server/src/lib.rs`) rejects
+  `island.owner == Identity::ZERO` — VERIFIED live: `spacetime call -s local
+  hexmerge like_island 1` returns `"cannot like the community island"`
+  after republish.
+- **Web build hygiene** (also resolves the "hearts don't show on web"
+  symptom, which traced to a stale/uncached wasm build, not a code bug —
+  heart rendering already lived in shared `ui.rs`): added a `BUILD_VERSION`
+  cache-buster to `client/web/game.html` — a version query param on the
+  `web.js` script tag (rewritten via `document.write` since the tag needs
+  the JS variable) and a `Module.locateFile` override appending the same
+  version to the `web.wasm` fetch. VERIFIED: `./build-web.sh` clean rebuild,
+  `web.js`/`web.wasm` timestamps confirm the fresh copy landed in
+  `client/web/`.
+- **One-time local DB cleanup** (366 leftover painted cells from
+  pre-cleanup testing, persisted across republishes since
+  `--delete-data=never`): `DELETE FROM island_cell WHERE island_id = 1`,
+  `DELETE FROM island_like WHERE island_id = 1`, `UPDATE island SET likes =
+  0 WHERE id = 1` (island id 1 confirmed = slot 0 via `spacetime sql`).
+  VERIFIED: `SELECT COUNT(*) AS n FROM island_cell WHERE island_id = 1` -> 0
+  after; `likes` column -> 0 after.
+- **Builds**: `cargo check -p server`, `cargo build -p client --bin client
+  --bin bot`, `cargo test -p client --bin client`, and `./build-web.sh` all
+  clean (VERIFIED) after every code change in this batch, including after
+  the local republish (`./server/publish.sh`, `--delete-data=never`
+  confirmed again, data survived).
+- NOT hand-tested in a GUI/browser this session (executor protocol — see
+  memory) — the author needs to hard-reload `localhost:8080` and confirm:
+  hearts render, community island all white, no hover tooltip / double-click
+  like on it in either client, erase still whitens it, hover/like still work
+  on ordinary foreign islands. `HANDOFF-web-native-sharing.md` deleted now
+  that this entry supersedes it.
