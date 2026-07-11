@@ -2,3 +2,4 @@
 - [ ] It should also be a battlefield
 - [ ] Outsite it should be only margin, if someone wants to draw a biiiiig thing
 - [ ] Having more XP gives more Ilots?
+- [ ] le cursor devrait grossir à un certain niveau de zoom, pour moi il devrait render environ la taille d’une tôle si on zoom assez
