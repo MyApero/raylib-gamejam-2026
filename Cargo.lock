@@ -277,6 +277,7 @@ dependencies = [
  "raylib",
  "serde",
  "serde_json",
+ "shared",
  "spacetimedb-sdk",
 ]
 
@@ -1799,6 +1800,7 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "log",
+ "shared",
  "spacetimedb",
 ]
 
@@ -1822,6 +1824,10 @@ dependencies = [
  "digest",
  "keccak",
 ]
+
+[[package]]
+name = "shared"
+version = "0.1.0"
 
 [[package]]
 name = "shlex"

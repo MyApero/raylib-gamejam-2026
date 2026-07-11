@@ -857,6 +857,8 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         }
     } else if state.help_open {
         draw_help_overlay(d);
+    } else if let Some((title, lines)) = hovered_button_tooltip(mouse) {
+        draw_button_tooltip(d, title, lines, mouse);
     }
     if let Some(toast) = &state.toast {
         draw_toast(d, toast, info);
@@ -915,6 +917,51 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
 const TOOLTIP_W: f32 = 220.0;
 const TOOLTIP_PAD: f32 = 8.0;
 const TOOLTIP_LINE_H: f32 = 18.0;
+const BTN_TOOLTIP_W: f32 = 210.0;
+
+/// Author-requested: hovering a footer button shows a title + short
+/// description — mainly for the icon-only Eraser/Lock buttons, which
+/// otherwise carry no on-screen label at all. The name field is
+/// deliberately excluded (self-explanatory as a text input).
+const BUTTON_TOOLTIPS: &[(fn() -> Rectangle, &str, &[&str])] = &[
+    (center_btn_rect, "Center", &["Go back to your island"]),
+    (inventory_btn_rect, "Colors", &["Inventory: stores every", "color you've discovered"]),
+    (eraser_btn_rect, "Eraser", &["Revert a cell to its", "original color"]),
+    (lock_btn_rect, "Lock", &["Makes you unmergeable", "with others"]),
+    (account_btn_rect, "Account", &["Copy or import your ID,", "reset your account"]),
+    (my_island_btn_rect, "My Isle", &["Center the camera on", "your own island"]),
+];
+
+fn hovered_button_tooltip(mouse: Vector2) -> Option<(&'static str, &'static [&'static str])> {
+    BUTTON_TOOLTIPS.iter().find(|&&(rect_fn, _, _)| point_in(mouse, rect_fn())).map(|&(_, title, lines)| (title, lines))
+}
+
+/// Same tooltip visual language as `draw_island_tooltip` (small, glued near
+/// the cursor, flipped near screen edges) but for a fixed title + a couple
+/// of description lines instead of live island data.
+fn draw_button_tooltip(d: &mut impl RaylibDraw, title: &str, lines: &[&str], mouse: Vector2) {
+    let height = TOOLTIP_PAD * 2.0 + TOOLTIP_LINE_H * (1 + lines.len()) as f32;
+    let mut x = mouse.x + 16.0;
+    let mut y = mouse.y - height - 10.0;
+    if x + BTN_TOOLTIP_W > SCREEN_W {
+        x = mouse.x - BTN_TOOLTIP_W - 10.0;
+    }
+    if y < 0.0 {
+        y = mouse.y + 16.0;
+    }
+    let rect = Rectangle::new(x, y, BTN_TOOLTIP_W, height);
+    d.draw_rectangle_rec(rect, Color::new(20, 20, 26, 235));
+    d.draw_rectangle_lines_ex(rect, 1.0, Color::new(120, 120, 130, 200));
+
+    let tx = rect.x as i32 + TOOLTIP_PAD as i32;
+    let mut ty = rect.y as i32 + TOOLTIP_PAD as i32;
+    d.draw_text(title, tx, ty, 15, Color::RAYWHITE);
+    ty += TOOLTIP_LINE_H as i32;
+    for line in lines {
+        d.draw_text(line, tx, ty, 13, Color::LIGHTGRAY);
+        ty += TOOLTIP_LINE_H as i32;
+    }
+}
 
 /// F9.5 item 7 (author-requested redesign): a foreign island's info, as a
 /// small, non-interactive tooltip glued to the cursor (offset so it doesn't
@@ -1105,36 +1152,37 @@ fn draw_quad(d: &mut impl RaylibDraw, p0: Vector2, p1: Vector2, p2: Vector2, p3:
 fn draw_pencil_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     let center = Vector2::new(r.x + r.width / 2.0, r.y + r.height / 2.0);
     let angle = 45f32.to_radians();
-    let half_w = 3.0;
-    let cap_top = center.y - 12.0;
-    let cap_bottom = center.y - 6.0;
-    let body_bottom = center.y + 7.0;
-    let tip = center.y + 12.0;
+    // Author-caught: the first cut of this (half_w 3.0, no outline, a dark
+    // brownish tip close to the button's own background color) rendered
+    // correctly but was too thin and too low-contrast to read as anything
+    // at 30px — widened the body, brightened the tip, and added the same
+    // dark stroke `draw_eraser_icon` uses for a crisp silhouette against
+    // the dark button background.
+    let half_w = 6.0;
+    let cap_top_y = center.y - 13.0;
+    let cap_bottom_y = center.y - 6.0;
+    let body_bottom_y = center.y + 8.0;
+    let tip_y = center.y + 14.0;
     let left = center.x - half_w;
     let right = center.x + half_w;
+    let rot = |x: f32, y: f32| rotate_around(Vector2::new(x, y), center, angle);
 
-    let cap = [
-        rotate_around(Vector2::new(left, cap_top), center, angle),
-        rotate_around(Vector2::new(right, cap_top), center, angle),
-        rotate_around(Vector2::new(right, cap_bottom), center, angle),
-        rotate_around(Vector2::new(left, cap_bottom), center, angle),
-    ];
-    draw_quad(d, cap[0], cap[1], cap[2], cap[3], Color::new(235, 120, 150, 255));
+    let tl = rot(left, cap_top_y);
+    let tr = rot(right, cap_top_y);
+    let cl = rot(left, cap_bottom_y);
+    let cr = rot(right, cap_bottom_y);
+    let bl = rot(left, body_bottom_y);
+    let br = rot(right, body_bottom_y);
+    let tip = rot(center.x, tip_y);
 
-    let body = [
-        rotate_around(Vector2::new(left, cap_bottom), center, angle),
-        rotate_around(Vector2::new(right, cap_bottom), center, angle),
-        rotate_around(Vector2::new(right, body_bottom), center, angle),
-        rotate_around(Vector2::new(left, body_bottom), center, angle),
-    ];
-    draw_quad(d, body[0], body[1], body[2], body[3], Color::new(235, 235, 240, 255));
+    draw_quad(d, tl, tr, cr, cl, Color::new(235, 120, 150, 255));
+    draw_quad(d, cl, cr, br, bl, Color::new(235, 235, 240, 255));
+    d.draw_triangle(bl, br, tip, Color::new(190, 150, 100, 255));
 
-    let point = [
-        rotate_around(Vector2::new(left, body_bottom), center, angle),
-        rotate_around(Vector2::new(right, body_bottom), center, angle),
-        rotate_around(Vector2::new(center.x, tip), center, angle),
-    ];
-    d.draw_triangle(point[0], point[1], point[2], Color::new(70, 55, 45, 255));
+    let outline = Color::new(40, 40, 48, 255);
+    for &(a, b) in &[(tl, tr), (tr, br), (br, tip), (tip, bl), (bl, tl)] {
+        d.draw_line_ex(a, b, 2.0, outline);
+    }
 }
 
 /// Author-requested: icon-only Eraser button — classic two-tone (pink cap /

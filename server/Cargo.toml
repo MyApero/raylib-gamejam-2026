@@ -12,3 +12,4 @@ log = "0.4"
 # wasm32-unknown-unknown's std does not link transcendental float functions
 # (sin/cos/atan2), needed by the hue-merge circular-mean formula.
 libm = "0.2"
+shared = { path = "../shared" }

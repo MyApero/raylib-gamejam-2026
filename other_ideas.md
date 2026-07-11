@@ -40,24 +40,41 @@ click, and every one of those frames used to see "no modal" and let the SAME
 press paint. Latches at press-start for the whole gesture instead; see
 status.md)
 
+- [x] If you hover buttons, it shows a tooltip with Title + short description
+(Done: `ui::draw_button_tooltip`/`hovered_button_tooltip` — hovering any
+footer button (Center, Colors, Eraser, Lock, Account, My Isle; the name
+field is skipped as self-explanatory) shows a title + 1-2 line description
+in a small box glued near the cursor, same visual language as the
+foreign-island hover tooltip. No hover delay — these are small stationary
+buttons, not paint-stroke sweep zones, so instant is fine.)
+- [x] ws: open should be just above the FPS at the bottom right
+(Done: moved from bottom-LEFT (10, 700) to directly above the FPS counter
+at bottom-right (640, 682) in `bin/web.rs` — both debug readouts now live
+in one corner instead of opposite ones. Web-only, `main.rs` has no
+websocket status to show.)
 
-- [ ] Centre Ilot should have a bot drawing R and a heart
-- [ ] It should also be a battlefield
-- [ ] Outsite it should be only margin, if someone wants to draw a biiiiig thing
-- [ ] Having more XP gives more Ilots?
-- [ ] Bot at the middle with a color and a highlight "Merge with me!"
-- [ ] Customise your Isle border color or make it transparent (remove)
 
 - [x] Slow then fast for the start animation (easeInOutCirc)
 (Done: `world::ease_in_out_circ` replaces the old ease-out-cubic
 `1.0 - (1.0 - t).powi(3)` in both `main.rs`/`bin/web.rs`'s launch-intro
 easing. Slow start, fast middle, gentle landing, as asked.)
-- [x] Better icon for the eraser icon
-(Done, author picked from 6 candidates: the paint/erase toggle button now
+- [ ] Better icon for the eraser icon
+(Author picked pencil from 6 candidates: the paint/erase toggle button now
 shows a diagonal pencil (`draw_pencil_icon`) by default — the icon reflects
 which TOOL is active, not a static "click to erase" glyph — and swaps to
 the classic two-tone eraser icon plus a red outline (`draw_rectangle_lines_ex`)
-while erasing is on. Both `client/src/ui.rs`, shared by native + web.)
+while erasing is on. Both `client/src/ui.rs`, shared by native + web.
+STILL UNCHECKED — reported invisible TWICE now. Round 1: widened
+half_w 3.0->4.5, brightened the tip, added a dark stroke. Round 2 (author
+still can't see it): re-verified the geometry by hand (non-degenerate,
+inside the button bounds, using the exact `draw_triangle` primitive that
+already works for the eraser/cursor/heart icons in this same file) and
+checked raylib's own `DrawTriangle` source for a culling explanation —
+found no code defect. Widened further as insurance (half_w 4.5->6.0,
+outline 1.5->2.0px) but flagging honestly: the leading explanation at this
+point is a stale build (native `cargo run` doesn't hot-reload; a web
+build needs a hard refresh past the browser cache) rather than a
+remaining code bug. Needs a fresh rebuild+restart before the next look.)
 - [x] When Locked, border of the cursor should be thicker
 (Done: `draw_cursor`/`draw_cursor_scaled` take a `locked` flag and draw a
 3px (vs 1px) black outline when true — applied to your own cursor AND every
@@ -75,4 +92,14 @@ describes now rewards active painters too, not just liked islands.)
 border had before its own fix — now `HOVER_BORDER_PX / camera.zoom`
 (`world::constants::HOVER_BORDER_PX` = 2.0), the identical screen-space-
 constant trick, in both clients.)
+
+- [ ] Centre Ilot should have a bot drawing R and a heart
+- [ ] It should also be a battlefield
+- [ ] Outsite it should be only margin, if someone wants to draw a biiiiig thing
+- [ ] Having more XP gives more Ilots?
+- [ ] Bot at the middle with a color and a highlight "Merge with me!"
+- [ ] Customise your Isle border color or make it transparent (remove)
+
 - [ ] Put a clear hexel title with a ENTER
+
+- [ ] The Saturation slider should go to 100 but block at the max you unlocked. Tooltip explaining (You need more XP to unlock more saturation)

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["server", "client"]
+members = ["server", "client", "shared"]
 
 # Fast dev iteration (same setup as albert)
 [profile.dev]

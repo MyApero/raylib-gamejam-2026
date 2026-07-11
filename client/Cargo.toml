@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 raylib = "6.0"
+shared = { path = "../shared" }
 
 # Native desktop binary only (src/main.rs) — talks to SpacetimeDB over a
 # live WebSocket subscription via the Rust SDK.

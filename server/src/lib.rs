@@ -1,9 +1,12 @@
+use shared::hue_dist;
 use spacetimedb::rand::Rng;
 use spacetimedb::{Identity, ReducerContext, ScheduleAt, Table, TimeDuration, Timestamp};
 use std::collections::HashMap;
 
 /// Canonical constants — see plan.md "Canonical constants" table. Mirror
-/// these EXACTLY in the native and web clients.
+/// these EXACTLY in the native and web clients. Anything genuinely shared
+/// with the client (as opposed to server-only tuning) lives in the
+/// `shared` crate and is re-exported here instead of hand-copied.
 mod constants {
     pub const ISLAND_RADIUS: i32 = 13;
     // Author-requested (F9.5): islands sit side by side, flat sides facing
@@ -14,15 +17,9 @@ mod constants {
     // gap toward it, because the coarse step directions point at the
     // hexagon's VERTICES rather than the middle of a flat edge), with a
     // deliberate uniform gap left between neighbors (not zero — author
-    // wanted a little breathing room after all).
-    //
-    // MUST be even: the placement radius is bumped by `MARGIN_GAP_TILES / 2`
-    // on top of `ISLAND_RADIUS` (see `geometry::SLOT_PLACEMENT_RADIUS`), and
-    // that bump contributes to the gap symmetrically from both neighboring
-    // islands — so the resulting gap is always exactly `2 * bump`, i.e.
-    // always even. An odd value here is not geometrically reachable with
-    // this tiling and would silently round down via integer division.
-    pub const MARGIN_GAP_TILES: i32 = 6;
+    // wanted a little breathing room after all). See the `shared` crate's
+    // doc comment for why it MUST be even.
+    pub use shared::constants::MARGIN_GAP_TILES;
     // exactly the hexdist between any two ADJACENT islands' centers in that
     // tiling — verified computationally, not just algebra on paper.
     pub const SLOT_SPACING: i32 = 2 * (ISLAND_RADIUS + MARGIN_GAP_TILES / 2) + 1;
@@ -53,7 +50,7 @@ mod constants {
     /// How far (degrees, either direction) a painted hue may stray from an
     /// unlocked inventory entry — lets the Hue slider nudge a shade without
     /// bloating the inventory with one row per nudge.
-    pub const HUE_TOLERANCE: u16 = 5;
+    pub use shared::constants::HUE_TOLERANCE;
     /// F9.5 item 10: how often the dead-player reap sweep runs, and how
     /// stale (`online == false` and `last_seen` older than this) a user must
     /// be before it's even considered a candidate.
@@ -451,12 +448,6 @@ fn level_of(xp: u64) -> u64 {
 
 fn sat_cap(level: u64) -> u8 {
     (40 + 3 * level).min(100) as u8
-}
-
-/// Circular hue distance in degrees (handles the 359->0 wraparound).
-fn hue_dist(a: u16, b: u16) -> u16 {
-    let diff = (a as i32 - b as i32).unsigned_abs() as u16;
-    diff.min(360 - diff)
 }
 
 /// Deterministic-enough starting hue: hashes the identity's bytes. Not

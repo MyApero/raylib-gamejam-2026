@@ -1,8 +1,11 @@
 //! Shared geometry/color contract for the hex-island world, consumed
 //! identically by the native (`main.rs`) and, from F5, web (`bin/web.rs`)
 //! clients so they can never drift on hex layout, slot placement, cell id
-//! packing or color decoding. Mirrors `server/src/lib.rs`'s `geometry` /
-//! `constants` modules exactly — see plan.md "Geometry spec" / "Color spec".
+//! packing or color decoding. Mirrors `server/src/lib.rs`'s `geometry`
+//! module exactly — see plan.md "Geometry spec" / "Color spec". The pieces
+//! genuinely shared with the server (`MARGIN_GAP_TILES`, `HUE_TOLERANCE`,
+//! `hue_dist`) live in the `shared` crate instead and are re-exported below,
+//! rather than hand-mirrored.
 
 use raylib::prelude::*;
 use std::sync::OnceLock;
@@ -12,18 +15,18 @@ pub mod constants {
 
     pub const ISLAND_RADIUS: i32 = 13;
     /// Gap (in fine hex tiles) left between neighboring islands' paintable
-    /// interiors — mirrors `server::constants::MARGIN_GAP_TILES` exactly.
-    /// MUST be even: see that constant's doc comment for why.
-    pub const MARGIN_GAP_TILES: i32 = 6;
+    /// interiors. Single source of truth in the `shared` crate — see its
+    /// doc comment for why it MUST be even.
+    pub use shared::constants::MARGIN_GAP_TILES;
     /// Client-side send-rate cap for `set_pos`; the server has no matching
     /// limit (cursor spam is cheap), this just avoids flooding the socket.
     pub const CURSOR_SEND_HZ: f32 = 20.0;
     pub const LEVEL_XP: u64 = 100;
     /// How far (degrees, either direction) the Hue slider may nudge the
-    /// selected inventory hue — mirrors `server::constants::HUE_TOLERANCE`,
-    /// which is the actual enforcement point; this just keeps the slider
-    /// from offering a value the server would reject.
-    pub const HUE_TOLERANCE: i32 = 5;
+    /// selected inventory hue. Single source of truth in the `shared`
+    /// crate — the server is the actual enforcement point, this just keeps
+    /// the slider from offering a value the server would reject.
+    pub use shared::constants::HUE_TOLERANCE;
     /// F9.5 item 6: floor on another player's cursor's zoomed-out render
     /// scale (relative to its size at the default `ISLAND_FIT_ZOOM`) — lets
     /// it shrink with the camera like a world-space object would, but never
@@ -114,13 +117,11 @@ pub fn sat_cap(level: u64) -> u8 {
     (40 + 3 * level).min(100) as u8
 }
 
-/// Circular hue distance in degrees (handles the 359->0 wraparound). Mirrors
-/// `server::hue_dist` exactly — both sides must agree on what "close to an
-/// unlocked hue" means (Hue slider tolerance, long-press ownership check).
-pub fn hue_dist(a: u16, b: u16) -> i32 {
-    let diff = (a as i32 - b as i32).unsigned_abs() as i32;
-    diff.min(360 - diff)
-}
+/// Circular hue distance in degrees (handles the 359->0 wraparound). Single
+/// source of truth in the `shared` crate — both server and client must
+/// agree on what "close to an unlocked hue" means (Hue slider tolerance,
+/// long-press ownership check).
+pub use shared::hue_dist;
 
 /// Ease-in-out-circ (author-requested for the launch intro: slow start,
 /// accelerating through the middle, slowing again into the landing — not

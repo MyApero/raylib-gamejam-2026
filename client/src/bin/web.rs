@@ -1378,7 +1378,10 @@ fn frame(state: &mut State) {
     {
         world::draw_hold_ring(&mut d, mouse_screen, frac);
     }
-    d.draw_text(&format!("ws: {}", state.ws_status), 10, 700, 12, Color::new(120, 120, 130, 200));
+    // Author-requested: stacked with the FPS counter at the bottom right
+    // (was bottom-left, on its own) so both debug readouts live in one
+    // corner instead of opposite ones.
+    d.draw_text(&format!("ws: {}", state.ws_status), 640, 682, 12, Color::new(120, 120, 130, 200));
     d.draw_fps(640, 700);
 }
 

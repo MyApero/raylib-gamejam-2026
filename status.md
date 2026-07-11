@@ -7,7 +7,92 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** Author-requested UX polish, five `other_ideas.md` items
+**Current batch:** Second author follow-up in the same sitting — the
+pencil icon is STILL reported invisible after the first widen-and-outline
+fix, plus one more tooltip content item.
+
+1. **Center button tooltip** — added to `BUTTON_TOOLTIPS`: "Center" / "Go
+   back to your island".
+2. **Pencil icon still invisible, round 2** — re-verified the geometry by
+   hand-tracing the actual rotated coordinates for the current parameters
+   (center (261,698), half_w 4.5, angle 45°): all 7 vertices land well
+   inside the 30x30 button bounds, form non-degenerate quads/triangle with
+   several-px extents, using `d.draw_triangle`/`draw_quad` (a thin wrapper
+   around the same call) — the exact primitive `draw_eraser_icon`,
+   `draw_cursor_scaled`, and `draw_heart` already use successfully in this
+   same file (confirmed working, per the author's own "the eraser is
+   great"). Checked raylib's actual `DrawTriangle` C source
+   (`raylib/src/rshapes.c`) to rule out a winding/culling explanation —
+   it's a textured-quad immediate-mode fill with no backface culling in
+   this render mode, consistent with this file already using both
+   triangle windings successfully elsewhere. Found no code defect. Widened
+   further as insurance (`half_w` 4.5 -> 6.0, outline 1.5px -> 2.0px) in
+   case of a rendering subtlety (window scaling / anti-aliasing at small
+   sizes) not visible from static analysis, but flagging this in status.md
+   rather than claiming confidence I don't have: the leading real-world
+   explanation is a stale build — this is a native `cargo run` process the
+   author manages themselves (doesn't hot-reload) or a cached web bundle,
+   not something I can rule out from here per the standing "author drives
+   real runtime testing" protocol. Needs the author's confirmation of a
+   fresh rebuild+restart before treating this as still-open.
+
+**Verify status:** `cargo check -p client --bin client --bin bot` and
+`./build-web.sh` both clean (the latter now also compiles the new `shared`
+crate pulled in by a concurrent author refactor — see `client/src/world.rs`/
+`server/src/lib.rs`, unrelated to this batch). Item 2 unresolved pending
+the author's rebuild confirmation.
+
+---
+
+**Previous batch:** Author follow-up on the batch immediately below — a
+pencil-visibility bugfix the author caught live, plus two more
+`other_ideas.md` items taken in the same sitting.
+
+1. **Pencil icon invisible (author-caught, real bug)** — "The eraser is
+   great but I can't see the pencil icon." Root cause: the first cut
+   (`half_w` 3.0, no outline, tip color `(70,55,45)`) computed correct,
+   non-degenerate geometry — verified by hand-tracing the rotated
+   coordinates — but a 6px-wide diagonal sliver with a tip color barely
+   lighter than the button's own `(40,40,48)` background reads as a faint
+   smear at 30px, not a recognizable shape. Fixed in `draw_pencil_icon`:
+   widened the body (`half_w` 3.0 -> 4.5), brightened the tip to a tan
+   `(190,150,100)`, and added a dark `(40,40,48)` stroke around the full
+   pentagon silhouette (same role `draw_eraser_icon`'s stroke already
+   plays) so it reads as a crisp shape against the dark button regardless
+   of fill color. `cargo check -p client` clean.
+2. **Footer button hover tooltips** — new `hovered_button_tooltip`/
+   `draw_button_tooltip` in `ui.rs`: hovering Colors, Eraser, Lock, Account,
+   or My Isle shows a title + 1-2 line description in a small box glued
+   near the cursor (flips above/below the cursor to stay on-screen — footer
+   buttons sit near the bottom edge, so the default is ABOVE the mouse,
+   opposite of the foreign-island tooltip's default-below), same visual
+   language as `draw_island_tooltip`. Content is the author's own copy
+   verbatim. No hover delay (unlike the 200ms island-info hover) — these
+   are small stationary buttons, not paint-stroke sweep zones, so an
+   instant tooltip doesn't risk flickering during normal play. Wired as the
+   lowest-priority branch in `draw()`'s modal-exclusivity else-if chain, so
+   it never fights the overlay/account/popup/help-overlay modals for the
+   same screen space.
+3. **ws-status position (web only)** — `bin/web.rs` drew `"ws: {status}"`
+   at bottom-LEFT (10, 700) and the FPS counter at bottom-right (640, 700)
+   — two debug readouts in opposite corners. Moved the ws-status label to
+   (640, 682), directly above the FPS box, per the author's ask.
+
+**Verify status:** all three targets (`cargo check -p server`, `cargo check
+-p client --bin client --bin bot`, `./build-web.sh` release/emscripten)
+clean, no warnings. Item 1's fix is REASONED from the corrected geometry/
+color math, not yet re-confirmed visually by the author (the very thing
+that caught the original bug) — flagging for a second look. Items 2-3 are
+new UI code, not hand-tested in a running client by me, per this repo's
+standing protocol.
+
+Files touched this batch: `client/src/ui.rs` (`draw_pencil_icon` rewrite,
+`hovered_button_tooltip`, `draw_button_tooltip`, `BUTTON_TOOLTIPS`,
+`draw()` wiring), `client/src/bin/web.rs` (ws-status position).
+
+---
+
+**Previous batch:** Author-requested UX polish, five `other_ideas.md` items
 taken directly (not routed through plan.md batching — a short, well-scoped
 punch list the author asked for in one sitting):
 
