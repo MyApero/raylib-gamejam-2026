@@ -4,50 +4,59 @@
 //! needs wasm-bindgen, which only targets wasm32-unknown-unknown — the two
 //! can't live in one binary. So this binary speaks SpacetimeDB's
 //! `v1.json.spacetimedb` WebSocket protocol by hand instead: a JS-side
-//! socket (see client/web/game.html) subscribes to the user table once,
-//! the server *pushes* a TransactionUpdate on every commit, and each frame
-//! we drain those pushed messages from a JS mailbox via
+//! socket (see client/web/game.html) subscribes to every table once, the
+//! server *pushes* a TransactionUpdate on every commit, and each frame we
+//! drain those pushed messages from a JS mailbox via
 //! emscripten_run_script_string — no polling, no blocking the render loop.
-//! Reducer calls (set_pos) go out over the same socket.
+//! Reducer calls go out over the same socket.
+//!
+//! Everything else — geometry, HSV, camera math, the HUD widgets — is
+//! shared with the native client via `world.rs`/`ui.rs` (`#[path]`-included
+//! below); this file only supplies the SpacetimeDB row plumbing, the input
+//! loop and touch handling, in place of `main.rs`'s SDK-backed `DbConnection`.
 //!
 //! Auth: the WebSocket route accepts the token as a `?token=` query param
 //! (browsers can't set headers on a WebSocket), and the server pushes an
 //! IdentityToken message first thing on every connection, so no separate
-//! HTTP identity bootstrap is needed. (If you're ever tempted to read
-//! spacetime-identity-token response *headers* over HTTP instead: the
-//! server's CORS layer doesn't expose them to browser JS — that's a trap.)
+//! HTTP identity bootstrap is needed.
 //!
-//! Wire-format quirks, verified against a live 2.7 server rather than the
-//! docs: rows inside InitialSubscription are named JSON objects, but rows
-//! inside transaction updates are positional arrays (parse_user_row
-//! handles both); and subscribers receive other clients' commits as
-//! TransactionUpdateLight, only their own as full TransactionUpdate.
+//! Wire-format quirks, verified live against the local 2.6.1 instance
+//! (see probe notes in status.md) rather than the docs:
+//! - Rows inside `InitialSubscription` and inside transaction updates are
+//!   BOTH JSON *strings* (double-encoded) holding either a named object
+//!   (`InitialSubscription`) or a positional array (transaction updates).
+//! - `Identity` encodes as `{"__identity__": "0x.."}` when named, or as a
+//!   nested one-element array `["0x.."]` when positional.
+//! - `Timestamp` encodes as `{"__timestamp_micros_since_unix_epoch__": N}`
+//!   when named, or `[N]` when positional.
+//! - `Option<T>` encodes the SAME way in BOTH the named and positional
+//!   forms: a two-element array `[tag, payload]`, tag `0` = `Some(payload)`,
+//!   tag `1` = `None` (payload is `{}`/`[]`, ignored).
+//! - Subscribers receive other clients' commits as `TransactionUpdateLight`,
+//!   only their own as full `TransactionUpdate`.
 
-#[path = "../hexgrid.rs"]
-mod hexgrid;
-use hexgrid::*;
+#[path = "../world.rs"]
+mod world;
+#[path = "../ui.rs"]
+mod ui;
+use world::constants::*;
 
 use raylib::prelude::*;
 use serde::Deserialize;
-use std::collections::HashMap;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
+use std::time::{Duration, Instant};
 
-/// Max rate at which we push our own cursor position (each send commits a
-/// transaction that's broadcast to every subscriber, so keep it sane).
-const SEND_INTERVAL: f64 = 1.0 / 30.0;
-/// Send set_pos at least this often even when idle so last_seen stays
-/// fresh — guards against ghost hexagons when a socket dies without a
-/// clean close (phone lock, wifi drop).
-const HEARTBEAT_INTERVAL: f64 = 1.0;
-/// Mirrors the native client's presence window over user.last_seen.
-const PRESENCE_TIMEOUT_SECS: i64 = 3;
-/// Bounds on the interpolation window measured from real update arrival
-/// gaps: floor keeps near-simultaneous updates from snapping, ceiling
-/// keeps a player who idled (heartbeats only) from smearing their first
-/// move across a full second.
-const MIN_LERP_WINDOW: f64 = 0.02;
-const MAX_LERP_WINDOW: f64 = 0.25;
+/// Client-side cap on paint-reducer calls while dragging; the server's own
+/// token bucket is the real limit, this just avoids spamming calls faster
+/// than a stroke can usefully register. Mirrors `main.rs`'s native client.
+const CLIENT_PAINT_HZ: f32 = 100.0;
+/// Zoom level used whenever the camera centers on the player's own island.
+const ISLAND_FIT_ZOOM: f32 = 13.0;
+const LONG_PRESS_HOLD: Duration = Duration::from_millis(400);
+const LONG_PRESS_TOL_PX: f32 = 8.0;
 
 unsafe extern "C" {
     fn emscripten_run_script_string(script: *const c_char) -> *const c_char;
@@ -57,7 +66,6 @@ unsafe extern "C" {
         fps: i32,
         simulate_infinite_loop: bool,
     );
-    fn emscripten_get_now() -> f64;
 }
 
 /// Everything the JS side hands us once per frame — see stdb.frame() in
@@ -74,58 +82,280 @@ struct FrameData {
     msgs: Vec<String>,
 }
 
+#[derive(Clone)]
 struct UserRow {
-    identity_hex: String,
-    x: f32,
-    y: f32,
+    name: Option<String>,
+    online: bool,
+    cx: f32,
+    cy: f32,
     last_seen_micros: i64,
+    hue: u16,
+    sat: u8,
+    val: u8,
+    locked: bool,
+    xp: u64,
 }
 
-struct CellRow {
-    id: u32,
+struct InventoryRow {
+    owner_hex: String,
+    hue: u16,
+    obtained_with_hex: Option<String>,
+}
+
+struct IslandRow {
+    owner_hex: String,
+    slot: u32,
+}
+
+struct IslandCellRow {
+    island_id: u32,
+    q: i32,
+    r: i32,
     color: u32,
 }
 
-/// Other players' positions arrive as discrete pushes (at whatever rate
-/// that player sends), which reads as choppy motion if drawn directly. We
-/// interpolate from where we were drawing when the update landed (`prev`)
-/// towards the new position (`target`) over `window` — the measured gap
-/// between this player's last two updates — so rendering stays smooth at
-/// any inbound rate.
-struct PlayerVisual {
-    prev: Vector2,
-    target: Vector2,
-    updated_at: f64,
-    window: f64,
-    last_seen_micros: i64,
+struct MarginCellRow {
+    q: i32,
+    r: i32,
+    color: u32,
 }
 
-impl PlayerVisual {
-    fn render_pos(&self, now: f64) -> Vector2 {
-        let t = ((now - self.updated_at) / self.window).clamp(0.0, 1.0) as f32;
-        Vector2::new(
-            self.prev.x + (self.target.x - self.prev.x) * t,
-            self.prev.y + (self.target.y - self.prev.y) * t,
-        )
+/// Strips the "0x" prefix and lowercases, so identities compare equal no
+/// matter which encoding they arrived in.
+fn normalize_identity(hex: &str) -> String {
+    hex.strip_prefix("0x").unwrap_or(hex).to_lowercase()
+}
+
+fn short_hex(id: &str) -> &str {
+    &id[..8.min(id.len())]
+}
+
+/// A table row as delivered over the wire is either a named JSON object
+/// (InitialSubscription) or a positional JSON array matching schema field
+/// order (transaction updates) — this lets every `parse_*` function read a
+/// field by name OR index without caring which encoding it got.
+enum RowView<'a> {
+    Obj(&'a serde_json::Map<String, Value>),
+    Arr(&'a Vec<Value>),
+}
+
+impl<'a> RowView<'a> {
+    fn field(&self, name: &str, index: usize) -> Option<&'a Value> {
+        match self {
+            RowView::Obj(m) => m.get(name),
+            RowView::Arr(a) => a.get(index),
+        }
     }
 }
 
-struct State {
-    rl: RaylibHandle,
-    thread: RaylibThread,
-    /// Our identity (lowercase hex, no 0x), from the IdentityToken message.
-    my_identity: Option<String>,
-    players: HashMap<String, PlayerVisual>,
-    /// Painted board state, id (col<<16|row) -> 0xRRGGBB color.
-    cells: HashMap<u32, u32>,
-    /// Precomputed once: all (col, row, center) triples.
-    grid: Vec<(u32, u32, Vector2)>,
-    selected: usize,
-    stroke_last: Option<u32>,
-    ws_status: String,
-    now_micros: i64,
-    last_send: f64,
-    last_sent_pos: Option<(f32, f32)>,
+fn row_view(v: &Value) -> Option<RowView<'_>> {
+    if let Some(m) = v.as_object() {
+        Some(RowView::Obj(m))
+    } else if let Some(a) = v.as_array() {
+        Some(RowView::Arr(a))
+    } else {
+        None
+    }
+}
+
+/// `Identity`: named `{"__identity__": "0x.."}` or positional `["0x.."]`.
+fn identity_hex(v: &Value) -> Option<String> {
+    if let Some(s) = v.get("__identity__").and_then(|s| s.as_str()) {
+        return Some(normalize_identity(s));
+    }
+    v.as_array()?.first()?.as_str().map(normalize_identity)
+}
+
+/// `Timestamp`: named `{"__timestamp_micros_since_unix_epoch__": N}` or
+/// positional `[N]`.
+fn timestamp_micros(v: &Value) -> i64 {
+    v.get("__timestamp_micros_since_unix_epoch__")
+        .and_then(|t| t.as_i64())
+        .or_else(|| v.as_array()?.first()?.as_i64())
+        .unwrap_or(0)
+}
+
+/// `Option<T>`: `[0, payload]` = Some(payload), `[1, _]` = None — same shape
+/// whether the row itself is named or positional.
+fn opt_value(v: &Value) -> Option<&Value> {
+    let arr = v.as_array()?;
+    if arr.first()?.as_u64()? == 0 {
+        arr.get(1)
+    } else {
+        None
+    }
+}
+
+fn parse_user(v: &Value) -> Option<(String, UserRow)> {
+    let r = row_view(v)?;
+    let identity = identity_hex(r.field("identity", 0)?)?;
+    Some((
+        identity,
+        UserRow {
+            name: r
+                .field("name", 1)?
+                .pipe(opt_value)
+                .and_then(|s| s.as_str())
+                .map(String::from),
+            online: r.field("online", 2)?.as_bool()?,
+            cx: r.field("cx", 3)?.as_f64()? as f32,
+            cy: r.field("cy", 4)?.as_f64()? as f32,
+            last_seen_micros: timestamp_micros(r.field("last_seen", 5)?),
+            hue: r.field("hue", 6)?.as_u64()? as u16,
+            sat: r.field("sat", 7)?.as_u64()? as u8,
+            val: r.field("val", 8)?.as_u64()? as u8,
+            locked: r.field("locked", 9)?.as_bool()?,
+            xp: r.field("xp", 10)?.as_u64()?,
+        },
+    ))
+}
+
+fn parse_inventory(v: &Value) -> Option<(u64, InventoryRow)> {
+    let r = row_view(v)?;
+    let id = r.field("id", 0)?.as_u64()?;
+    Some((
+        id,
+        InventoryRow {
+            owner_hex: identity_hex(r.field("owner", 1)?)?,
+            hue: r.field("hue", 2)?.as_u64()? as u16,
+            obtained_with_hex: r.field("obtained_with", 4)?.pipe(opt_value).and_then(identity_hex),
+        },
+    ))
+}
+
+fn parse_island(v: &Value) -> Option<(u32, IslandRow)> {
+    let r = row_view(v)?;
+    let id = r.field("id", 0)?.as_u64()? as u32;
+    Some((
+        id,
+        IslandRow {
+            owner_hex: identity_hex(r.field("owner", 1)?)?,
+            slot: r.field("slot", 2)?.as_u64()? as u32,
+        },
+    ))
+}
+
+fn parse_island_cell(v: &Value) -> Option<(u32, IslandCellRow)> {
+    let r = row_view(v)?;
+    let id = r.field("id", 0)?.as_u64()? as u32;
+    Some((
+        id,
+        IslandCellRow {
+            island_id: r.field("island_id", 1)?.as_u64()? as u32,
+            q: r.field("q", 2)?.as_i64()? as i32,
+            r: r.field("r", 3)?.as_i64()? as i32,
+            color: r.field("color", 4)?.as_u64()? as u32,
+        },
+    ))
+}
+
+fn parse_margin_cell(v: &Value) -> Option<(u32, MarginCellRow)> {
+    let r = row_view(v)?;
+    let id = r.field("id", 0)?.as_u64()? as u32;
+    Some((
+        id,
+        MarginCellRow {
+            q: r.field("q", 1)?.as_i64()? as i32,
+            r: r.field("r", 2)?.as_i64()? as i32,
+            color: r.field("color", 3)?.as_u64()? as u32,
+        },
+    ))
+}
+
+/// Small pipe-forward helper so the `Option<&Value>` chains above (field ->
+/// unwrap tag -> read payload) read left to right instead of nesting.
+trait Pipe: Sized {
+    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
+        f(self)
+    }
+}
+impl<T> Pipe for T {}
+
+/// Rows inside `updates[].inserts`/`deletes` are JSON *strings*
+/// (double-encoded), in both `InitialSubscription` and transaction updates.
+fn parse_row_str<K, T>(s: &Value, parse: impl Fn(&Value) -> Option<(K, T)>) -> Option<(K, T)> {
+    let inner = serde_json::from_str::<Value>(s.as_str()?).ok()?;
+    parse(&inner)
+}
+
+struct Tables {
+    users: HashMap<String, UserRow>,
+    inventory: HashMap<u64, InventoryRow>,
+    islands: HashMap<u32, IslandRow>,
+    island_cells: HashMap<u32, IslandCellRow>,
+    margin_cells: HashMap<u32, MarginCellRow>,
+}
+
+impl Tables {
+    fn new() -> Self {
+        Self {
+            users: HashMap::new(),
+            inventory: HashMap::new(),
+            islands: HashMap::new(),
+            island_cells: HashMap::new(),
+            margin_cells: HashMap::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.users.clear();
+        self.inventory.clear();
+        self.islands.clear();
+        self.island_cells.clear();
+        self.margin_cells.clear();
+    }
+
+    fn apply(&mut self, db_update: &Value) {
+        let Some(tables) = db_update.get("tables").and_then(|v| v.as_array()) else {
+            return;
+        };
+        for table in tables {
+            let Some(name) = table.get("table_name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            let Some(updates) = table.get("updates").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            match name {
+                "user" => apply_updates(&mut self.users, updates, parse_user),
+                "inventory" => apply_updates(&mut self.inventory, updates, parse_inventory),
+                "island" => apply_updates(&mut self.islands, updates, parse_island),
+                "island_cell" => apply_updates(&mut self.island_cells, updates, parse_island_cell),
+                "margin_cell" => apply_updates(&mut self.margin_cells, updates, parse_margin_cell),
+                // `config` is subscribed to (mirrors plan.md's table list) but
+                // has no client-side consumer yet — nothing to apply.
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Generic insert/delete application for one table's `updates` array. An
+/// updated row arrives as a delete+insert pair for the same key, so this
+/// only needs to apply deletes then inserts, in that order, per update
+/// entry (never skips a delete just because *some* row got inserted this
+/// batch — only if the SAME key was re-inserted).
+fn apply_updates<K: std::hash::Hash + Eq, T>(
+    map: &mut HashMap<K, T>,
+    updates: &[Value],
+    parse: impl Fn(&Value) -> Option<(K, T)>,
+) {
+    for update in updates {
+        if let Some(deletes) = update.get("deletes").and_then(|v| v.as_array()) {
+            for d in deletes {
+                if let Some((k, _)) = parse_row_str(d, &parse) {
+                    map.remove(&k);
+                }
+            }
+        }
+        if let Some(inserts) = update.get("inserts").and_then(|v| v.as_array()) {
+            for i in inserts {
+                if let Some((k, row)) = parse_row_str(i, &parse) {
+                    map.insert(k, row);
+                }
+            }
+        }
+    }
 }
 
 fn run_js(js: &str) -> String {
@@ -141,205 +371,180 @@ fn run_js(js: &str) -> String {
     }
 }
 
-/// Strips the "0x" prefix and lowercases, so identities compare equal no
-/// matter which encoding they arrived in.
-fn normalize_identity(hex: &str) -> String {
-    hex.strip_prefix("0x").unwrap_or(hex).to_lowercase()
-}
-
-/// Parses one user row in either of the two encodings the server actually
-/// sends (see module docs): a named object
-///   {"identity":{"__identity__":"0x.."},"name":..,"online":..,"x":..,"y":..,
-///    "last_seen":{"__timestamp_micros_since_unix_epoch__":..}}
-/// or a positional array matching the schema order
-///   [["0x.."], name, online, x, y, [micros]].
-fn parse_user_row(v: &serde_json::Value) -> Option<UserRow> {
-    if let Some(obj) = v.as_object() {
-        Some(UserRow {
-            identity_hex: normalize_identity(obj.get("identity")?.get("__identity__")?.as_str()?),
-            x: obj.get("x")?.as_f64()? as f32,
-            y: obj.get("y")?.as_f64()? as f32,
-            last_seen_micros: obj
-                .get("last_seen")
-                .and_then(|t| t.get("__timestamp_micros_since_unix_epoch__"))
-                .and_then(|t| t.as_i64())
-                .unwrap_or(0),
-        })
-    } else if let Some(arr) = v.as_array() {
-        Some(UserRow {
-            identity_hex: normalize_identity(arr.first()?.as_array()?.first()?.as_str()?),
-            x: arr.get(3)?.as_f64()? as f32,
-            y: arr.get(4)?.as_f64()? as f32,
-            last_seen_micros: arr
-                .get(5)
-                .and_then(|t| t.as_array())
-                .and_then(|a| a.first())
-                .and_then(|t| t.as_i64())
-                .unwrap_or(0),
-        })
-    } else {
-        None
-    }
-}
-
-/// Rows inside table updates are JSON *strings* (double-encoded).
-fn parse_user_row_str(s: &serde_json::Value) -> Option<UserRow> {
-    let inner = serde_json::from_str::<serde_json::Value>(s.as_str()?).ok()?;
-    parse_user_row(&inner)
-}
-
-/// Parses one cell row in either encoding (mirrors `parse_user_row`): a named
-/// object `{"id":..,"col":..,"row":..,"color":..,"painted_by":..,"painted_at":..}`
-/// or a positional array `[id, col, row, color, [painted_by], [painted_at]]`.
-fn parse_cell_row(v: &serde_json::Value) -> Option<CellRow> {
-    if let Some(obj) = v.as_object() {
-        Some(CellRow {
-            id: obj.get("id")?.as_u64()? as u32,
-            color: obj.get("color")?.as_u64()? as u32,
-        })
-    } else if let Some(arr) = v.as_array() {
-        Some(CellRow {
-            id: arr.first()?.as_u64()? as u32,
-            color: arr.get(3)?.as_u64()? as u32,
-        })
-    } else {
-        None
-    }
-}
-
-/// Rows inside table updates are JSON *strings* (double-encoded).
-fn parse_cell_row_str(s: &serde_json::Value) -> Option<CellRow> {
-    let inner = serde_json::from_str::<serde_json::Value>(s.as_str()?).ok()?;
-    parse_cell_row(&inner)
-}
-
-fn upsert(players: &mut HashMap<String, PlayerVisual>, row: UserRow, t: f64) {
-    let new_target = Vector2::new(row.x, row.y);
-    players
-        .entry(row.identity_hex)
-        .and_modify(|p| {
-            p.prev = p.render_pos(t);
-            p.window = (t - p.updated_at).clamp(MIN_LERP_WINDOW, MAX_LERP_WINDOW);
-            p.target = new_target;
-            p.updated_at = t;
-            p.last_seen_micros = row.last_seen_micros;
-        })
-        .or_insert(PlayerVisual {
-            prev: new_target,
-            target: new_target,
-            updated_at: t,
-            window: MIN_LERP_WINDOW,
-            last_seen_micros: row.last_seen_micros,
-        });
-}
-
-/// Applies the insert/delete row sets of one DatabaseUpdate, routed by
-/// `table_name` to either `players` (table `user`) or `cells` (table
-/// `cell`). An updated row arrives as a delete+insert pair for the same key,
-/// so deletes only evict entries that were not re-inserted in the same
-/// update.
-fn apply_database_update(
-    players: &mut HashMap<String, PlayerVisual>,
-    cells: &mut HashMap<u32, u32>,
-    db_update: &serde_json::Value,
-    t: f64,
-) {
-    let Some(tables) = db_update.get("tables").and_then(|v| v.as_array()) else {
-        return;
-    };
-    for table in tables {
-        match table.get("table_name").and_then(|n| n.as_str()) {
-            Some("user") => apply_user_table_update(players, table, t),
-            Some("cell") => apply_cell_table_update(cells, table),
-            _ => {}
-        }
-    }
-}
-
-fn apply_user_table_update(players: &mut HashMap<String, PlayerVisual>, table: &serde_json::Value, t: f64) {
-    let Some(updates) = table.get("updates").and_then(|v| v.as_array()) else {
-        return;
-    };
-    let mut deleted: Vec<String> = Vec::new();
-    let mut inserted: Vec<UserRow> = Vec::new();
-    for update in updates {
-        if let Some(deletes) = update.get("deletes").and_then(|v| v.as_array()) {
-            deleted.extend(deletes.iter().filter_map(parse_user_row_str).map(|r| r.identity_hex));
-        }
-        if let Some(inserts) = update.get("inserts").and_then(|v| v.as_array()) {
-            inserted.extend(inserts.iter().filter_map(parse_user_row_str));
-        }
-    }
-    for id in deleted {
-        if !inserted.iter().any(|r| r.identity_hex == id) {
-            players.remove(&id);
-        }
-    }
-    for row in inserted {
-        upsert(players, row, t);
-    }
-}
-
-fn apply_cell_table_update(cells: &mut HashMap<u32, u32>, table: &serde_json::Value) {
-    let Some(updates) = table.get("updates").and_then(|v| v.as_array()) else {
-        return;
-    };
-    let mut deleted: Vec<u32> = Vec::new();
-    let mut inserted: Vec<CellRow> = Vec::new();
-    for update in updates {
-        if let Some(deletes) = update.get("deletes").and_then(|v| v.as_array()) {
-            deleted.extend(deletes.iter().filter_map(parse_cell_row_str).map(|r| r.id));
-        }
-        if let Some(inserts) = update.get("inserts").and_then(|v| v.as_array()) {
-            inserted.extend(inserts.iter().filter_map(parse_cell_row_str));
-        }
-    }
-    for id in deleted {
-        if !inserted.iter().any(|r| r.id == id) {
-            cells.remove(&id);
-        }
-    }
-    for row in inserted {
-        cells.insert(row.id, row.color);
-    }
-}
-
-fn handle_message(state: &mut State, raw: &str, t: f64) {
-    let Ok(msg) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return;
-    };
-    if let Some(id_token) = msg.get("IdentityToken") {
-        if let Some(hex) = id_token.get("identity").and_then(|i| i.get("__identity__")).and_then(|i| i.as_str()) {
-            state.my_identity = Some(normalize_identity(hex));
-        }
-    } else if let Some(initial) = msg.get("InitialSubscription") {
-        // Reconnects replay the full table; drop stale local state first.
-        state.players.clear();
-        state.cells.clear();
-        if let Some(db_update) = initial.get("database_update") {
-            apply_database_update(&mut state.players, &mut state.cells, db_update, t);
-        }
-    } else if let Some(tx) = msg.get("TransactionUpdate") {
-        // Received for our *own* reducer calls (we're the caller).
-        if let Some(db_update) = tx.get("status").and_then(|s| s.get("Committed")) {
-            apply_database_update(&mut state.players, &mut state.cells, db_update, t);
-        }
-    } else if let Some(light) = msg.get("TransactionUpdateLight") {
-        // What the server actually sends subscribers for *other* clients'
-        // reducer calls (verified live) — miss this and other players
-        // never move.
-        if let Some(db_update) = light.get("update") {
-            apply_database_update(&mut state.players, &mut state.cells, db_update, t);
-        }
-    }
-}
-
-fn now_secs() -> f64 {
-    unsafe { emscripten_get_now() / 1000.0 }
+/// Calls a reducer with JSON-encoded args, safely embedded as JS string
+/// literals regardless of content (arbitrary player-typed text in
+/// `set_name` included) — both the reducer name and the args-array JSON are
+/// passed through `serde_json::to_string` before being spliced into the JS
+/// source `run_js` hands to `eval`, so quotes/backslashes/newlines in a
+/// player name can't break out of the literal or inject script.
+fn call_reducer(name: &str, args: Value) {
+    let js_name = serde_json::to_string(name).unwrap();
+    let js_args = serde_json::to_string(&args.to_string()).unwrap();
+    run_js(&format!("window.stdb && window.stdb.callReducer({js_name}, {js_args})"));
 }
 
 fn is_present(last_seen_micros: i64, now_micros: i64) -> bool {
     now_micros.saturating_sub(last_seen_micros) < PRESENCE_TIMEOUT_SECS * 1_000_000
+}
+
+/// What a hovered world cell is paintable as, from `me`'s point of view —
+/// mirrors `main.rs`'s `Paintable` against this file's plain `Tables`
+/// instead of `ctx.db`.
+enum Paintable {
+    OwnIsland(i32, i32),
+    Margin(i32, i32),
+    None,
+}
+
+fn my_island<'a>(tables: &'a Tables, me: &str) -> Option<(&'a IslandRow, u32)> {
+    tables.islands.iter().find(|(_, isl)| isl.owner_hex == me).map(|(&id, isl)| (isl, id))
+}
+
+fn island_world_center(island: &IslandRow) -> Vector2 {
+    let (q, r) = world::slot_coords(island.slot);
+    let (cx, cy) = world::slot_center(q, r);
+    world::axial_to_world(cx, cy)
+}
+
+fn classify(tables: &Tables, me: &str, world_q: i32, world_r: i32) -> Paintable {
+    if let Some((island, _)) = my_island(tables, me) {
+        let (q, r) = world::slot_coords(island.slot);
+        let (ccx, ccy) = world::slot_center(q, r);
+        let (lq, lr) = (world_q - ccx, world_r - ccy);
+        if world::hexdist(lq, lr) <= ISLAND_RADIUS {
+            return Paintable::OwnIsland(lq, lr);
+        }
+    }
+    if !world::in_any_island_territory(world_q, world_r) {
+        return Paintable::Margin(world_q, world_r);
+    }
+    Paintable::None
+}
+
+/// Like `classify`, but considers every island — long-press merge can
+/// target any player's painted tile.
+fn island_at(tables: &Tables, world_q: i32, world_r: i32) -> Option<(u32, i32, i32)> {
+    tables.islands.iter().find_map(|(&id, island)| {
+        let (q, r) = world::slot_coords(island.slot);
+        let (ccx, ccy) = world::slot_center(q, r);
+        let (lq, lr) = (world_q - ccx, world_r - ccy);
+        (world::hexdist(lq, lr) <= ISLAND_RADIUS).then_some((id, lq, lr))
+    })
+}
+
+/// The painted cell (if any) at absolute world axial `(q, r)`: island cell
+/// (`kind` 0) or margin cell (`kind` 1), with its row id and current hue.
+fn merge_target_at(tables: &Tables, world_q: i32, world_r: i32) -> Option<(u8, u32, u16)> {
+    if let Some((island_id, lq, lr)) = island_at(tables, world_q, world_r) {
+        return tables
+            .island_cells
+            .iter()
+            .find(|(_, c)| c.island_id == island_id && c.q == lq && c.r == lr)
+            .map(|(&id, c)| (0u8, id, world::unpack_hsv(c.color).0));
+    }
+    if !world::in_any_island_territory(world_q, world_r) {
+        return tables
+            .margin_cells
+            .iter()
+            .find(|(_, c)| c.q == world_q && c.r == world_r)
+            .map(|(&id, c)| (1u8, id, world::unpack_hsv(c.color).0));
+    }
+    None
+}
+
+/// Display label for a merge partner in the "new color" toast: their name if
+/// set, else their short identity hex.
+fn player_label(tables: &Tables, id: &str) -> String {
+    tables
+        .users
+        .get(id)
+        .and_then(|u| u.name.clone().filter(|n| !n.is_empty()))
+        .unwrap_or_else(|| short_hex(id).to_string())
+}
+
+/// Whether `me` already effectively has `hue` unlocked (within
+/// `HUE_TOLERANCE`) — mirrors `main.rs`'s `have_hue`.
+fn have_hue(tables: &Tables, me: &str, hue: u16) -> bool {
+    tables
+        .inventory
+        .values()
+        .any(|inv| inv.owner_hex == me && world::hue_dist(inv.hue, hue) <= HUE_TOLERANCE)
+}
+
+/// In-flight long-press-to-merge gesture — mirrors `main.rs`'s `LongPress`.
+struct LongPress {
+    press_screen: Vector2,
+    press_at: Instant,
+    target: Option<(u8, u32, u16)>,
+    fired: bool,
+}
+
+/// Two-finger pinch/pan gesture: pins the world point that was under the
+/// midpoint of the two fingers at gesture start, so both fingers moving
+/// together (pan) and apart/together (pinch-zoom) fall out of the same
+/// anchor rather than needing separate delta bookkeeping.
+struct Pinch {
+    anchor_world: Vector2,
+    start_dist: f32,
+    start_zoom: f32,
+}
+
+struct State {
+    rl: RaylibHandle,
+    thread: RaylibThread,
+    my_identity: Option<String>,
+    tables: Tables,
+    camera: Camera2D,
+    centered_on_island: bool,
+    ui_state: ui::UiState,
+    known_inventory_ids: HashSet<u64>,
+    inventory_seeded: bool,
+    long_press: Option<LongPress>,
+    pinch: Option<Pinch>,
+    stroke_last: Option<(u8, i32, i32)>,
+    last_paint_at: Instant,
+    last_sent_pos: Option<Vector2>,
+    last_sent_at: Instant,
+    ws_status: String,
+    now_micros: i64,
+}
+
+fn handle_message(state: &mut State, raw: &str) {
+    let Ok(msg) = serde_json::from_str::<Value>(raw) else {
+        return;
+    };
+    if let Some(id_token) = msg.get("IdentityToken") {
+        if let Some(hex) = id_token.get("identity").and_then(identity_hex) {
+            state.my_identity = Some(hex);
+        }
+    } else if let Some(initial) = msg.get("InitialSubscription") {
+        // Reconnects replay the full table; drop stale local state first.
+        state.tables.clear();
+        if let Some(db_update) = initial.get("database_update") {
+            state.tables.apply(db_update);
+        }
+    } else if let Some(tx) = msg.get("TransactionUpdate") {
+        // Received for our *own* reducer calls (we're the caller). A
+        // rejected call (e.g. rate limit) carries `status: {"Failed": ..}`
+        // instead, which simply has no `database_update` to apply.
+        if let Some(db_update) = tx.get("status").and_then(|s| s.get("Committed")) {
+            state.tables.apply(db_update);
+        }
+    } else if let Some(light) = msg.get("TransactionUpdateLight") {
+        // What the server actually sends subscribers for *other* clients'
+        // reducer calls — miss this and other players never move.
+        if let Some(db_update) = light.get("update") {
+            state.tables.apply(db_update);
+        }
+    }
+}
+
+fn recenter(camera: &mut Camera2D, island: &IslandRow) {
+    camera.target = island_world_center(island);
+    camera.zoom = ISLAND_FIT_ZOOM;
+    // Mouse-wheel/pinch zoom re-anchors `offset` to the cursor/fingers, so
+    // reset it back to screen-center or the island lands off-target.
+    camera.offset = Vector2::new(360.0, 360.0);
 }
 
 extern "C" fn on_frame(arg: *mut c_void) {
@@ -348,8 +553,6 @@ extern "C" fn on_frame(arg: *mut c_void) {
 }
 
 fn frame(state: &mut State) {
-    let t = now_secs();
-
     // One JS call pulls in everything the socket received since last frame.
     let raw = run_js("window.stdb ? window.stdb.frame() : '{}'");
     let data: FrameData = serde_json::from_str(&raw).unwrap_or_default();
@@ -359,40 +562,173 @@ fn frame(state: &mut State) {
         state.my_identity = data.identity.as_deref().map(normalize_identity);
     }
     for msg in &data.msgs {
-        handle_message(state, msg, t);
+        handle_message(state, msg);
     }
 
-    let mouse = state.rl.get_mouse_position();
+    let me = state.my_identity.clone();
+    let me = me.as_deref();
+    let mouse_screen = state.rl.get_mouse_position();
+    let mouse_world = state.rl.get_screen_to_world2D(mouse_screen, state.camera);
 
-    if state.my_identity.is_some() {
+    if let Some(me) = me {
+        if !state.centered_on_island {
+            if let Some((island, _)) = my_island(&state.tables, me) {
+                recenter(&mut state.camera, island);
+                state.centered_on_island = true;
+            }
+        }
+    }
+
+    // Inventory-insert watch (merge toast): toast + last3 nudge when a new
+    // row for `me` appears. Mirrors `main.rs` exactly.
+    if let Some(me) = me {
+        if !state.inventory_seeded {
+            if state.tables.inventory.values().any(|i| i.owner_hex == me) {
+                state.known_inventory_ids = state.tables.inventory.keys().copied().collect();
+                state.inventory_seeded = true;
+            }
+        } else {
+            for (&id, inv) in &state.tables.inventory {
+                if state.known_inventory_ids.insert(id) && inv.owner_hex == me {
+                    let label = inv
+                        .obtained_with_hex
+                        .as_deref()
+                        .map_or_else(|| "someone".to_string(), |p| player_label(&state.tables, p));
+                    state.ui_state.show_merge_toast(inv.hue, &label);
+                }
+            }
+        }
+    }
+
+    let online = state.tables.users.values().filter(|u| u.online).count();
+    let total = state.tables.users.len();
+
+    // HUD: snapshot server state, run widget input, apply resulting reducer
+    // calls. Must run before the map-input blocks below so they can see
+    // `ui_state.overlay_open` (the overlay is modal).
+    if let Some(me) = me {
+        let user = state.tables.users.get(me);
+        let hues: Vec<u16> = state
+            .tables
+            .inventory
+            .values()
+            .filter(|i| i.owner_hex == me)
+            .map(|i| i.hue)
+            .collect();
+        let (hue, sat, val) = user.map_or((0, 40, 100), |u| (u.hue, u.sat, u.val));
+        let xp = user.map_or(0, |u| u.xp);
+        let locked = user.is_some_and(|u| u.locked);
+        let level = world::level_of(xp);
+        state.ui_state.sync_name_once(user.and_then(|u| u.name.as_ref()));
+
+        let short_id = me.to_string();
+        let info = ui::HudInfo {
+            short_id: short_hex(&short_id),
+            level,
+            xp,
+            online,
+            total,
+            locked,
+            brush: (hue, sat, val),
+            sat_cap: world::sat_cap(level),
+            hues: &hues,
+        };
+        let actions = ui::handle_input(&mut state.rl, &mut state.ui_state, &info);
+        if let Some((h, s, v)) = actions.set_brush {
+            call_reducer("set_brush", serde_json::json!([h, s, v]));
+        }
+        if let Some(name) = actions.set_name {
+            call_reducer("set_name", serde_json::json!([name]));
+        }
+        if let Some(locked) = actions.set_lock {
+            call_reducer("set_lock", serde_json::json!([locked]));
+        }
+        if actions.center_camera {
+            if let Some((island, _)) = my_island(&state.tables, me) {
+                recenter(&mut state.camera, island);
+            }
+        }
+    }
+    let map_input_allowed = !state.ui_state.overlay_open;
+
+    // Two-finger pinch/pan (touch); single-finger tap/drag is already
+    // translated to ordinary mouse events by raylib's web backend, so the
+    // mouse-driven paint/pan/long-press code below covers it unchanged.
+    let touch_count = state.rl.get_touch_point_count();
+    let gesturing = touch_count >= 2;
+    if map_input_allowed && gesturing {
+        let t0 = state.rl.get_touch_position(0);
+        let t1 = state.rl.get_touch_position(1);
+        let mid = Vector2::new((t0.x + t1.x) / 2.0, (t0.y + t1.y) / 2.0);
+        let dist = ((t1.x - t0.x).powi(2) + (t1.y - t0.y).powi(2)).sqrt().max(1.0);
+        if state.pinch.is_none() {
+            let anchor_world = state.rl.get_screen_to_world2D(mid, state.camera);
+            state.pinch = Some(Pinch { anchor_world, start_dist: dist, start_zoom: state.camera.zoom });
+        }
+        let pinch = state.pinch.as_ref().unwrap();
+        state.camera.zoom = (pinch.start_zoom * (dist / pinch.start_dist)).clamp(0.25, 60.0);
+        state.camera.offset = mid;
+        state.camera.target = pinch.anchor_world;
+    } else {
+        state.pinch = None;
+    }
+
+    // Zoom toward the cursor (official raylib recipe), desktop-browser mice
+    // only — touch pinch is handled above.
+    let wheel = if map_input_allowed && !gesturing { state.rl.get_mouse_wheel_move() } else { 0.0 };
+    if wheel != 0.0 {
+        state.camera.offset = mouse_screen;
+        state.camera.target = mouse_world;
+        state.camera.zoom = (state.camera.zoom * (1.0 + wheel * 0.1)).clamp(0.25, 60.0);
+    }
+
+    let panning = map_input_allowed
+        && !gesturing
+        && (state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
+            || (state.rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
+                && state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)));
+    if panning {
+        let delta = state.rl.get_mouse_delta();
+        state.camera.target.x -= delta.x / state.camera.zoom;
+        state.camera.target.y -= delta.y / state.camera.zoom;
+    }
+
+    // Cursor heartbeat: throttled to CURSOR_SEND_HZ and only when moved.
+    if map_input_allowed && me.is_some() {
         let moved = state
             .last_sent_pos
-            .is_none_or(|(x, y)| (x - mouse.x).abs() > 0.5 || (y - mouse.y).abs() > 0.5);
-        let due_move = moved && t - state.last_send >= SEND_INTERVAL;
-        let due_heartbeat = t - state.last_send >= HEARTBEAT_INTERVAL;
-        if due_move || due_heartbeat {
-            state.last_send = t;
-            state.last_sent_pos = Some((mouse.x, mouse.y));
-            run_js(&format!(
-                "window.stdb && window.stdb.callReducer('set_pos', '[{}, {}]')",
-                mouse.x, mouse.y
-            ));
+            .is_none_or(|p| (p.x - mouse_world.x).abs() > 1e-4 || (p.y - mouse_world.y).abs() > 1e-4);
+        if moved && state.last_sent_at.elapsed() >= Duration::from_secs_f32(1.0 / CURSOR_SEND_HZ) {
+            call_reducer("set_pos", serde_json::json!([mouse_world.x, mouse_world.y]));
+            state.last_sent_pos = Some(mouse_world);
+            state.last_sent_at = Instant::now();
         }
     }
 
-    if state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
-        if let Some(i) = palette_hit(mouse) {
-            state.selected = i;
-        }
-    } else if state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && mouse.y < PALETTE_Y0 {
-        if let Some((c, r)) = nearest_cell(mouse) {
-            let id = id_of(c, r);
-            if Some(id) != state.stroke_last {
-                run_js(&format!(
-                    "window.stdb && window.stdb.callReducer('paint_cell', '[{}, {}, {}]')",
-                    c, r, PALETTE[state.selected]
-                ));
-                state.stroke_last = Some(id);
+    // Painting: left-drag (or one-finger touch-drag), not while panning or
+    // two-finger gesturing.
+    if map_input_allowed && !gesturing {
+        if let Some(me) = me {
+            if state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && !panning {
+                let (wq, wr) = world::world_to_axial(mouse_world);
+                let target = match classify(&state.tables, me, wq, wr) {
+                    Paintable::OwnIsland(lq, lr) => Some((0u8, lq, lr)),
+                    Paintable::Margin(q, r) => Some((1u8, q, r)),
+                    Paintable::None => None,
+                };
+                if let Some(key) = target {
+                    let fresh_cell = state.stroke_last != Some(key);
+                    let rate_ok = state.last_paint_at.elapsed() >= Duration::from_secs_f32(1.0 / CLIENT_PAINT_HZ);
+                    if fresh_cell && rate_ok {
+                        match key {
+                            (0, lq, lr) => call_reducer("paint_island_cell", serde_json::json!([lq, lr])),
+                            (1, q, r) => call_reducer("paint_margin_cell", serde_json::json!([q, r])),
+                            _ => unreachable!(),
+                        }
+                        state.stroke_last = Some(key);
+                        state.last_paint_at = Instant::now();
+                    }
+                }
             }
         }
     }
@@ -400,64 +736,192 @@ fn frame(state: &mut State) {
         state.stroke_last = None;
     }
 
-    let now_micros = state.now_micros;
-    let my_identity = state.my_identity.as_deref();
-    let selected = state.selected;
-
-    let mut d = state.rl.begin_drawing(&state.thread);
-    d.clear_background(Color::RAYWHITE);
-
-    for &(col, row, center) in &state.grid {
-        let fill = state
-            .cells
-            .get(&id_of(col, row))
-            .map_or(color_u32(BOARD_FILL), |&c| color_u32(c));
-        d.draw_poly(center, 6, HEX_SIZE, 0.0, fill);
-        d.draw_poly_lines_ex(center, 6, HEX_SIZE, 0.0, 1.0, color_u32(GRID_LINE));
+    // Long-press-to-merge: hold steady on a painted cell for
+    // LONG_PRESS_HOLD -> merge_with_cell. Mirrors `main.rs` exactly.
+    if !map_input_allowed || gesturing {
+        state.long_press = None;
+    } else if let Some(me) = me {
+        if !panning && state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
+            let (wq, wr) = world::world_to_axial(mouse_world);
+            state.long_press = Some(LongPress {
+                press_screen: mouse_screen,
+                press_at: Instant::now(),
+                target: merge_target_at(&state.tables, wq, wr).filter(|&(_, _, hue)| !have_hue(&state.tables, me, hue)),
+                fired: false,
+            });
+        }
+        if let Some(lp) = &mut state.long_press {
+            let dx = mouse_screen.x - lp.press_screen.x;
+            let dy = mouse_screen.y - lp.press_screen.y;
+            let moved = (dx * dx + dy * dy).sqrt() > LONG_PRESS_TOL_PX;
+            if moved || !state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) {
+                state.long_press = None;
+            } else if !lp.fired && lp.press_at.elapsed() >= LONG_PRESS_HOLD {
+                lp.fired = true;
+                if let Some((kind, id, _)) = lp.target {
+                    call_reducer("merge_with_cell", serde_json::json!([kind, id]));
+                }
+            }
+        }
+    } else {
+        state.long_press = None;
     }
 
-    for (identity_hex, player) in state
-        .players
+    // View-space culling bounds, padded well past the screen edges.
+    let pad = (ISLAND_RADIUS as f32) * 2.0 * 5.0;
+    let top_left = state.rl.get_screen_to_world2D(Vector2::new(0.0, 0.0), state.camera);
+    let bottom_right = state.rl.get_screen_to_world2D(Vector2::new(720.0, 720.0), state.camera);
+    let (view_min_x, view_max_x) = (top_left.x - pad, bottom_right.x + pad);
+    let (view_min_y, view_max_y) = (top_left.y - pad, bottom_right.y + pad);
+    let in_view = |p: Vector2| p.x >= view_min_x && p.x <= view_max_x && p.y >= view_min_y && p.y <= view_max_y;
+
+    let island_cell_colors: HashMap<(u32, i32, i32), u32> =
+        state.tables.island_cells.values().map(|c| ((c.island_id, c.q, c.r), c.color)).collect();
+
+    let other_cursors: Vec<(Vector2, Color)> = state
+        .tables
+        .users
         .iter()
-        .filter(|(_, p)| is_present(p.last_seen_micros, now_micros))
-        .filter(|(id, _)| Some(id.as_str()) != my_identity)
+        .filter(|(id, u)| is_present(u.last_seen_micros, state.now_micros) && Some(id.as_str()) != me)
+        .map(|(_, u)| {
+            (
+                state.rl.get_world_to_screen2D(Vector2::new(u.cx, u.cy), state.camera),
+                world::hsv_color(u.hue, u.sat, u.val),
+            )
+        })
+        .collect();
+
+    let camera = state.camera;
+    let hover_takeable;
+    let mut d = state.rl.begin_drawing(&state.thread);
+    d.clear_background(Color::new(18, 18, 24, 255));
+
     {
-        let m = player.render_pos(t);
-        draw_cursor(&mut d, m, color_for_hex(identity_hex));
+        let mut d2 = d.begin_mode2D(camera);
+
+        for (&island_id, island) in &state.tables.islands {
+            let (q, r) = world::slot_coords(island.slot);
+            let (fcx, fcy) = world::slot_center(q, r);
+            let center = world::axial_to_world(fcx, fcy);
+            if !in_view(center) {
+                continue;
+            }
+            let mine = me == Some(island.owner_hex.as_str());
+            for &(dq, dr) in world::island_offsets() {
+                let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
+                let fill = island_cell_colors.get(&(island_id, dq, dr)).map_or(Color::new(60, 60, 68, 255), |&c| {
+                    let (h, s, v) = world::unpack_hsv(c);
+                    world::hsv_color(h, s, v)
+                });
+                world::draw_hex(&mut d2, cell_world, 1.0, fill, Color::new(40, 40, 46, 255));
+            }
+            if mine {
+                let r_f = ISLAND_RADIUS as f32;
+                let corners: Vec<Vector2> = world::DIRECTIONS
+                    .iter()
+                    .map(|&(dq, dr)| world::axial_to_world(fcx + (dq as f32 * r_f) as i32, fcy + (dr as f32 * r_f) as i32))
+                    .collect();
+                for i in 0..6 {
+                    d2.draw_line_ex(corners[i], corners[(i + 1) % 6], 0.3, Color::GOLD);
+                }
+            }
+        }
+
+        for cell in state.tables.margin_cells.values() {
+            let p = world::axial_to_world(cell.q, cell.r);
+            if !in_view(p) {
+                continue;
+            }
+            let (h, s, v) = world::unpack_hsv(cell.color);
+            world::draw_hex(&mut d2, p, 1.0, world::hsv_color(h, s, v), Color::new(30, 30, 34, 255));
+        }
+
+        let (hq, hr) = world::world_to_axial(mouse_world);
+        let hover_paintable =
+            map_input_allowed && me.is_some_and(|me| !matches!(classify(&state.tables, me, hq, hr), Paintable::None));
+        if hover_paintable {
+            let hover_center = world::axial_to_world(hq, hr);
+            d2.draw_poly(hover_center, 6, 1.0, 0.0, Color::new(255, 255, 255, 70));
+            d2.draw_poly_lines_ex(hover_center, 6, 1.0, 0.0, 0.06, Color::new(255, 255, 255, 210));
+        }
+
+        hover_takeable = map_input_allowed
+            && me.is_some_and(|me| {
+                matches!(classify(&state.tables, me, hq, hr), Paintable::None)
+                    && merge_target_at(&state.tables, hq, hr).is_some_and(|(_, _, hue)| !have_hue(&state.tables, me, hue))
+            });
     }
 
-    draw_palette(&mut d, selected);
+    for &(screen, color) in &other_cursors {
+        world::draw_cursor(&mut d, screen, color);
+    }
 
-    d.draw_text("hex pixel-war (web)", 10, 10, 20, Color::DARKGRAY);
-    d.draw_text(
-        &format!("ws: {}", state.ws_status),
-        10,
-        35,
-        16,
-        Color::GRAY,
-    );
-    d.draw_fps(640, 10);
+    let own_brush = me.and_then(|me| state.tables.users.get(me)).map(|u| ((u.hue, u.sat, u.val), u.xp, u.locked));
+    if let (Some(me), Some((brush, xp, locked))) = (me, own_brush) {
+        let hues: Vec<u16> = state.tables.inventory.values().filter(|i| i.owner_hex == me).map(|i| i.hue).collect();
+        let level = world::level_of(xp);
+        let short_id = me.to_string();
+        let info = ui::HudInfo {
+            short_id: short_hex(&short_id),
+            level,
+            xp,
+            online,
+            total,
+            locked,
+            brush,
+            sat_cap: world::sat_cap(level),
+            hues: &hues,
+        };
+        ui::draw(&mut d, &state.ui_state, &info);
+
+        let (hue, sat, val) = brush;
+        world::draw_cursor(&mut d, mouse_screen, world::hsv_color(hue, sat, val));
+    }
+    if hover_takeable {
+        world::draw_plus_hint(&mut d, mouse_screen);
+    }
+    if let Some(frac) = state
+        .long_press
+        .as_ref()
+        .filter(|lp| !lp.fired && lp.target.is_some())
+        .map(|lp| (lp.press_at.elapsed().as_secs_f32() / LONG_PRESS_HOLD.as_secs_f32()).clamp(0.0, 1.0))
+    {
+        world::draw_hold_ring(&mut d, mouse_screen, frac);
+    }
+    d.draw_text(&format!("ws: {}", state.ws_status), 10, 700, 12, Color::new(120, 120, 130, 200));
+    d.draw_fps(640, 700);
 }
 
 fn main() {
-    let (rl, thread) = raylib::init()
+    let (mut rl, thread) = raylib::init()
         .size(720, 720) // jam hard constraint
-        .title("hex pixel-war — raylib 6.0 + SpacetimeDB (web)")
+        .title("hexaworld — raylib 6.0 + SpacetimeDB (web)")
         .build();
+    rl.hide_cursor(); // we draw our own pointer in the caller's brush color
 
     let state = Box::new(State {
         rl,
         thread,
         my_identity: None,
-        players: HashMap::new(),
-        cells: HashMap::new(),
-        grid: hexgrid::cells(),
-        selected: 1,
+        tables: Tables::new(),
+        camera: Camera2D {
+            offset: Vector2::new(360.0, 360.0),
+            target: Vector2::new(0.0, 0.0),
+            rotation: 0.0,
+            zoom: ISLAND_FIT_ZOOM,
+        },
+        centered_on_island: false,
+        ui_state: ui::UiState::new(),
+        known_inventory_ids: HashSet::new(),
+        inventory_seeded: false,
+        long_press: None,
+        pinch: None,
         stroke_last: None,
+        last_paint_at: Instant::now(),
+        last_sent_pos: None,
+        last_sent_at: Instant::now(),
         ws_status: "connecting".to_string(),
         now_micros: 0,
-        last_send: f64::NEG_INFINITY,
-        last_sent_pos: None,
     });
     let arg = Box::into_raw(state) as *mut c_void;
     unsafe {

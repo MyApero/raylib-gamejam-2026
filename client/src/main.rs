@@ -277,8 +277,9 @@ fn main() {
             let level = world::level_of(xp);
             ui_state.sync_name_once(user.as_ref().and_then(|u| u.name.as_ref()));
 
+            let short_id = short_hex(me);
             let info = ui::HudInfo {
-                me,
+                short_id: &short_id,
                 level,
                 xp,
                 online,
@@ -534,8 +535,9 @@ fn main() {
         if let (Some(me), Some((brush, xp, locked))) = (me, own_brush) {
             let hues: Vec<u16> = ctx.db.inventory().iter().filter(|i| i.owner == me).map(|i| i.hue).collect();
             let level = world::level_of(xp);
+            let short_id = short_hex(me);
             let info = ui::HudInfo {
-                me,
+                short_id: &short_id,
                 level,
                 xp,
                 online,

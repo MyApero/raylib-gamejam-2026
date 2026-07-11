@@ -69,6 +69,24 @@
         var PUBLIC_HOST = 'spacetime.mister-esman.uk';
         var DB = 'hexmerge';
         var PROTOCOL = 'v1.json.spacetimedb';
+        var TABLES = [
+          'SELECT * FROM config',
+          'SELECT * FROM user',
+          'SELECT * FROM inventory',
+          'SELECT * FROM island',
+          'SELECT * FROM island_cell',
+          'SELECT * FROM margin_cell',
+        ];
+        // localStorage (not sessionStorage) so identity survives inside the
+        // itch.io iframe and across tab reloads (F6 recovery path). Same
+        // origin normally means one shared identity across every open
+        // tab/frame — the local two-player test harness (index.html) opts
+        // out of that by loading this page as `game.html?slot=1|2`, which
+        // namespaces the storage key so its two iframes get distinct
+        // identities despite being same-origin.
+        var params = new URLSearchParams(window.location.search);
+        var slot = params.get('slot');
+        var TOKEN_KEY = slot ? 'stdb_token_slot' + slot : 'stdb_token';
 
         var queue = [];
         var status = 'connecting';
@@ -78,11 +96,7 @@
         var failedBeforeOpen = 0;
 
         function connect() {
-          // sessionStorage (not localStorage) so each tab is its own
-          // player — reloading a tab keeps its identity, but opening a
-          // second tab mints a fresh one, which is what you want when
-          // demoing multiplayer from one machine.
-          var token = sessionStorage.getItem('stdb_token');
+          var token = localStorage.getItem(TOKEN_KEY);
           var scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
           var isLocal = LOCAL_HOST_RE.test(window.location.hostname);
           var host = isLocal ? window.location.hostname : PUBLIC_HOST;
@@ -98,7 +112,7 @@
             failedBeforeOpen = 0;
             status = 'open';
             ws.send(JSON.stringify({
-              Subscribe: { query_strings: ['SELECT * FROM user', 'SELECT * FROM cell'], request_id: 1 },
+              Subscribe: { query_strings: TABLES, request_id: 1 },
             }));
           };
           ws.onmessage = function (ev) {
@@ -109,7 +123,7 @@
               try {
                 var m = JSON.parse(ev.data).IdentityToken;
                 identity = m.identity.__identity__;
-                sessionStorage.setItem('stdb_token', m.token);
+                localStorage.setItem(TOKEN_KEY, m.token);
               } catch (e) { /* wasm side will still see the raw message */ }
             }
             queue.push(ev.data);
@@ -122,7 +136,7 @@
               // server was wiped) would otherwise loop forever — drop it
               // and reconnect anonymously.
               if (failedBeforeOpen >= 2 && token) {
-                sessionStorage.removeItem('stdb_token');
+                localStorage.removeItem(TOKEN_KEY);
                 failedBeforeOpen = 0;
               }
             }

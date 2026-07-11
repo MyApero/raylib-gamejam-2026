@@ -7,28 +7,32 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F4 implemented (merge toast/flash feedback, long-press
-tile-merge with hold-progress ring), plus two author-requested design changes
-on top: long-press now takes the tile's exact color instead of blending
-(fixes an exploit where the same placed tile could be merged against
-repeatedly for free XP/colors), and a Hue slider (±5°) so painted/unlocked
-shades don't have to be bit-exact. `cargo build -p client --bin client`,
-`--bin bot`, `cargo build --workspace --exclude client`, and `cargo build -p
-server` all clean; smoke-tested `cargo run -p client --bin client` against
-the local instance (connects and renders, no crash). Server republished
-non-destructively (`--delete-data=on-conflict`, not `publish.sh`'s
-`always` — no schema changed, so existing test data/islands survived) and
-bindings regenerated. Since then, three more author-caught fixes in the same
-area (see F4 notes below): "selected" swatch missing on first Colors open
-(anchor resync now snaps to the nearest OWNED exact hue, not the raw nudged
-value), Hue-slider drags were polluting last-3 (now only explicit swatch
-clicks note a used hue), and the already-have-color check for long-press
-used exact hue equality instead of the same ±5 tolerance `set_brush` allows
-(now shared via `world::hue_dist`). One more after that: a 1-frame slider
-glitch on swatch click (handle snapping to min/max before settling at 0),
-fixed with `UiState::pending_select` (see F4 notes below). All rebuilt
-clean, re-republished non-destructively, author confirmed "clean and
-commit" — this batch is now committed.
+**Current batch:** F5 (web client parity) implemented in one batch: `ui.rs`
+made genuinely platform-clean (dropped its `spacetimedb_sdk::Identity`
+dependency — `HudInfo.me` replaced with a precomputed `short_id: &str`,
+supplied by `main.rs`/`web.rs` respectively), then `client/src/bin/web.rs`
+rewritten from scratch to mirror the full F1 schema (`config`, `user`,
+`inventory`, `island`, `island_cell`, `margin_cell`) and every P0 reducer,
+reusing `world.rs`/`ui.rs` verbatim (`#[path]`-included) instead of
+duplicating geometry/HUD code as the old pre-F1 web client did. `game.html`
+updated: subscribes to all 6 tables, token storage moved
+sessionStorage → localStorage, with a `?slot=` query param namespacing the
+storage key so `index.html`'s dual-iframe two-player harness keeps getting
+distinct identities (localStorage, unlike sessionStorage, is shared across
+same-origin iframes unconditionally, so this was a real requirement, not
+just a nice-to-have). Wire-format assumptions (`Option<T>` encoding,
+`Identity`/`Timestamp` shapes in both named and positional row encodings)
+were not guessed: verified live with a throwaway read-only WebSocket probe
+against the already-running local `spacetime` 2.6.1 instance (subscribed,
+inspected `InitialSubscription`/`TransactionUpdate`, called `set_name`/
+`set_pos`/`paint_island_cell`/`paint_margin_cell` from a scratch identity)
+before writing the parser. `cargo check -p client --bin web --target
+wasm32-unknown-emscripten`, `cargo build -p client --bin client --bin bot`,
+`cargo build --workspace --exclude client`, and `./build-web.sh` (release)
+all clean, no warnings. `du -sh client/web` = 880K (well under the 64 MB
+jam cap). Not yet hand-tested live (no browser available to me) or
+committed — author to hand-test per the F5 verify checklist (dual-iframe
+paint+merge, phone pinch/pan/paint/long-press) before commit.
 **Blockers:** none.
 
 ---
@@ -337,10 +341,61 @@ Implementation notes:
   clean; smoke-tested connect. Not yet re-run live.
 
 ## F5 — Web client parity
-- [ ] Tables + reducers mirrored in `web.rs` / `game.html`; sessionStorage → localStorage —
-- [ ] `./build-web.sh` passes; dual-iframe page: paint + merge across iframes —
-- [ ] Phone: pinch zoom, two-finger pan, paint, long-press merge —
-- [ ] `du -sh client/web` well under 64 MB —
+- [x] Tables + reducers mirrored in `web.rs` / `game.html`; sessionStorage → localStorage —
+      VERIFIED (build) / REASONED (behavior). `web.rs` fully rewritten: generic
+      `RowView` (named-object or positional-array) + `identity_hex`/
+      `timestamp_micros`/`opt_value` helpers parse every table row once, instead
+      of the old per-table copy-pasted parsers; `Tables` struct holds
+      `HashMap`s for `user`/`inventory`/`island`/`island_cell`/`margin_cell`
+      (config is subscribed to, per plan.md, but has no client-side consumer
+      yet — nothing to parse). All P0 reducers wired: `set_pos`, `set_name`,
+      `set_lock`, `set_brush`, `paint_island_cell`, `paint_margin_cell`,
+      `merge_with_cell`, via a single `call_reducer(name, args: Value)`
+      helper. `cargo check --target wasm32-unknown-emscripten` clean.
+- [x] **Fix/hardening beyond the old web client:** the old `web.rs` built each
+      `callReducer` JS call by directly interpolating the JSON args into a
+      single-quoted JS string literal (`format!("...'[{}]'...", x)`) — fine for
+      pure numbers, but `set_name` now sends arbitrary player-typed text, and an
+      apostrophe or backslash in a name would have broken out of the JS string
+      literal (self-XSS risk, at minimum a crash). `call_reducer` now runs BOTH
+      the reducer name and the JSON args string through `serde_json::to_string`
+      before splicing them into the `run_js` source, so the result is always a
+      valid, safely-escaped JS string literal regardless of content. REASONED
+      from code (JSON string syntax is a valid subset of JS string syntax);
+      not yet exercised with an actual apostrophe-containing name live.
+- [x] Render/camera/input ported from `main.rs`, reusing `world.rs`/`ui.rs`
+      unchanged (no per-platform fork of geometry or HUD code) — REASONED,
+      structurally identical to `main.rs`'s frame loop with `ctx.db.*`/
+      `ctx.reducers.*` replaced by the local `Tables` lookups /
+      `call_reducer`. Other players' cursors are drawn directly from
+      `user.cx/cy` each frame (no interpolation/lerp) to match native's
+      actual behavior — the old pre-F1 web client had its own lerp/smoothing
+      layer that native never had; dropped for real parity rather than kept
+      as an unrequested nicety.
+- [x] `./build-web.sh` passes (release, as required — debug still crashes the
+      emscripten linker per the existing note) — VERIFIED: builds clean,
+      `client/web/{web.js,web.wasm}` produced.
+- [ ] Dual-iframe page: paint + merge across iframes — BLOCKED, no browser
+      available to me; author to hand-test. `index.html`'s two iframes now
+      get distinct identities via `game.html?slot=1|2` → distinct
+      `localStorage` keys (`stdb_token_slot1`/`stdb_token_slot2`), replacing
+      the old sessionStorage-based isolation (which localStorage cannot
+      reproduce — same-origin iframes always share one `localStorage`).
+- [ ] Phone: pinch zoom, two-finger pan, paint, long-press merge — BLOCKED, no
+      phone/browser available to me. Implemented via raylib's own
+      `get_touch_point_count`/`get_touch_position` (cross-platform touch API,
+      no custom JS gesture code needed): one-finger tap/drag/hold is assumed
+      to already arrive as ordinary mouse events via raylib's web/GLFW
+      backend (ASSUMED — this is how the OLD web client's paint-by-drag
+      worked without any touch-specific code, but not independently
+      re-verified here) so it reuses the mouse code paths unchanged; two-
+      finger gestures use a `Pinch` anchor (world point under the two-finger
+      midpoint at gesture start stays pinned under the current midpoint each
+      frame — pan and zoom both fall out of that one invariant rather than
+      separate delta bookkeeping) — REASONED from code, not run on real
+      touch hardware.
+- [x] `du -sh client/web` well under 64 MB — VERIFIED: 880K total
+      (`index.html` 4K, `game.html` 8K, `web.js` 224K, `web.wasm` 644K).
 
 ## F6 — Identity: token login, reset
 - [ ] Copy ID (with selectable-text fallback), paste-token import in a private window —
@@ -392,6 +447,25 @@ Implementation notes:
   allowed to not compile until F5 migrates it to the new schema; this is not
   a P0 blocker and is not attempted early. Tracked here so it isn't mistaken
   for a regression at each feature boundary's build check.
+  **RESOLVED at F5**: `web.rs` rewritten against the current schema; `./build-web.sh`
+  builds clean again.
+- **SpacetimeDB 2.6.1 `v1.json.spacetimedb` wire format**, verified live via a
+  throwaway WebSocket probe (F5) rather than the docs — recorded here since
+  nothing else pins it down and the next person touching the wire layer will
+  need it: row payloads inside `updates[].inserts`/`.deletes` are JSON
+  *strings* (double-encoded) in both `InitialSubscription` (named-object rows)
+  and `TransactionUpdate`/`TransactionUpdateLight` (positional-array rows,
+  schema field order). `Identity` is `{"__identity__": "0x.."}` named or a
+  nested one-element array `["0x.."]` positional. `Timestamp` is
+  `{"__timestamp_micros_since_unix_epoch__": N}` named or `[N]` positional.
+  `Option<T>` — including inside a NAMED row, which was the surprising part —
+  is uniformly a two-element array `[tag, payload]`: tag `0` = `Some(payload)`,
+  tag `1` = `None` (payload is a throwaway `{}`/`[]`). A rejected `CallReducer`
+  (e.g. an unknown reducer name, a reducer erroring out) comes back as
+  `TransactionUpdate.status: {"Failed": "<message>"}` instead of
+  `{"Committed": {...}}` — `web.rs` simply has no `database_update` to apply
+  in that case, matching how `ctx.reducers.*`'s `Result<(), String>` errors
+  are already silently `let _ =`-discarded on the native side.
 - `slot_coords`/`occupied_rings`/margin-bound math (geometry spec's "occupied
   rings" wording) is my interpretation, not explicitly pinned down by plan.md:
   `occupied_rings(n)` = the ring index containing the `n`-th (0-indexed) slot.

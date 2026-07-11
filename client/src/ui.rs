@@ -6,7 +6,6 @@
 //! heights so the map viewport can size around them.
 
 use raylib::prelude::*;
-use spacetimedb_sdk::Identity;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -123,7 +122,11 @@ impl UiState {
 /// Snapshot of server-derived state the HUD needs to read this frame.
 /// Passed to both `handle_input` (for cap/clamp logic) and `draw`.
 pub struct HudInfo<'a> {
-    pub me: Identity,
+    /// Short (8-hex-char) identity label for the header — precomputed by
+    /// the caller, whose identity type differs between the native (SDK
+    /// `Identity`) and web (JSON hex string) clients. Keeping SDK types out
+    /// of this module's public interface is what lets `bin/web.rs` reuse it.
+    pub short_id: &'a str,
     pub level: u64,
     pub xp: u64,
     pub online: usize,
@@ -410,10 +413,8 @@ fn draw_toast(d: &mut impl RaylibDraw, toast: &Toast, info: &HudInfo) {
 
 fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo) {
     d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, HEADER_H), Color::new(10, 10, 14, 235));
-    let id = info.me.to_hex().to_string();
-    let short = &id[..8.min(id.len())];
     d.draw_text(
-        &format!("{short}   Lv{}  {}xp", info.level, info.xp),
+        &format!("{}   Lv{}  {}xp", info.short_id, info.level, info.xp),
         10,
         6,
         16,
