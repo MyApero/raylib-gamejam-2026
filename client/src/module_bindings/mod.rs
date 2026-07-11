@@ -9,6 +9,7 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 pub mod click_link_reducer;
 pub mod config_table;
 pub mod config_type;
+pub mod disable_island_border_reducer;
 pub mod erase_island_cell_reducer;
 pub mod erase_margin_cell_reducer;
 pub mod inventory_table;
@@ -32,6 +33,7 @@ pub mod rerank_fire_schedule_type;
 pub mod rerank_warn_schedule_type;
 pub mod reset_account_reducer;
 pub mod set_brush_reducer;
+pub mod set_island_border_reducer;
 pub mod set_island_link_reducer;
 pub mod set_lock_reducer;
 pub mod set_name_reducer;
@@ -44,6 +46,7 @@ pub mod user_type;
 pub use click_link_reducer::click_link;
 pub use config_table::*;
 pub use config_type::Config;
+pub use disable_island_border_reducer::disable_island_border;
 pub use erase_island_cell_reducer::erase_island_cell;
 pub use erase_margin_cell_reducer::erase_margin_cell;
 pub use inventory_table::*;
@@ -67,6 +70,7 @@ pub use rerank_fire_schedule_type::RerankFireSchedule;
 pub use rerank_warn_schedule_type::RerankWarnSchedule;
 pub use reset_account_reducer::reset_account;
 pub use set_brush_reducer::set_brush;
+pub use set_island_border_reducer::set_island_border;
 pub use set_island_link_reducer::set_island_link;
 pub use set_lock_reducer::set_lock;
 pub use set_name_reducer::set_name;
@@ -85,6 +89,7 @@ pub use user_type::User;
 
 pub enum Reducer {
     ClickLink { island_id: u32 },
+    DisableIslandBorder,
     EraseIslandCell { q_local: i32, r_local: i32 },
     EraseMarginCell { q: i32, r: i32 },
     LikeIsland { island_id: u32 },
@@ -93,6 +98,7 @@ pub enum Reducer {
     PaintMarginCell { q: i32, r: i32 },
     ResetAccount,
     SetBrush { hue: u16, sat: u8, val: u8 },
+    SetIslandBorder,
     SetIslandLink { rate_id: u32 },
     SetLock { locked: bool },
     SetName { name: String },
@@ -108,6 +114,7 @@ impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
             Reducer::ClickLink { .. } => "click_link",
+            Reducer::DisableIslandBorder => "disable_island_border",
             Reducer::EraseIslandCell { .. } => "erase_island_cell",
             Reducer::EraseMarginCell { .. } => "erase_margin_cell",
             Reducer::LikeIsland { .. } => "like_island",
@@ -116,6 +123,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::PaintMarginCell { .. } => "paint_margin_cell",
             Reducer::ResetAccount => "reset_account",
             Reducer::SetBrush { .. } => "set_brush",
+            Reducer::SetIslandBorder => "set_island_border",
             Reducer::SetIslandLink { .. } => "set_island_link",
             Reducer::SetLock { .. } => "set_lock",
             Reducer::SetName { .. } => "set_name",
@@ -131,6 +139,9 @@ impl __sdk::Reducer for Reducer {
                 __sats::bsatn::to_vec(&click_link_reducer::ClickLinkArgs {
                     island_id: island_id.clone(),
                 })
+            }
+            Reducer::DisableIslandBorder => {
+                __sats::bsatn::to_vec(&disable_island_border_reducer::DisableIslandBorderArgs {})
             }
             Reducer::EraseIslandCell { q_local, r_local } => {
                 __sats::bsatn::to_vec(&erase_island_cell_reducer::EraseIslandCellArgs {
@@ -176,6 +187,9 @@ impl __sdk::Reducer for Reducer {
                     sat: sat.clone(),
                     val: val.clone(),
                 })
+            }
+            Reducer::SetIslandBorder => {
+                __sats::bsatn::to_vec(&set_island_border_reducer::SetIslandBorderArgs {})
             }
             Reducer::SetIslandLink { rate_id } => {
                 __sats::bsatn::to_vec(&set_island_link_reducer::SetIslandLinkArgs {

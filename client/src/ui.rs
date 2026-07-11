@@ -144,6 +144,10 @@ pub struct IslandInfo {
     pub link_id: Option<u32>,
     pub is_own: bool,
     pub already_liked: bool,
+    /// Author-requested: whether the island's border is currently hidden
+    /// (`disable_island_border`) — drives the popup's button labels/status
+    /// line. Only meaningful when `is_own`.
+    pub border_hidden: bool,
 }
 
 impl UiState {
@@ -207,10 +211,11 @@ impl UiState {
     /// moment it opened — nothing ever told it the reducer had landed).
     /// Called every frame the popup is open, same as `HudInfo` is rebuilt
     /// fresh from server state every frame elsewhere in this module.
-    pub fn refresh_island_popup(&mut self, likes: u32, already_liked: bool) {
+    pub fn refresh_island_popup(&mut self, likes: u32, already_liked: bool, border_hidden: bool) {
         if let Some(popup) = &mut self.island_popup {
             popup.likes = likes;
             popup.already_liked = already_liked;
+            popup.border_hidden = border_hidden;
         }
     }
 
@@ -339,6 +344,11 @@ pub struct Actions {
     /// The caller opens the URL AND fires `click_link` for XP; both use the
     /// same click, see the popup's link-row hit test.
     pub click_link: Option<(u32, u32)>,
+    /// Author-requested: pin the caller's own island's border to their
+    /// current brush color (and un-hide it if it was disabled).
+    pub set_island_border: bool,
+    /// Author-requested: hide the caller's own island's border entirely.
+    pub disable_island_border: bool,
 }
 
 fn footer_bg() -> Rectangle {
@@ -455,6 +465,19 @@ fn link_edit_rect() -> Rectangle {
 fn link_set_btn_rect() -> Rectangle {
     let o = overlay_rect();
     Rectangle::new(o.x + 230.0, o.y + 180.0, 100.0, 32.0)
+}
+
+/// Author-requested: own-island popup only — pin the border to the caller's
+/// current brush color.
+fn border_set_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 230.0, 290.0, 36.0)
+}
+
+/// Author-requested: own-island popup only — hide the border entirely.
+fn border_disable_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 320.0, o.y + 230.0, 220.0, 36.0)
 }
 
 fn rerank_banner_rect() -> Rectangle {
@@ -759,6 +782,12 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                     actions.set_island_link = Some(id);
                 }
             }
+            if clicked && point_in(mouse, border_set_btn_rect()) {
+                actions.set_island_border = true;
+            }
+            if clicked && point_in(mouse, border_disable_btn_rect()) {
+                actions.disable_island_border = true;
+            }
         }
         return actions;
     }
@@ -824,7 +853,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 }
             }
             Drag::Sat => {
-                let v = slider_value(sat_slider_rect(), mouse.x, info.sat_cap as f32);
+                let v = slider_value(sat_slider_rect(), mouse.x, 100.0).min(info.sat_cap);
                 if v != info.brush.1 {
                     actions.set_brush = Some((info.brush.0, v, info.brush.2));
                 }
@@ -912,6 +941,21 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
     let sb = link_set_btn_rect();
     d.draw_rectangle_rec(sb, Color::new(40, 40, 48, 255));
     d.draw_text("Set", sb.x as i32 + 34, sb.y as i32 + 9, 14, Color::RAYWHITE);
+
+    // Author-requested: pin the border to the current brush color, or hide
+    // it entirely. The disable button is highlighted red while active, same
+    // "active state is a color change, not just a label" language as the
+    // footer's lock button.
+    let border_status = if popup.border_hidden { "Border: hidden" } else { "Border: on" };
+    d.draw_text(border_status, o.x as i32 + 20, o.y as i32 + 214, 14, Color::LIGHTGRAY);
+
+    let setb = border_set_btn_rect();
+    d.draw_rectangle_rec(setb, Color::new(40, 40, 48, 255));
+    d.draw_text("Set border to current color", setb.x as i32 + 10, setb.y as i32 + 10, 14, Color::RAYWHITE);
+
+    let disb = border_disable_btn_rect();
+    d.draw_rectangle_rec(disb, if popup.border_hidden { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
+    d.draw_text("Disable border", disb.x as i32 + 24, disb.y as i32 + 10, 14, Color::RAYWHITE);
 }
 
 const TOOLTIP_W: f32 = 220.0;
@@ -1286,8 +1330,40 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse:
     let tol = world::constants::HUE_TOLERANCE;
     let offset = hue_offset_signed(effective_hue(state, info), state.base_hue).clamp(-tol, tol);
     draw_hue_slider(d, hue_slider_rect(), offset, tol, state.base_hue, info.brush.1, info.brush.2);
-    draw_slider(d, sat_slider_rect(), info.brush.1, info.sat_cap, &format!("Saturation ({})", info.brush.1));
-    draw_slider(d, val_slider_rect(), info.brush.2, 100, &format!("Value ({})", info.brush.2));
+    let sat_track = sat_slider_rect();
+    draw_slider_capped(
+        d,
+        sat_track,
+        info.brush.1,
+        100,
+        info.sat_cap,
+        world::hsv_color(info.brush.0, 0, info.brush.2),
+        world::hsv_color(info.brush.0, 100, info.brush.2),
+        &format!("Saturation ({})", info.brush.1),
+    );
+    draw_slider(
+        d,
+        val_slider_rect(),
+        info.brush.2,
+        100,
+        world::hsv_color(info.brush.0, info.brush.1, 0),
+        world::hsv_color(info.brush.0, info.brush.1, 100),
+        &format!("Lightness ({})", info.brush.2),
+    );
+
+    // Hovering the not-yet-unlocked tail of the Saturation slider explains
+    // why it won't drag past `sat_cap`, instead of just silently refusing.
+    if info.sat_cap < 100 && point_in(mouse, slider_hit(sat_track)) {
+        let cap_x = sat_track.x + sat_track.width * (info.sat_cap as f32 / 100.0);
+        if mouse.x > cap_x {
+            draw_button_tooltip(
+                d,
+                "Saturation locked",
+                &["You need more XP to", "unlock more saturation"],
+                mouse,
+            );
+        }
+    }
 }
 
 /// Copy/import ID (Cookie-Clicker-style account portability) + reset. Shares
@@ -1396,12 +1472,50 @@ fn draw_hue_slider(
     d.draw_circle(handle_x as i32, (track.y + track.height / 2.0) as i32, 9.0, Color::RAYWHITE);
 }
 
-fn draw_slider(d: &mut impl RaylibDraw, track: Rectangle, value: u8, max: u8, label: &str) {
+fn draw_slider(d: &mut impl RaylibDraw, track: Rectangle, value: u8, max: u8, lo: Color, hi: Color, label: &str) {
+    draw_slider_capped(d, track, value, max, max, lo, hi, label);
+}
+
+/// Like `draw_slider`, but the track always spans `0..max` and the region
+/// beyond `cap` (e.g. the not-yet-unlocked saturation range) is rendered
+/// dimmed with a marker line, instead of just shrinking the whole track to
+/// `0..cap` the way the plain slider does — so the player can see there's
+/// more range to grow into as they level up. Background is a `lo`→`hi`
+/// gradient (what this channel actually looks like end to end at the
+/// current brush), same visual language as `draw_hue_slider`, instead of a
+/// flat bar.
+fn draw_slider_capped(
+    d: &mut impl RaylibDraw,
+    track: Rectangle,
+    value: u8,
+    max: u8,
+    cap: u8,
+    lo: Color,
+    hi: Color,
+    label: &str,
+) {
     d.draw_text(label, track.x as i32, track.y as i32 - 18, 14, Color::LIGHTGRAY);
-    d.draw_rectangle_rec(track, Color::new(50, 50, 58, 255));
+    d.draw_rectangle_gradient_h(track.x as i32, track.y as i32, track.width as i32, track.height as i32, lo, hi);
+    if cap < max {
+        let cap_frac = cap as f32 / max as f32;
+        let locked = Rectangle::new(
+            track.x + track.width * cap_frac,
+            track.y,
+            track.width * (1.0 - cap_frac),
+            track.height,
+        );
+        d.draw_rectangle_rec(locked, Color::new(20, 20, 24, 190));
+    }
     let frac = if max == 0 { 0.0 } else { value as f32 / max as f32 };
-    let filled = Rectangle::new(track.x, track.y, track.width * frac, track.height);
-    d.draw_rectangle_rec(filled, Color::new(120, 160, 220, 255));
     let handle_x = track.x + track.width * frac;
     d.draw_circle(handle_x as i32, (track.y + track.height / 2.0) as i32, 9.0, Color::RAYWHITE);
+    if cap < max {
+        let cap_x = track.x + track.width * (cap as f32 / max as f32);
+        d.draw_line_ex(
+            Vector2::new(cap_x, track.y - 3.0),
+            Vector2::new(cap_x, track.y + track.height + 3.0),
+            2.0,
+            Color::new(220, 180, 80, 255),
+        );
+    }
 }

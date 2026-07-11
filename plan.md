@@ -743,6 +743,20 @@ submitted, and only if the freeze window rule still allows a redeploy.
   brushes against the center-island identity ruling still pending above — schedule
   as part of F12, not alone.
 - **Customizable island border color / transparency** (from `other_ideas.md`):
-  per-island schema field + picker UI — a full publish/regen/mirror cycle for pure
-  cosmetics. Post-voting redeploy candidate; not worth a schema cycle before the
-  freeze.
+  SHIPPED (2026-07-11, author override of the note below — deliberately landed
+  despite it). `Island.border_color: Option<u32>` (packed HSV, appended after
+  `created_at` so `bin/web.rs`'s positional row parsing didn't shift) +
+  `Island.border_hidden: bool`. Two reducers: `set_island_border` (pins the border
+  to the caller's CURRENT brush color, also un-hides it) and `disable_island_border`
+  (hides it, `border_color` left untouched). Client-side precedence in both
+  `main.rs` and `bin/web.rs`: `border_hidden` → nothing drawn; else `border_color`
+  if set; else the pre-existing seed-hue default. UI: two new buttons ("Set border
+  to current color" / "Disable border") + a status line in the own-island popup
+  (`ui.rs`, below the link editor). Verified via `spacetime call` against the local
+  instance (not the GUI client, per the author's testing protocol): `set_island_border`
+  packs `(hue, sat, val)` correctly, `disable_island_border` preserves `border_color`
+  while flipping `border_hidden`, re-running `set_island_border` un-hides. NOT yet
+  published to the production VPS — that publish is a separate, explicit step for
+  the author to trigger. Original deferral note, kept for context: "per-island
+  schema field + picker UI — a full publish/regen/mirror cycle for pure cosmetics.
+  Post-voting redeploy candidate; not worth a schema cycle before the freeze."

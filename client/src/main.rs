@@ -213,6 +213,7 @@ fn open_island_info(ctx: &DbConnection, ui_state: &mut ui::UiState, island_id: u
         link_id: island.itch_rate_id,
         is_own: island.owner == me,
         already_liked,
+        border_hidden: island.border_hidden,
     });
 }
 
@@ -466,7 +467,7 @@ fn main() {
             if let Some(island_id) = ui_state.island_popup.as_ref().map(|p| p.island_id) {
                 if let Some(island) = ctx.db.island().id().find(&island_id) {
                     let already_liked = ctx.db.island_like().iter().any(|l| l.island_id == island_id && l.liker == me);
-                    ui_state.refresh_island_popup(island.likes, already_liked);
+                    ui_state.refresh_island_popup(island.likes, already_liked, island.border_hidden);
                 }
             }
             // F8 re-rank countdown: `next_rerank_at.duration_since(now)` is
@@ -536,6 +537,12 @@ fn main() {
             }
             if let Some(rate_id) = actions.set_island_link {
                 let _ = ctx.reducers.set_island_link(rate_id);
+            }
+            if actions.set_island_border {
+                let _ = ctx.reducers.set_island_border();
+            }
+            if actions.disable_island_border {
+                let _ = ctx.reducers.disable_island_border();
             }
             if let Some((island_id, rate_id)) = actions.click_link {
                 open_url(&format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"));
@@ -972,7 +979,20 @@ fn main() {
                 // actual starting color. Matches `START_SAT`/100 exactly so
                 // it reads as literally "their first color", not a
                 // lookalike.
-                let border_color = seed_hues.get(&island.owner).map(|&hue| world::hsv_color(hue, 40, 100));
+                //
+                // Author-requested: an owner can override this default via
+                // `set_island_border` (pins to their current brush color) or
+                // hide it entirely via `disable_island_border` — checked
+                // first since a hidden border skips the seed-hue fallback
+                // too.
+                let border_color = if island.border_hidden {
+                    None
+                } else if let Some(packed) = island.border_color {
+                    let (h, s, v) = world::unpack_hsv(packed);
+                    Some(world::hsv_color(h, s, v))
+                } else {
+                    seed_hues.get(&island.owner).map(|&hue| world::hsv_color(hue, 40, 100))
+                };
                 if let Some(border_color) = border_color {
                     let r_f = ISLAND_RADIUS as f32;
                     let corners: Vec<Vector2> = world::DIRECTIONS

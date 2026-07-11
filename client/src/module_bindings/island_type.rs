@@ -13,6 +13,8 @@ pub struct Island {
     pub likes: u32,
     pub itch_rate_id: Option<u32>,
     pub created_at: __sdk::Timestamp,
+    pub border_color: Option<u32>,
+    pub border_hidden: bool,
 }
 
 impl __sdk::InModule for Island {
@@ -29,6 +31,8 @@ pub struct IslandCols {
     pub likes: __sdk::__query_builder::Col<Island, u32>,
     pub itch_rate_id: __sdk::__query_builder::Col<Island, Option<u32>>,
     pub created_at: __sdk::__query_builder::Col<Island, __sdk::Timestamp>,
+    pub border_color: __sdk::__query_builder::Col<Island, Option<u32>>,
+    pub border_hidden: __sdk::__query_builder::Col<Island, bool>,
 }
 
 impl __sdk::__query_builder::HasCols for Island {
@@ -41,6 +45,8 @@ impl __sdk::__query_builder::HasCols for Island {
             likes: __sdk::__query_builder::Col::new(table_name, "likes"),
             itch_rate_id: __sdk::__query_builder::Col::new(table_name, "itch_rate_id"),
             created_at: __sdk::__query_builder::Col::new(table_name, "created_at"),
+            border_color: __sdk::__query_builder::Col::new(table_name, "border_color"),
+            border_hidden: __sdk::__query_builder::Col::new(table_name, "border_hidden"),
         }
     }
 }

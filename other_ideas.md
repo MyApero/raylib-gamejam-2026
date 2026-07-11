@@ -97,8 +97,8 @@ constant trick, in both clients.)
 - [ ] Outsite it should be only margin, if someone wants to draw a biiiiig thing
 - [ ] Having more XP gives more Ilots?
 - [ ] Bot at the middle with a color and a highlight "Merge with me!"
-- [ ] Customise your Isle border color or make it transparent (remove)
+- [x] Customise your Isle border color or make it transparent (remove)
 
 - [ ] Put a clear hexel title with a ENTER
 
-- [ ] The Saturation slider should go to 100 but block at the max you unlocked. Tooltip explaining (You need more XP to unlock more saturation)
+- [x] The Saturation slider should go to 100 but block at the max you unlocked. Tooltip explaining (You need more XP to unlock more saturation)

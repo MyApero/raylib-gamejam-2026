@@ -98,6 +98,8 @@ struct IslandRow {
     likes: u32,
     itch_rate_id: Option<u32>,
     created_at_micros: i64,
+    border_color: Option<u32>,
+    border_hidden: bool,
 }
 
 struct IslandCellRow {
@@ -239,6 +241,8 @@ fn parse_island(v: &Value) -> Option<(u32, IslandRow)> {
             likes: r.field("likes", 3)?.as_u64()? as u32,
             itch_rate_id: r.field("itch_rate_id", 4)?.pipe(opt_value).and_then(|v| v.as_u64()).map(|n| n as u32),
             created_at_micros: timestamp_micros(r.field("created_at", 5)?),
+            border_color: r.field("border_color", 6)?.pipe(opt_value).and_then(|v| v.as_u64()).map(|n| n as u32),
+            border_hidden: r.field("border_hidden", 7)?.as_bool()?,
         },
     ))
 }
@@ -570,7 +574,8 @@ fn open_island_info(state: &mut State, island_id: u32) {
     let link_id = island.itch_rate_id;
     let age_label = format_age(state.now_micros, island.created_at_micros);
     let already_liked = me.is_some_and(|me| already_liked(&state.tables, island_id, me));
-    state.ui_state.open_island_info(ui::IslandInfo { island_id, owner_label, likes, age_label, link_id, is_own, already_liked });
+    let border_hidden = island.border_hidden;
+    state.ui_state.open_island_info(ui::IslandInfo { island_id, owner_label, likes, age_label, link_id, is_own, already_liked, border_hidden });
 }
 
 /// In-flight long-press-to-merge gesture — mirrors `main.rs`'s `LongPress`.
@@ -821,7 +826,7 @@ fn frame(state: &mut State) {
             if let Some(island) = state.tables.islands.get(&island_id) {
                 let likes = island.likes;
                 let liked = already_liked(&state.tables, island_id, me);
-                state.ui_state.refresh_island_popup(likes, liked);
+                state.ui_state.refresh_island_popup(likes, liked, island.border_hidden);
             }
         }
 
@@ -877,6 +882,12 @@ fn frame(state: &mut State) {
         }
         if let Some(rate_id) = actions.set_island_link {
             call_reducer("set_island_link", serde_json::json!([rate_id]));
+        }
+        if actions.set_island_border {
+            call_reducer("set_island_border", serde_json::json!([]));
+        }
+        if actions.disable_island_border {
+            call_reducer("disable_island_border", serde_json::json!([]));
         }
         if let Some((island_id, rate_id)) = actions.click_link {
             // plan.md F9: web opens the rate page via `window.open`, unlike
@@ -1277,7 +1288,18 @@ fn frame(state: &mut State) {
             }
             // Author-caught: mirrors `main.rs` — sat/val is now
             // `START_SAT`/100 exactly (was a fixed 85/95 lookalike shade).
-            let border_color = seed_hues.get(island.owner_hex.as_str()).map(|&hue| world::hsv_color(hue, 40, 100));
+            //
+            // Author-requested: mirrors `main.rs` — an owner-set
+            // `border_color`/`border_hidden` override takes priority over
+            // the seed-hue default.
+            let border_color = if island.border_hidden {
+                None
+            } else if let Some(packed) = island.border_color {
+                let (h, s, v) = world::unpack_hsv(packed);
+                Some(world::hsv_color(h, s, v))
+            } else {
+                seed_hues.get(island.owner_hex.as_str()).map(|&hue| world::hsv_color(hue, 40, 100))
+            };
             if let Some(border_color) = border_color {
                 let r_f = ISLAND_RADIUS as f32;
                 let corners: Vec<Vector2> = world::DIRECTIONS

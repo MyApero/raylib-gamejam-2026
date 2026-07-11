@@ -7,7 +7,46 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** Second author follow-up in the same sitting — the
+**Current batch:** Backlog item, author override (2026-07-11) — "Customise
+your Isle border color or make it transparent (remove)". `other_ideas.md`
+and plan.md's own backlog entry had deferred this as "not worth a schema
+cycle before the freeze" (submission is 2026-07-12 18:00 UTC); asked the
+author to confirm given that note, they chose to override it and land the
+feature now.
+
+1. **Schema + reducers** — `Island` gets `border_color: Option<u32>` (packed
+   HSV) and `border_hidden: bool`, both appended AFTER the existing fields
+   (not inserted among them) so `bin/web.rs`'s hand-rolled positional row
+   parser — which reads fields by schema-order index, not by name — doesn't
+   shift under it. Two reducers: `set_island_border` (packs the caller's
+   CURRENT `user.hue/sat/val` into `border_color`, also clears
+   `border_hidden`) and `disable_island_border` (sets `border_hidden`,
+   leaves `border_color` alone). Both follow `set_island_link`'s existing
+   "find caller's own island via `.owner().find(ctx.sender())`" pattern.
+2. **Client wiring, both targets** — `ui.rs`: `IslandInfo.border_hidden` +
+   `Actions::{set_island_border, disable_island_border}` + two new buttons
+   ("Set border to current color" / "Disable border") and a status line in
+   the own-island popup, below the link editor. `main.rs` and `bin/web.rs`
+   (kept in parity, as always): `open_island_info`/`refresh_island_popup`
+   thread `border_hidden` through; the per-island border-color computation
+   now checks `border_hidden` (nothing drawn) then `border_color` (custom)
+   before falling back to the pre-existing seed-hue default.
+
+**Verify status:** `cargo build -p server`, `-p client --bin client`, and
+`./build-web.sh` all clean. Published to the local instance and exercised
+live via `spacetime call`/`spacetime sql` (not the GUI client, per the
+standing "author drives real runtime testing" protocol): `set_island_border`
+packed `(hue=57, sat=40, val=100)` into `border_color` correctly for a
+fresh test identity; `disable_island_border` flipped `border_hidden` to
+`true` while leaving `border_color` untouched; re-running
+`set_island_border` un-hid it (`border_hidden` back to `false`) — all
+VERIFIED. Client-side rendering precedence (REASONED, not yet author-
+hand-tested): traced the new branch in both `main.rs` and `bin/web.rs`,
+matches the reducer semantics above. NOT published to the production VPS
+(`spacetime.mister-esman.uk`) — that's a separate, explicit step left for
+the author.
+
+**Previous batch:** Second author follow-up in the same sitting — the
 pencil icon is STILL reported invisible after the first widen-and-outline
 fix, plus one more tooltip content item.
 
@@ -1835,6 +1874,11 @@ Implementation notes:
 ## P2 (only if time remains)
 - [ ] F10 admin — [ ] F11 flying gift — [ ] F12 polish/bots/sounds —
 - [ ] F13 hexa event (6-cursor hexagon: pooled dictionaries, one-time XP, snap rendering) —
+- [x] Customizable island border color/transparency (from backlog, author override
+      2026-07-11) — server + both clients VERIFIED via `spacetime call`/`spacetime sql`
+      against the local instance; client rendering REASONED, not yet author-hand-tested;
+      not yet published to the production VPS. See the batch notes at the top of this
+      file and plan.md's backlog entry.
 
 ## Notes / deviations from plan.md
 - **New at F6 (author-directed, not in plan.md's original text):** players

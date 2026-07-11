@@ -299,6 +299,18 @@ pub struct Island {
     likes: u32,
     itch_rate_id: Option<u32>,
     created_at: Timestamp,
+    /// Author-requested: lets an owner pin their island's border to a
+    /// specific packed HSV color instead of always tracking their seed hue.
+    /// `None` = fall back to the seed-hue default clients already render.
+    /// New fields appended at the end (not inserted among the existing
+    /// ones) so `bin/web.rs`'s hand-rolled positional row parsing, which
+    /// indexes fields by schema order, doesn't shift under it.
+    border_color: Option<u32>,
+    /// Author-requested: hides the border entirely regardless of
+    /// `border_color` — a separate flag rather than overloading
+    /// `border_color: None` for "hidden", since that value already means
+    /// "use the default seed-hue color".
+    border_hidden: bool,
 }
 
 /// F8: one row per (island, liker) — enforced in `like_island` rather than as
@@ -867,6 +879,29 @@ pub fn set_island_link(ctx: &ReducerContext, rate_id: u32) -> Result<(), String>
     Ok(())
 }
 
+/// Author-requested: pins the caller's island border to their CURRENT brush
+/// color (not the seed hue the default border tracks), and un-hides it if
+/// `disable_island_border` had previously hidden it.
+#[spacetimedb::reducer]
+pub fn set_island_border(ctx: &ReducerContext) -> Result<(), String> {
+    let user = ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
+    let island = ctx.db.island().owner().find(ctx.sender()).ok_or("you do not own an island")?;
+    let color = geometry::pack_hsv(user.hue, user.sat, user.val);
+    ctx.db.island().id().update(Island { border_color: Some(color), border_hidden: false, ..island });
+    Ok(())
+}
+
+/// Author-requested: makes the caller's island border transparent. Leaves
+/// `border_color` untouched (rather than clearing it back to the seed-hue
+/// default) so re-running `set_island_border` isn't the only way back —
+/// nothing currently reads `border_color` while `border_hidden` is set.
+#[spacetimedb::reducer]
+pub fn disable_island_border(ctx: &ReducerContext) -> Result<(), String> {
+    let island = ctx.db.island().owner().find(ctx.sender()).ok_or("you do not own an island")?;
+    ctx.db.island().id().update(Island { border_hidden: true, ..island });
+    Ok(())
+}
+
 /// F9: credit an island's owner with `XP_LINK_CLICK` the first time a given
 /// clicker opens its itch.io rate link; later re-opens by the same clicker
 /// are free (no repeat XP) via the `island_link_click` dedupe row. Self-clicks
@@ -1115,6 +1150,8 @@ pub fn client_connected(ctx: &ReducerContext) {
         likes: 0,
         itch_rate_id: None,
         created_at: ctx.timestamp,
+        border_color: None,
+        border_hidden: false,
     });
 }
 
