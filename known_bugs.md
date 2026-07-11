@@ -27,7 +27,10 @@ see status.md)
 
 - [ ] Dezoom should reduce the size of other's cursor
 
-- [ ] More range to merge
+- [x] More range to merge (F9.5 item 3: `MERGE_DIST` 1.0 -> 2.0,
+`server/src/lib.rs`; plan.md's constants table already carried the settled
+value — author should re-tune further by feel on the deployed build if 2.0
+still isn't right)
 
 - [x] Import account doesn't work, it creates another one (F9.5 item 1: the
 import field's 256-char cap silently truncated real ~386-char reconnect

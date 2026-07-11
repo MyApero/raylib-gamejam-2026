@@ -7,7 +7,24 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9.5 item 2 — FPS at scale (author-reported 40fps @ 10
+**Current batch:** F9.5 item 3 — merge range too short. Single-constant
+change: `server/src/lib.rs`'s `constants::MERGE_DIST` 1.0 -> 2.0
+(cursor-merge trigger distance, checked entirely server-side in `set_pos` —
+neither client needs a mirrored copy of this one). plan.md's constants table
+already carried 2.0 as the settled value from the author's own note; applied
+the matching server change to bring the code in sync with it.
+**VERIFIED**: `cargo build -p server` clean; republished to the local
+instance and re-ran `./generate_module_bindings.sh` — no schema change, so
+bindings came out byte-identical (confirmed via `git status`/`git diff` on
+`module_bindings/`, nothing to commit there). Did not re-verify the actual
+merge-distance FEEL live (needs two concurrently-controlled cursors closing
+to a specific distance, which is what plan.md explicitly reserves for the
+author's own hand-test — "tunes by feel"); if 2.0 doesn't feel right on the
+deployed build, adjust this constant and its plan.md table row together.
+
+---
+
+**Previous batch:** F9.5 item 2 — FPS at scale (author-reported 40fps @ 10
 islands / 30fps @ 18 on the deployed build). Root cause matched plan.md's own
 diagnosis exactly: both clients rebuilt a `HashMap<(island_id, q, r), color>`
 from EVERY `island_cell` row in the world on EVERY frame

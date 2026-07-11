@@ -6,7 +6,12 @@ use spacetimedb::{Identity, ReducerContext, ScheduleAt, Table, TimeDuration, Tim
 mod constants {
     pub const ISLAND_RADIUS: i32 = 13;
     pub const SLOT_SPACING: i32 = 29;
-    pub const MERGE_DIST: f32 = 1.0;
+    // F9.5 item 3 (author-reported: "more range to merge" / known_bugs.md):
+    // raised from 1.0 — the deployed build's range felt too short in
+    // hand-testing. Mirrored in plan.md's constants table; re-tune both
+    // together if the author's further hand-testing settles on a different
+    // value.
+    pub const MERGE_DIST: f32 = 2.0;
     // 50x the original plan.md values (1000 tiles / 20s sustained) — author
     // felt the original paint rate limit too restrictive in hand-testing.
     pub const PAINT_BUCKET_MAX: f32 = 1000.0;
