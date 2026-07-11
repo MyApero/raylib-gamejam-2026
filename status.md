@@ -7,7 +7,140 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9.5 item 9 — island placement retest (ex-F6.5 task 2).
+**Current batch:** F9.5 — one more author follow-up, immediately after the
+zero-gap tiling landed: "great, i just want a gap of 2 or 3 now" (not
+literally zero after all — a little breathing room).
+
+With the hex-of-hexes basis now in place, introducing a uniform gap turned
+out to be a small, clean change rather than another geometry rewrite:
+placed islands as if they were ONE TILE BIGGER than they really are (a new
+`SLOT_PLACEMENT_RADIUS = ISLAND_RADIUS + 1` feeds `SLOT_U`/`SLOT_V` instead
+of `ISLAND_RADIUS` directly), while every actual paintable/territory check
+elsewhere still uses the real `ISLAND_RADIUS` (13) unchanged. Since the
+placement radius and the real radius are now decoupled, the concentric
+"buffer ring" left over between a real island's edge and its bumped
+placement cell's edge becomes genuine margin space — 1 tile from EACH of two
+neighbors, 2 tiles total between any two real islands, uniformly (not just
+at the 6 axis corners — this is a property of the same tiling identity,
+just parameterized by a bigger virtual radius; verified with the exact same
+kind of computational check as the zero-gap case, not assumed by symmetry
+alone).
+
+Picked `+1` (giving a 2-tile gap) over other bump amounts because the
+achievable gaps from this family only come in odd hexdist steps
+(equivalently, even tile-margin steps: bump `+1` -> 2-tile margin, `+2` ->
+4-tile margin, and so on) — 2 tiles lands squarely in the author's stated
+"2 or 3" range, so no half-integer workaround was needed. `SLOT_SPACING`
+(still just "hexdist between adjacent island centers", the only externally
+meaningful number) updated to match: `2 * (ISLAND_RADIUS + 1) + 1` = 29;
+re-verified the `paint_margin_cell` ring-reach identity still holds
+(`SLOT_SPACING` per ring, checked rings 1-11 again with the bumped radius —
+still exact, since that identity depends only on the placement basis, not
+on `ISLAND_RADIUS` itself).
+
+**VERIFIED**: both `cargo build -p server` and the client (native + web)
+clean, republished + regenerated bindings (no schema change). Screenshotted
+6 real islands again after the change: a clean, uniform dark gap now visible
+between every pair of neighbors — narrower than the original ~3-tile margin
+band, wider than touching, matching the ask.
+
+---
+
+**Previous batch:** F9.5 — supersedes the immediately-previous batch. Author
+follow-up, twice: first "I just dont want any triangular gaps, not just
+smaller" (ruling out the SLOT_SPACING-only tweak below as insufficient),
+then the actual diagnosis — "change the disposition so that sides of the
+hexagons are facing each other". That's exactly right: the previous batch
+only shrank the same-axis coarse spacing, but a naive same-axis scheme
+places neighboring islands along the axial grid's VERTEX directions, not
+its flat-edge directions — no spacing value on that scheme can ever reach
+zero gap, it can only shrink the (always-triangular) gap down to nothing
+while never actually closing it. Confirmed this numerically before writing
+any Rust: swept `SLOT_SPACING` 22..29 under the current formula and the
+uncovered-cell count never reaches zero (minimum 576 uncovered cells out of
+3721 sampled, even at spacing=26 where islands' hex regions already
+mathematically touch).
+
+**Real fix**: islands need to sit on a genuinely different coarse lattice —
+the standard "hex-of-hexes" tiling used for packing hex-distance-R
+"super-hexagons" (`3R²+3R+1` cells each; 547 for `R=13`) with zero gap AND
+zero overlap. Its two generators are `SLOT_U = (R, R+1)` and `SLOT_V =
+(-(R+1), 2R+1)` — verified by exhaustive search over small integer bases
+(not guessed): computed, for many candidate generator pairs, whether every
+fine cell near the origin is covered by AT MOST one island (no overlap) as
+well as at least one (no gap); this pair is the one that satisfies both
+(others found during the search covered every cell but with real overlaps —
+a subtly different, and wrong, kind of "no gap").
+
+The pleasant surprise: `slot_coords`'s ring-spiral algorithm (which islands
+get which abstract integer index, spiraling outward in rings of `6*ring`)
+didn't need to change AT ALL — it was always just enumerating positions in
+an abstract coordinate space using the standard 6 axial unit directions,
+never assuming anything about how that space maps to fine-grid pixels. Only
+the two functions that DO that mapping needed to change:
+- `slot_center(q, r)`: was `(SLOT_SPACING*q, SLOT_SPACING*r)` (independent
+  per-axis scaling); now `q*SLOT_U + r*SLOT_V` (a proper 2D linear
+  combination of the new basis).
+- `in_any_island_territory(q, r)`: needs the INVERSE map (fine cell -> which
+  coarse slot owns it) to find the nearest slot candidate before the
+  existing "check candidate + its 6 neighbors" defensive scan (unchanged) —
+  was a simple per-axis divide (`cube_round(q/SLOT_SPACING, r/SLOT_SPACING)`,
+  valid only because the old basis was axis-aligned); now a real 2x2 matrix
+  inverse (`SLOT_DET` is the basis matrix's determinant, which not
+  coincidentally equals 547 — the per-island cell count — which is the
+  actual algebraic reason this tiles perfectly rather than a happy
+  coincidence).
+
+`SLOT_SPACING` itself stays defined (`2*ISLAND_RADIUS+1` = 27, unchanged
+from the previous batch) since it's still an accurate, meaningful number —
+the hexdist between any two ADJACENT islands' centers in the CORRECT
+tiling, confirmed identical for every ring (checked rings 1-11, always
+exactly `27 * ring`) — just no longer used as a naive per-axis scale
+anywhere. It's also still exactly right for `paint_margin_cell`'s existing
+margin-bound formula (`SLOT_SPACING * (occupied_rings + 1)`), which needed
+no change: confirmed the max fine-hexdist reach of ring N is exactly `27*N`
+for every ring checked, not just the 6 axis corners.
+
+Applied identically in both `server/src/lib.rs` (`geometry` module,
+`SLOT_U`/`SLOT_V`/`SLOT_DET` consts) and `client/src/world.rs` (mirrored
+exactly, same names/values) — client's now-fully-unused `SLOT_SPACING`
+constant (nothing left references it there; the server still uses it for
+the margin bound, a server-only concern) removed rather than left dead.
+
+**VERIFIED**: Python prototype (not just the Rust code) checked slots 0..800
+for duplicate coarse assignments (zero), slots 0..200's resulting island
+regions for cell-level overlaps (zero) and gaps in a large inner window
+(zero), and the inverse-lookup formula against 19,881 brute-force-checked
+fine cells (zero mismatches) — all before writing a line of Rust, given how
+much worse a wrong geometry rewrite would be than the cosmetic gap issue it
+replaces. Both `cargo build -p server` and the client (native + web) build
+clean. Republished the local instance, regenerated bindings (no schema
+change). Screenshotted 6 real islands (4 real browser connections, freshly
+seeded so they landed in the first ring around slot 0) at a zoomed-out view:
+flat sides touching flat sides, no visible gap anywhere, no overlap —
+matches the author's ask exactly.
+
+---
+
+**Previous batch:** F9.5 (author feedback, live during item 9's hand-testing)
+— islands felt too far apart; author wants them closer, side by side, with
+only small triangular gaps at the 3-way meeting points (classic hex-packing
+look) instead of the ~3-tile margin band `SLOT_SPACING` originally left.
+
+**Fix**: `SLOT_SPACING` 29 -> 27 (`2 * ISLAND_RADIUS + 1`, a 1-tile margin),
+mirrored exactly in both `server/src/lib.rs` and `client/src/world.rs`
+(unchanged: neither geometry formula shape, just the constant). Re-ran the
+item-9 verification script with the new value: still zero duplicate
+coarse-cell assignments across slots 0..500, minimum world-hexdist between
+any two islands' centers is now 27 (was 29), still safely above `2 *
+ISLAND_RADIUS` (26) — no overlap introduced, the margin just shrank from 3
+tiles to 1. Republished the local instance, regenerated bindings (no schema
+change, `module_bindings/` came out byte-identical), rebuilt both clients
+clean.
+
+---
+
+**Previous batch:** F9.5 item 9 — island placement retest (ex-F6.5 task 2).
 The original report predates the F2-F6 geometry rewrites; plan.md's own
 instruction is to retest fresh and only chase render-side causes if it still
 reproduces.

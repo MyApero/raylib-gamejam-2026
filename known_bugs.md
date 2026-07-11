@@ -14,6 +14,14 @@ caller's current hue the first frame it's known — see status.md)
 rolls a fresh `ctx.rng()` hue instead of the deterministic `start_hue` — see status.md)
 
 - [ ] Ilot aren't correctly placed in the world
+(F9.5 item 9: original placement geometry re-verified mathematically, no bug
+found. Author additionally asked for islands to sit closer, flat sides
+touching flat sides — the naive same-axis coarse spacing could never do
+that at any spacing value, so this became a real placement algorithm
+change: islands now sit on a "hex-of-hexes" tiling basis, with a deliberate
+uniform 2-tile gap (author's final call: "a gap of 2 or 3"). See status.md.
+Left unchecked pending the author's own visual confirmation on the deployed
+build)
 
 - [ ] A player that creates an ilot by connecting and disconnects just after without doing a single "action" (modifying a cell, merging) should be considered as dead and he should be removed from the world after a while (like 5 minutes). His ilot would be removed and his user too (that would reduce the total number of players).
 

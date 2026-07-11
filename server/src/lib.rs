@@ -5,7 +5,18 @@ use spacetimedb::{Identity, ReducerContext, ScheduleAt, Table, TimeDuration, Tim
 /// these EXACTLY in the native and web clients.
 mod constants {
     pub const ISLAND_RADIUS: i32 = 13;
-    pub const SLOT_SPACING: i32 = 29;
+    // Author-requested (F9.5): islands sit side by side, flat sides facing
+    // flat sides (a perfect hex-of-hexes tiling — see
+    // `geometry::SLOT_PLACEMENT_RADIUS`/`SLOT_U`/`SLOT_V`, which do the
+    // actual placement math; a naive same-axis coarse scaling can never
+    // reach zero gap at ANY spacing value, only shrink an always-triangular
+    // gap toward it, because the coarse step directions point at the
+    // hexagon's VERTICES rather than the middle of a flat edge), with a
+    // deliberate uniform 2-tile gap left between neighbors (not zero —
+    // author wanted a little breathing room after all). This is still
+    // exactly the hexdist between any two ADJACENT islands' centers in that
+    // tiling — verified computationally, not just algebra on paper.
+    pub const SLOT_SPACING: i32 = 2 * (ISLAND_RADIUS + 1) + 1;
     // F9.5 item 3 (author-reported: "more range to merge" / known_bugs.md):
     // raised from 1.0 — the deployed build's range felt too short in
     // hand-testing. Mirrored in plan.md's constants table; re-tune both
@@ -39,7 +50,36 @@ mod constants {
 /// Axial hex geometry, slot-lattice mapping and cell-id packing — see
 /// plan.md "Geometry spec". Pure functions only; no DB access.
 mod geometry {
-    use super::constants::{ISLAND_RADIUS, SLOT_SPACING};
+    use super::constants::ISLAND_RADIUS;
+
+    /// Hex-of-hexes tiling basis (F9.5): the two coarse-lattice generators
+    /// that tile hex-distance-`R` "super-hexagons" (`3R²+3R+1` cells each)
+    /// with ZERO gap and ZERO overlap — a standard identity for
+    /// centered-hexagonal-number clusters, verified computationally (every
+    /// fine cell near the origin belongs to EXACTLY one placement cell)
+    /// rather than assumed from the formula alone. `slot_coords` below is
+    /// completely unaware of these — it only ever enumerates abstract
+    /// integer (q, r) hex-ring positions; `SLOT_U`/`SLOT_V` are what turn
+    /// that abstract index into an actual fine-grid position, in
+    /// `slot_center`.
+    ///
+    /// Deliberately `ISLAND_RADIUS + 1`, not `ISLAND_RADIUS` itself: tiling
+    /// on the ACTUAL island radius touches with zero gap at all (verified
+    /// too, but the author wanted a little breathing room between islands
+    /// after seeing it) — placing islands as if they were one tile bigger,
+    /// while their real paintable interior (`ISLAND_RADIUS`, everywhere else
+    /// in this file) stays 13, leaves a uniform 2-tile gap on every side
+    /// instead. `R` here means this bumped placement radius, not
+    /// `ISLAND_RADIUS`.
+    const SLOT_PLACEMENT_RADIUS: i32 = ISLAND_RADIUS + 1;
+    const SLOT_U: (i32, i32) = (SLOT_PLACEMENT_RADIUS, SLOT_PLACEMENT_RADIUS + 1);
+    const SLOT_V: (i32, i32) = (-(SLOT_PLACEMENT_RADIUS + 1), 2 * SLOT_PLACEMENT_RADIUS + 1);
+    /// Determinant of the [`SLOT_U`, `SLOT_V`] basis matrix — the
+    /// denominator when inverting the map in `in_any_island_territory`. No
+    /// longer equal to `ISLAND_RADIUS`'s cell count now that the placement
+    /// radius is deliberately bumped for a gap (that identity only held at
+    /// zero gap); still the reason this tiles perfectly regardless.
+    const SLOT_DET: i32 = SLOT_U.0 * SLOT_V.1 - SLOT_U.1 * SLOT_V.0;
 
     pub fn hexdist(dq: i32, dr: i32) -> i32 {
         (dq.abs() + dr.abs() + (dq + dr).abs()) / 2
@@ -121,15 +161,27 @@ mod geometry {
         ring_of(highest_slot).max(1)
     }
 
-    /// Fine axial center of a coarse slot.
+    /// Fine axial center of a coarse slot — `q * SLOT_U + r * SLOT_V` (a
+    /// proper 2D linear combination of the tiling basis, NOT independent
+    /// per-axis scaling — see `SLOT_U`/`SLOT_V`'s comment for why that
+    /// distinction is exactly what eliminates the gaps).
     pub fn slot_center(q: i32, r: i32) -> (i32, i32) {
-        (SLOT_SPACING * q, SLOT_SPACING * r)
+        (q * SLOT_U.0 + r * SLOT_V.0, q * SLOT_U.1 + r * SLOT_V.1)
     }
 
     /// True if the fine world cell `(q, r)` belongs to some island's
     /// interior (occupied or not — the whole coarse lattice is reserved).
     pub fn in_any_island_territory(q: i32, r: i32) -> bool {
-        let (cq, cr) = cube_round(q as f32 / SLOT_SPACING as f32, r as f32 / SLOT_SPACING as f32);
+        // Invert the SLOT_U/SLOT_V linear map — a real 2x2 matrix inverse,
+        // not independent per-axis division, since the basis isn't
+        // axis-aligned — to find the coarse slot this fine cell is nearest
+        // to, then (unchanged from before) check that candidate AND its 6
+        // neighbors, since a plain `cube_round` can land one cell off near a
+        // boundary.
+        let det = SLOT_DET as f32;
+        let qf = (SLOT_V.1 as f32 * q as f32 - SLOT_V.0 as f32 * r as f32) / det;
+        let rf = (-SLOT_U.1 as f32 * q as f32 + SLOT_U.0 as f32 * r as f32) / det;
+        let (cq, cr) = cube_round(qf, rf);
         for &(dq, dr) in std::iter::once(&(0, 0)).chain(DIRECTIONS.iter()) {
             let (sq, sr) = (cq + dq, cr + dr);
             let (cx, cy) = slot_center(sq, sr);

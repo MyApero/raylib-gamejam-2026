@@ -67,6 +67,17 @@ next one starts.
     by a solo rater — jam-critical, so it is P0.
 16. Color space is HSV (raylib native). OKLCh is at most a P2 rendering swap; the
     canonical stored model stays `(hue u16, sat u8, val u8)` regardless.
+17. (2026-07-11, supersedes the F8 hand-test choice) Island info opens on **hover**
+    over a foreign island on desktop; double-click-to-like stays exactly as shipped;
+    touch is unchanged (tap opens, double-tap likes). The F8 click-to-open version
+    "turned out to feel wrong in practice" — the exact reopening condition the backlog
+    reserved.
+18. (2026-07-11) Eraser reverts a cell to the unpainted state (the cell row is
+    deleted), is permitted exactly where painting is permitted (own island interior +
+    margin), and consumes paint budget like a normal paint.
+19. (2026-07-11) Middle-click eyedropper adopts a tile's color only if that tile's hue
+    is already in the caller's inventory; it never grants hues — long-press merge
+    remains the only acquisition path. Sat is re-clamped to the caller's cap.
 
 ## Canonical constants — single source of truth
 
@@ -77,8 +88,8 @@ pointing here).
 | Constant | Value | Meaning |
 |---|---|---|
 | `ISLAND_RADIUS` | 13 | hex distance from island center to edge (side 14, 547 cells) |
-| `SLOT_SPACING` | 29 | fine-hex distance between adjacent island slot centers (leaves a ~2-tile margin band between islands) |
-| `MERGE_DIST` | 1.0 | cursor-merge trigger distance, world units |
+| `SLOT_SPACING` | 29 | fine-hex distance between adjacent island slot centers, on the "hex-of-hexes" tiling basis added at F9.5 (`geometry::SLOT_U`/`SLOT_V`, generated from `ISLAND_RADIUS + 1`) — flat sides face flat sides with a uniform 2-tile gap, not the old same-axis scaling's inescapable triangular gaps at every spacing value |
+| `MERGE_DIST` | 2.0 | cursor-merge trigger distance, world units (raised from 1.0 — deployed-build testing found the range too short; author tunes by feel at F9.5, keep this row in sync with the settled value) |
 | `PAINT_BUCKET_MAX` | 1000.0 | rate limit: bucket capacity (raised 50x from the original 20.0 — felt too restrictive in hand-testing) |
 | `PAINT_REFILL_PER_SEC` | 50.0 | rate limit: 1000 tiles / 20 s (raised 50x from the original 1.0, same ratio) |
 | `PRESENCE_TIMEOUT` | 3 s | cursor shown / merge-eligible if `last_seen` fresher than this |
@@ -366,7 +377,12 @@ Verify:
   private window, import token → same account, `SELECT COUNT(*) FROM user` unchanged.
 - Reset: inventory has exactly 1 new hue after, XP 0, island art intact.
 
-## F6.5 — Pre-submission bug sweep
+## F6.5 — Pre-submission bug sweep — ABSORBED INTO F9.5 (2026-07-11)
+
+> Tasks 1–3 below never ran as a batch — the commit history goes F6 → F8 → F9 →
+> deploy with no F6.5 execution in `status.md`. They are re-scheduled as F9.5 items
+> 2 (FPS), 4 (recent-colors), and 9 (island placement retest). This section is kept
+> for the investigation notes it documents; do not execute it separately.
 
 **Goal**: clear the still-open items in `known_bugs.md` before F7 locks in the
 submitted build. Time-box this hard — per the existing rule ("P1/P2 are cut, never
@@ -419,12 +435,12 @@ the kind of change that needs a human looking at the screen); record
 VERIFIED/REASONED in `status.md`; re-check `du`/build still clean. Check off the
 corresponding line in `known_bugs.md` as each lands.
 
-## F7 — Deployment + itch.io submission package
+## F7 — Deployment + itch.io submission package — DONE (2026-07-11)
 
-> **2026-07-11 status check**: F7 has not started — every item in its `status.md`
-> checklist is still unchecked, even though F8 (P1) already shipped ahead of it. F7 is
-> the single blocking task for tomorrow's deadline (2026-07-12 18:00 UTC); after F6.5,
-> do this next, before any further P1/P2 work.
+> **2026-07-11 status check**: F7 is complete — the game is deployed and submittable.
+> F8/F9 already shipped ahead of it and remain live. Remaining time before the deadline
+> (2026-07-12 18:00 UTC) is free for further P1/P2 work or the F6.5-adjacent backlog,
+> subject to the freeze window rule below.
 
 **Goal**: publicly playable from itch.io before the deadline. DO THIS THE MOMENT F5/F6
 LAND — it de-risks the wss/itch path; everything after is redeploys.
@@ -505,6 +521,145 @@ the game that was submitted. Consequences:
 - Time XP: scheduled reducer every 60 s grants 1 XP to users with fresh `last_seen`.
 - Level-up feedback: toast + sat-cap slider max visibly grows.
 
+## F9.5 — Post-deploy bug sweep (author-ordered: do before F9.6 and F10)
+
+**Goal**: fix everything the author hit while hand-testing the DEPLOYED build
+(2026-07-11), plus the F6.5 leftovers that never ran. Everything here must be deployed
+AND author-hand-tested before the freeze (2026-07-12 18:00 UTC). The list is
+priority-ordered — work top-down, cut from the bottom; anything cut goes back to the
+backlog and waits for the post-voting window.
+
+Tasks (priority order):
+
+1. **Account import is broken (CRITICAL)** — pasting a token creates a NEW account
+   instead of recovering the existing one. Author reproduced it EVERYWHERE: standalone
+   site, itch embed, cross-origin (copy on one, import on the other), and local dev —
+   so the import flow itself is broken, not origin-partitioned storage. The plumbing
+   on record: `ui.rs` import field → `web.rs` `actions.import_token` (~line 769) →
+   JS `window.stdb.importToken(token)` → `localStorage.setItem(TOKEN_KEY, ...)` +
+   reload → connect URL appends `?token=...` (`game.html` ~lines 100–107). Suspects,
+   in order: (a) does `importToken` actually reload the page in the deployed build
+   (F6 spec said "page reload is acceptable" — verify it happens at all); (b) the
+   `failedBeforeOpen >= 2` purge (~lines 139–140) deleting a VALID imported token when
+   the socket bounces (e.g. wss retries through Cloudflare), then minting a fresh
+   identity; (c) whether SpacetimeDB 2.6.1 accepts `?token=` on `v1.json.spacetimedb`
+   at all — F6's verify was recorded REASONED, never run live, so the whole path may
+   never have worked; probe it the way F5 probed the wire format; (d) TOKEN_KEY slot
+   namespacing (`stdb_token_slot<N>` vs `stdb_token`, `game.html` ~line 90) differing
+   between the itch `index.html` page and `game.html`. Native import is secondary —
+   web is the judged target.
+   Verify: copy ID from account A → import in a private window → same short identity
+   in the header, `spacetime sql hexmerge "SELECT COUNT(*) FROM user"` unchanged;
+   repeat itch ↔ standalone in both directions.
+2. **FPS at scale** (ex-F6.5 task 3, root-caused there, still unfixed): both clients
+   rebuild a full `HashMap` from EVERY `island_cell` row in the world on EVERY frame
+   (`main.rs` ~:593, `web.rs` ~:958 at F6.5 time — re-locate after the F8/F9 drift),
+   cost linear in total painted cells regardless of view culling. Fix in BOTH clients:
+   build the map only from islands that are `in_view`, or maintain it incrementally
+   from the subscription's insert/update/delete events. Target: the author's
+   40 fps @ 10 islands / 30 fps @ 18 goes back to a steady 60.
+3. **Merge range too short** — `MERGE_DIST` 1.0 → 2.0 (constants table updated;
+   `server/src/lib.rs` constants ~line 9 is the live site — mirror wherever clients
+   re-declare it). Author tunes by feel during hand-test; write the settled value back
+   into the constants table.
+4. **Recent-colors: seeding + reset** (ex-F6.5 task 1 + new report "reset doesn't
+   reset the last 3"): seed `last3` with the current brush hue on the first frame
+   after connect AND after a successful `reset_account` (clear, then reseed with the
+   fresh hue). Both clients; same code area, do together.
+5. **Modal click-through** — clicking the color-overlay close button also
+   paints/clicks the tile behind it, violating F3's "overlay is modal" rule. Swallow
+   pointer input consumed by overlay chrome, both clients. (Listed in
+   `other_ideas.md` but it's a bug against spec, so it rides in the sweep.)
+6. **Cursor size vs zoom** — other players' cursors are drawn screen-space today, so
+   zooming out leaves them huge relative to tiles. Draw them in world units
+   (≈ tile-sized, per the author's note in `other_ideas.md`), clamped to a minimum
+   on-screen size so they stay findable when zoomed far out. Both clients. Supersedes
+   the backlog "cursor scales with zoom" entry.
+7. **Island info on hover** (decision 17): popup opens on hover over a foreign island
+   (~200 ms delay so paint sweeps don't flicker it; suppressed while a drag/paint
+   stroke is active), closes on hover-out. Double-click-to-like unchanged; touch
+   unchanged (tap opens, double-tap likes).
+8. **Safari (macOS) zoom too fast/jumpy** — trackpad scroll zooms in huge
+   uncontrollable steps. Likely cause: Safari's wheel deltas differ in scale/deltaMode
+   from Chrome/Firefox and raylib-emscripten consumes them raw. Fix at the JS layer of
+   `game.html`: intercept `wheel`, normalize by `deltaMode`, clamp the per-event zoom
+   step (sign + capped magnitude); check Safari's proprietary
+   `gesturestart`/`gesturechange` pinch events while there. Verify: author's Mac only
+   — and judges plausibly rate on Macs, so don't cut this one lightly.
+9. **Island placement retest** (ex-F6.5 task 2): the report predates the F2–F6
+   rewrites and geometry drift was ruled out by inspection. Retest fresh on the
+   deployed build with 3+ islands; ONLY if it still reproduces, chase render-side
+   causes (culling pop-in padding, stale/duplicate subscription rows). If it doesn't
+   reproduce, check it off and move on.
+10. **Dead-player reap** (promoted from the backlog): scheduled reducer (piggyback the
+    F9 time-XP cadence or its own 60 s schedule) deletes `user` + `island` (+ that
+    island's `island_like` / link-click rows + the user's `inventory`) when
+    `online == false`, `last_seen` older than 5 min, the island has zero
+    `island_cell` rows, AND inventory has ≤ 1 row (the seed hue — XP is NOT part of
+    the test, time-XP may have granted a few). Accepted edge case: a reset veteran
+    idling 5 min with a still-empty island gets reaped — jam-acceptable, note it in
+    `status.md`. Frees the slot and deflates the drive-by player count. Server
+    change ⇒ full publish + regen + web-mirror cycle per ground rules.
+
+Files: `client/src/main.rs`, `client/src/bin/web.rs`, `client/src/ui.rs`,
+`client/web/game.html`, `server/src/lib.rs` (items 3, 10, and 1 if server-side),
+generated bindings. Redeploy per F7's runbook after each server publish; keep
+`./build-web.sh` green at every item boundary.
+
+Verify: author hand-tests each item ON THE DEPLOYED BUILD (that's where the bugs were
+found, not LAN); `status.md` VERIFIED/REASONED per item; check off each
+`known_bugs.md` line as it lands; `du -sh client/web` still well under 64 MB. Also
+check off in `known_bugs.md`, no code needed (resolved back in F6 per F6.5's notes):
+merge-toast identity leak, paste-in-import-field, reset-random-color.
+
+## F9.6 — UX polish batch (author-ordered: before F10 — "polish is judged, admin can slip")
+
+**Goal**: quick player-facing wins triaged from `other_ideas.md`. Same freeze
+constraint as F9.5; cut freely from the bottom. Items 1–2 implement decisions 18–19.
+
+Tasks:
+1. **Eraser** (decision 18): reducers `erase_island_cell(q_local, r_local)` /
+   `erase_margin_cell(q, r)` — delete the cell row; same validation as the matching
+   paint reducer (ownership/margin membership, token bucket charge). Client: eraser
+   toggle in the footer (+ `E` key), cursor visibly shows eraser mode. Server change
+   ⇒ publish + regen + web mirror.
+2. **Middle-click eyedropper** (decision 19): picks the hovered tile's h/s/v — hue
+   must already be in the caller's inventory (client-side check against the local
+   inventory subscription; `set_brush` re-validates server-side anyway), sat clamped
+   to `SAT_CAP(level)`. If the hue isn't unlocked: toast "not unlocked — long-press
+   to merge". Mouse only; no touch equivalent.
+3. **Heart icon for like** — replace the like button/label glyph in the island popup
+   with a heart (filled = already liked), both clients.
+4. **Color overlay ergonomics**: Escape closes it; clicking outside the panel closes
+   it; swatches sorted by hue; hovering a swatch shows its hex code (of the swatch as
+   rendered).
+5. **Keybindings/help overlay**: Escape with no overlay open toggles a minimal
+   controls list (this is the minimal version of F12's help-overlay item — F12 then
+   only extends it). Escape with an overlay open closes that overlay (consistent with
+   item 4).
+6. **Keyboard + right-drag camera**: arrow keys AND WASD pan; Q/E zoom out/in (wheel
+   behavior untouched); right-click-drag pans (in addition to SHIFT+drag /
+   middle-drag). Text fields (name, import) must swallow keys while focused so typing
+   a name doesn't pan the camera.
+7. **Launch intro**: on the first world render after connect, the camera starts
+   framing the whole occupied world, then eases to the player's island over ~1.5–2 s;
+   any input skips it. Client-only, both clients.
+8. **Borderless far zoom**: when the on-screen hex size drops below a threshold
+   (executor picks, ~4–6 px), skip the tile outline pass so the world reads as a
+   painting (author's note) — also a small render win. Both clients.
+
+Files: `client/src/main.rs`, `client/src/bin/web.rs`, `client/src/ui.rs`,
+`client/src/world.rs`, `client/web/game.html`; `server/src/lib.rs` + bindings for
+item 1 only.
+
+Verify: author hand-test on the deployed build; `./build-web.sh` green; `du` check.
+Eraser specifically: erase own island cell → row gone
+(`spacetime sql hexmerge "SELECT COUNT(*) FROM island_cell"` drops), erase a FOREIGN
+island cell → rejected; eyedropper on an un-unlocked hue → toast, brush unchanged.
+
+Not scheduled from `other_ideas.md` (stays in the backlog below): "Merge with me!"
+center bot, customizable island border color.
+
 # P2 — only if time remains before 2026-07-12 17:00 UTC
 
 - **F10 Admin**: `claim_admin(password)` verified against a SHA-256 constant (repo is
@@ -514,8 +669,9 @@ the game that was submitted. Consequences:
 - **F11 Flying gift**: scheduled spawn of a drifting pickup (position table row,
   client-animated), click/tap to claim → random hue or XP.
 - **F12 Polish**: sounds (raylib `LoadSound`, CC0 assets only), bots adapted to the new
-  schema (they keep the world alive for raters), help overlay explaining merge, page
-  styling on itch.
+  schema (they keep the world alive for raters — include the backlog's "Merge with me!"
+  center bot here), help overlay explaining merge (extends F9.6's minimal keybindings
+  overlay), page styling on itch.
 - **F13 Hexa event** — the merge mechanic at 6 (author-designed).
   - *Trigger* (server, in `set_pos` after the pairwise-merge scan): count eligible
     cursors — online, `last_seen` < `PRESENCE_TIMEOUT`, not locked — within
@@ -557,13 +713,8 @@ Raw notes live in `other_ideas.md` and `known_bugs.md`; triaged here so plan.md 
 the single source of truth. None of these are P0/P1 — pick up only after F7 is
 submitted, and only if the freeze window rule still allows a redeploy.
 
-- **Dead-player cleanup** (from `known_bugs.md`): a player who connects, gets an
-  island, and disconnects without a single paint/merge action should be reaped after
-  ~5 minutes idle — remove their `user`, `island`, and (empty) `island_cell` rows, so
-  the slot frees up and the visible player count doesn't inflate from drive-bys. Needs
-  a scheduled reducer plus a cheap "no action taken" definition (simplest: that
-  island's `island_cell` row count is 0). Natural fit alongside F9's other scheduled
-  reducer (time-XP), or its own small feature after F9.
+- **Dead-player cleanup** — SCHEDULED: promoted to F9.5 item 10 (2026-07-11), with
+  the "no action taken" definition pinned there (empty island AND inventory ≤ 1 row).
 - **Center-island identity** ("bot drawing R and a heart" / "should also be a
   battlefield"): partially live already — `heart-bot` and `hexagon-bot` (see
   `WORK.md`) trace curves as always-on players, just not on the admin's own slot-0
@@ -577,11 +728,20 @@ submitted, and only if the freeze window rule still allows a redeploy.
   decision "one island per player" (#10) — a real feature with real scope (multi-slot
   assignment per player, per-island brush switching, new UI). Needs an explicit author
   ruling, not assumed here; do not implement ad hoc.
-- **Cursor scales with zoom**: rendering polish — draw other players' cursors at a
-  minimum on-screen size so they stay legible at high zoom instead of shrinking to a
-  dot. Small P2 rendering task; pairs naturally with F13's snap-to-vertex cursor
-  rendering.
-- **Hover-to-see-island-info**: superseded. F8 shipped click-to-open (on a foreign
-  island) plus double-click-to-like instead of hover, after the author picked that
-  gesture explicitly during F8 hand-testing (see `status.md`'s F8 notes). Not
-  reopening unless the click version turns out to feel wrong in practice.
+- **Cursor scales with zoom** — SCHEDULED: promoted to F9.5 item 6 (2026-07-11),
+  reframed after deployed-build testing ("dezoom should reduce the size of other's
+  cursor"): world-space rendering with a minimum on-screen clamp. Still pairs with
+  F13's snap-to-vertex rendering later.
+- **Hover-to-see-island-info** — REOPENED and SCHEDULED: the F8 click version did
+  turn out to feel wrong in the deployed build, exactly the reopening condition
+  reserved here. Now decision 17 + F9.5 item 7 (hover opens, double-click-to-like
+  and touch unchanged).
+- **"Merge with me!" center bot** (from `other_ideas.md`): a bot cursor idling near
+  the world center with a distinct hue and an on-screen callout, so solo raters get
+  an easy first merge. Depends on adapting the bots to the new schema (F12) and
+  brushes against the center-island identity ruling still pending above — schedule
+  as part of F12, not alone.
+- **Customizable island border color / transparency** (from `other_ideas.md`):
+  per-island schema field + picker UI — a full publish/regen/mirror cycle for pure
+  cosmetics. Post-voting redeploy candidate; not worth a schema cycle before the
+  freeze.

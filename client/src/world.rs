@@ -9,7 +9,6 @@ use std::sync::OnceLock;
 
 pub mod constants {
     pub const ISLAND_RADIUS: i32 = 13;
-    pub const SLOT_SPACING: i32 = 29;
     /// Client-side send-rate cap for `set_pos`; the server has no matching
     /// limit (cursor spam is cheap), this just avoids flooding the socket.
     pub const CURSOR_SEND_HZ: f32 = 20.0;
@@ -66,6 +65,17 @@ pub fn cube_round(qf: f32, rf: f32) -> (i32, i32) {
 /// E, SE, NW, W, SW, NE.
 pub const DIRECTIONS: [(i32, i32); 6] = [(1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1)];
 
+/// Hex-of-hexes tiling basis (F9.5) — mirrors `server::geometry`'s
+/// `SLOT_PLACEMENT_RADIUS`/`SLOT_U`/`SLOT_V`/`SLOT_DET` exactly; see their
+/// comments there for why this (not a naive per-axis scale) is what makes
+/// neighboring islands share a flat edge, and why the placement radius is
+/// deliberately bumped by 1 over the real `ISLAND_RADIUS` (a uniform 2-tile
+/// gap, not zero).
+const SLOT_PLACEMENT_RADIUS: i32 = constants::ISLAND_RADIUS + 1;
+const SLOT_U: (i32, i32) = (SLOT_PLACEMENT_RADIUS, SLOT_PLACEMENT_RADIUS + 1);
+const SLOT_V: (i32, i32) = (-(SLOT_PLACEMENT_RADIUS + 1), 2 * SLOT_PLACEMENT_RADIUS + 1);
+const SLOT_DET: i32 = SLOT_U.0 * SLOT_V.1 - SLOT_U.1 * SLOT_V.0;
+
 /// slot_index -> coarse axial (Q, R). Slot 0 = admin at the origin; slots
 /// 1.. spiral out over concentric coarse rings. Must match
 /// `server::geometry::slot_coords` exactly.
@@ -100,18 +110,22 @@ pub fn slot_coords(slot_index: u32) -> (i32, i32) {
     (q, r)
 }
 
-/// Fine axial center of a coarse slot.
+/// Fine axial center of a coarse slot — `q * SLOT_U + r * SLOT_V` (a proper
+/// 2D linear combination, not independent per-axis scaling). Mirrors
+/// `server::geometry::slot_center` exactly.
 pub fn slot_center(q: i32, r: i32) -> (i32, i32) {
-    (constants::SLOT_SPACING * q, constants::SLOT_SPACING * r)
+    (q * SLOT_U.0 + r * SLOT_V.0, q * SLOT_U.1 + r * SLOT_V.1)
 }
 
 /// True if the fine world cell `(q, r)` belongs to some island's interior
-/// (occupied or not). Mirrors `server::geometry::in_any_island_territory`.
+/// (occupied or not). Mirrors `server::geometry::in_any_island_territory`
+/// exactly, including the 2x2 matrix inverse (the tiling basis isn't
+/// axis-aligned, so this can't be independent per-axis division).
 pub fn in_any_island_territory(q: i32, r: i32) -> bool {
-    let (cq, cr) = cube_round(
-        q as f32 / constants::SLOT_SPACING as f32,
-        r as f32 / constants::SLOT_SPACING as f32,
-    );
+    let det = SLOT_DET as f32;
+    let qf = (SLOT_V.1 as f32 * q as f32 - SLOT_V.0 as f32 * r as f32) / det;
+    let rf = (-SLOT_U.1 as f32 * q as f32 + SLOT_U.0 as f32 * r as f32) / det;
+    let (cq, cr) = cube_round(qf, rf);
     for &(dq, dr) in std::iter::once(&(0, 0)).chain(DIRECTIONS.iter()) {
         let (sq, sr) = (cq + dq, cr + dr);
         let (cx, cy) = slot_center(sq, sr);
