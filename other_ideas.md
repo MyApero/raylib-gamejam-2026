@@ -19,4 +19,9 @@
 - [ ] Color interface, hover should show the HEX code
 - [ ] At a certain zoom level, remove the tile black border to make it look more like a painting
 - [ ] Customise your Isle border color or make it transparent (remove)
-- [ ] Click on close for color modal shouldn't click on the tile behind
+- [x] Click on close for color modal shouldn't click on the tile behind
+(F9.5 item 5: a click's press and release span several frames — the overlay
+closes on the press frame, but the button stays down for the rest of the
+click, and every one of those frames used to see "no modal" and let the SAME
+press paint. Latches at press-start for the whole gesture instead; see
+status.md)

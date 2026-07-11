@@ -7,7 +7,47 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9.5 item 4 — recent-colors (last-3 footer ring): two
+**Current batch:** F9.5 item 5 — modal click-through: clicking an overlay's
+close button (Colors/Account/island-info) also painted or long-pressed the
+map cell behind it, violating F3's "overlay is modal" rule.
+
+Root cause (found the hard way — my first fix attempt didn't hold up under a
+scripted repro, worth recording why): `map_input_allowed` gated on
+`ui_state.overlay_open` etc AFTER `ui::handle_input` ran, so on the exact
+frame a close click lands, the overlay is already closed by the time
+`map_input_allowed` is computed — that frame's click then also reads as a
+map click on whatever's behind it. My first attempt snapshotted the modal
+state ONCE, before `handle_input`, and gated on both before/after — this
+looked right and passed a naive same-frame test, but a REAL click's press and
+release land on DIFFERENT engine frames (a mouse button held for even a
+fraction of a second spans several frames at 60fps): the overlay closes on
+the PRESS frame, but the button stays physically down for several MORE
+frames before release, and every one of those saw "no modal open, mouse
+still down" and let the same press paint anyway. Confirmed via a scripted
+Playwright click (holding the simulated press for 150ms, realistic for an
+actual click) against a local `spacetime start` instance, watching the
+WebSocket for `CallReducer` frames: `paint_margin_cell` fired right after
+closing the Colors overlay under the first fix.
+
+**Fix**: replaced the one-shot snapshot with a per-gesture latch
+(`suppress_map_until_release` — `main.rs`'s a local, `bin/web.rs`'s a new
+`State` field since its frame function has no persistent locals otherwise).
+Set once, at the moment `is_mouse_button_pressed(LEFT)` fires, to whatever
+the modal-open state was AT THAT INSTANT; held unchanged for the rest of the
+press regardless of how many frames later the overlay closes; cleared on
+`is_mouse_button_released`. `map_input_allowed` now gates on this latch
+instead of a same-frame snapshot.
+
+**VERIFIED** live via the same Playwright/local-instance setup: after the
+fix, holding a 150ms click on the Colors overlay's close button produces
+ZERO `CallReducer` frames afterward (previously: a `paint_margin_cell` every
+time); a fresh, unrelated click on the map immediately afterward still
+paints normally (`paint_island_cell` fires), confirming the latch resets
+correctly on release rather than sticking. Both clients build clean.
+
+---
+
+**Previous batch:** F9.5 item 4 — recent-colors (last-3 footer ring): two
 author-caught bugs bundled together per plan.md ("same code area, do
 together"):
 1. **Not seeded on launch**: `UiState.last3` starts empty and was only ever

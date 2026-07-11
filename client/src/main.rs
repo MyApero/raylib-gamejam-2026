@@ -268,6 +268,14 @@ fn main() {
     // connecting at, say, level 3 doesn't fire a spurious "level up" toast —
     // mirrors `inventory_seeded`'s seed-then-diff pattern above.
     let mut last_level: Option<u64> = None;
+    // F9.5 item 5 (modal click-through): a real click's press and release
+    // land on DIFFERENT frames (a mouse held for even a fraction of a second
+    // spans several frames at 60fps), so gating `map_input_allowed` on only
+    // the CURRENT frame's modal state isn't enough — the overlay closes on
+    // the press frame, but every subsequent frame the button is still held
+    // sees "no modal open" and would let the SAME press paint. Latches at
+    // press-start for the whole gesture, cleared on release.
+    let mut suppress_map_until_release = false;
 
     while !rl.window_should_close() {
         if let Err(e) = ctx.frame_tick() {
@@ -328,6 +336,21 @@ fn main() {
             if let Some(user) = ctx.db.user().identity().find(&me) {
                 ui_state.seed_last3_once(user.hue);
             }
+        }
+
+        // F9.5 item 5 (modal click-through): latch at the start of a press
+        // whether a modal was open at that instant, and hold it for the
+        // whole press — a click's press and release land on different
+        // frames, so only the moment the overlay's close button is actually
+        // hit needs checking, not every frame the button happens to still be
+        // held afterward. Cleared on release so ordinary map input resumes
+        // for the NEXT press.
+        if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
+            suppress_map_until_release =
+                ui_state.overlay_open || ui_state.account_open || ui_state.island_popup.is_some();
+        }
+        if rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
+            suppress_map_until_release = false;
         }
 
         // HUD: snapshot server state, run widget input, apply resulting
@@ -451,7 +474,10 @@ fn main() {
                 }
             }
         }
-        let map_input_allowed = !ui_state.overlay_open && !ui_state.account_open && ui_state.island_popup.is_none();
+        let map_input_allowed = !suppress_map_until_release
+            && !ui_state.overlay_open
+            && !ui_state.account_open
+            && ui_state.island_popup.is_none();
 
         // Zoom toward the cursor (official raylib recipe): re-anchor
         // offset/target at the mouse before changing zoom so the world

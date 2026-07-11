@@ -600,6 +600,12 @@ struct State {
     last_sent_at: Instant,
     ws_status: String,
     now_micros: i64,
+    /// F9.5 item 5 (modal click-through): mirrors `main.rs`'s
+    /// `suppress_map_until_release` — latches at press-start whether a modal
+    /// was open, held for the whole press (which spans several frames), so
+    /// the click that closes an overlay can't also paint the cell behind it
+    /// once it's gone.
+    suppress_map_until_release: bool,
 }
 
 fn handle_message(state: &mut State, raw: &str) {
@@ -707,6 +713,19 @@ fn frame(state: &mut State) {
 
     let online = state.tables.users.values().filter(|u| u.online).count();
     let total = state.tables.users.len();
+
+    // F9.5 item 5 (modal click-through): mirrors `main.rs` — latch at
+    // press-start whether a modal was open, held for the whole press (a
+    // click's press and release land on different frames), so the click
+    // that closes an overlay can't also paint the cell behind it on a later
+    // frame where the button is still held but the overlay's already gone.
+    if state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
+        state.suppress_map_until_release =
+            state.ui_state.overlay_open || state.ui_state.account_open || state.ui_state.island_popup.is_some();
+    }
+    if state.rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
+        state.suppress_map_until_release = false;
+    }
 
     // HUD: snapshot server state, run widget input, apply resulting reducer
     // calls. Must run before the map-input blocks below so they can see
@@ -820,8 +839,10 @@ fn frame(state: &mut State) {
             }
         }
     }
-    let map_input_allowed =
-        !state.ui_state.overlay_open && !state.ui_state.account_open && state.ui_state.island_popup.is_none();
+    let map_input_allowed = !state.suppress_map_until_release
+        && !state.ui_state.overlay_open
+        && !state.ui_state.account_open
+        && state.ui_state.island_popup.is_none();
 
     // Two-finger pinch/pan (touch); single-finger tap/drag is already
     // translated to ordinary mouse events by raylib's web backend, so the
@@ -1176,6 +1197,7 @@ fn main() {
         last_sent_at: Instant::now(),
         ws_status: "connecting".to_string(),
         now_micros: 0,
+        suppress_map_until_release: false,
     });
     let arg = Box::into_raw(state) as *mut c_void;
     unsafe {
