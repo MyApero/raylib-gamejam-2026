@@ -663,10 +663,30 @@ center bot, customizable island border color.
 
 # P2 — only if time remains before 2026-07-12 17:00 UTC
 
-- **F10 Admin**: `claim_admin(password)` verified against a SHA-256 constant (repo is
-  public — never a plaintext password), grants `config.admin`; freeze toggle checked
-  by all mutating reducers; delete-island-cells reducer; admin island at slot 0;
-  backups documented as `spacetime sql` dump commands in `WORK.md`.
+- **F10 Admin**: SHIPPED (2026-07-11). `claim_admin(password)` verified against a
+  SHA-256 constant (repo is public — never a plaintext password), grants
+  `config.admin`, idempotent for the current admin; relocates the caller's existing
+  island (everyone gets one at first connect) to the reserved slot 0, swapping with
+  whatever island currently holds it rather than deleting anything, via the same
+  bump-through-a-temporary-slot technique F8's `rerank_fire` uses for `slot`'s
+  `#[unique]` constraint. `set_frozen(frozen)` (admin-only) toggles `config.frozen`,
+  enforced by a new `check_not_frozen` guard at the top of all 17 player-facing
+  mutating reducers (scheduled/system reducers and the three admin reducers
+  themselves are exempt — freeze stops players, not the world's background clocks
+  or the admin's own tools). `delete_island_cells(island_id)` (admin-only) wipes an
+  island's painted cells for moderation, leaving the island row itself untouched.
+  Backups documented as `spacetime sql` dump-per-table commands in `WORK.md`'s new
+  Admin/Backups sections (manual restore-by-hand, no automated snapshot/replay).
+  No client UI in either target — CLI-only ops tooling, per this bullet's own
+  "admin tooling is minimal for now" framing. Verified live end-to-end via a
+  throwaway WebSocket probe + `spacetime sql` against the local instance (wrong
+  password rejected, correct password grants admin + relocates the island incl. the
+  swap-with-a-previous-admin path, non-admin calls to `set_frozen`/
+  `delete_island_cells` rejected, freeze actually blocks `paint_island_cell` and
+  unfreeze restores it, `delete_island_cells` wipes exactly the targeted island).
+  NOT yet published to the production VPS — that publish is a separate, explicit
+  step for the author to trigger (same access gap as the border-customization
+  feature above).
 - **F11 Flying gift**: scheduled spawn of a drifting pickup (position table row,
   client-animated), click/tap to claim → random hue or XP.
 - **F12 Polish**: sounds (raylib `LoadSound`, CC0 assets only), bots adapted to the new

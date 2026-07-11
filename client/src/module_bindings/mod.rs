@@ -6,9 +6,11 @@
 #![allow(unused, clippy::all)]
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
+pub mod claim_admin_reducer;
 pub mod click_link_reducer;
 pub mod config_table;
 pub mod config_type;
+pub mod delete_island_cells_reducer;
 pub mod disable_island_border_reducer;
 pub mod erase_island_cell_reducer;
 pub mod erase_margin_cell_reducer;
@@ -33,6 +35,7 @@ pub mod rerank_fire_schedule_type;
 pub mod rerank_warn_schedule_type;
 pub mod reset_account_reducer;
 pub mod set_brush_reducer;
+pub mod set_frozen_reducer;
 pub mod set_island_border_reducer;
 pub mod set_island_link_reducer;
 pub mod set_lock_reducer;
@@ -44,9 +47,11 @@ pub mod unlike_island_reducer;
 pub mod user_table;
 pub mod user_type;
 
+pub use claim_admin_reducer::claim_admin;
 pub use click_link_reducer::click_link;
 pub use config_table::*;
 pub use config_type::Config;
+pub use delete_island_cells_reducer::delete_island_cells;
 pub use disable_island_border_reducer::disable_island_border;
 pub use erase_island_cell_reducer::erase_island_cell;
 pub use erase_margin_cell_reducer::erase_margin_cell;
@@ -71,6 +76,7 @@ pub use rerank_fire_schedule_type::RerankFireSchedule;
 pub use rerank_warn_schedule_type::RerankWarnSchedule;
 pub use reset_account_reducer::reset_account;
 pub use set_brush_reducer::set_brush;
+pub use set_frozen_reducer::set_frozen;
 pub use set_island_border_reducer::set_island_border;
 pub use set_island_link_reducer::set_island_link;
 pub use set_lock_reducer::set_lock;
@@ -90,7 +96,9 @@ pub use user_type::User;
 /// to indicate which reducer caused the event.
 
 pub enum Reducer {
+    ClaimAdmin { password: String },
     ClickLink { island_id: u32 },
+    DeleteIslandCells { island_id: u32 },
     DisableIslandBorder,
     EraseIslandCell { q_local: i32, r_local: i32 },
     EraseMarginCell { q: i32, r: i32 },
@@ -100,6 +108,7 @@ pub enum Reducer {
     PaintMarginCell { q: i32, r: i32 },
     ResetAccount,
     SetBrush { hue: u16, sat: u8, val: u8 },
+    SetFrozen { frozen: bool },
     SetIslandBorder,
     SetIslandLink { rate_id: u32 },
     SetLock { locked: bool },
@@ -116,7 +125,9 @@ impl __sdk::InModule for Reducer {
 impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
+            Reducer::ClaimAdmin { .. } => "claim_admin",
             Reducer::ClickLink { .. } => "click_link",
+            Reducer::DeleteIslandCells { .. } => "delete_island_cells",
             Reducer::DisableIslandBorder => "disable_island_border",
             Reducer::EraseIslandCell { .. } => "erase_island_cell",
             Reducer::EraseMarginCell { .. } => "erase_margin_cell",
@@ -126,6 +137,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::PaintMarginCell { .. } => "paint_margin_cell",
             Reducer::ResetAccount => "reset_account",
             Reducer::SetBrush { .. } => "set_brush",
+            Reducer::SetFrozen { .. } => "set_frozen",
             Reducer::SetIslandBorder => "set_island_border",
             Reducer::SetIslandLink { .. } => "set_island_link",
             Reducer::SetLock { .. } => "set_lock",
@@ -139,8 +151,18 @@ impl __sdk::Reducer for Reducer {
     #[allow(clippy::clone_on_copy)]
     fn args_bsatn(&self) -> Result<Vec<u8>, __sats::bsatn::EncodeError> {
         match self {
+            Reducer::ClaimAdmin { password } => {
+                __sats::bsatn::to_vec(&claim_admin_reducer::ClaimAdminArgs {
+                    password: password.clone(),
+                })
+            }
             Reducer::ClickLink { island_id } => {
                 __sats::bsatn::to_vec(&click_link_reducer::ClickLinkArgs {
+                    island_id: island_id.clone(),
+                })
+            }
+            Reducer::DeleteIslandCells { island_id } => {
+                __sats::bsatn::to_vec(&delete_island_cells_reducer::DeleteIslandCellsArgs {
                     island_id: island_id.clone(),
                 })
             }
@@ -190,6 +212,11 @@ impl __sdk::Reducer for Reducer {
                     hue: hue.clone(),
                     sat: sat.clone(),
                     val: val.clone(),
+                })
+            }
+            Reducer::SetFrozen { frozen } => {
+                __sats::bsatn::to_vec(&set_frozen_reducer::SetFrozenArgs {
+                    frozen: frozen.clone(),
                 })
             }
             Reducer::SetIslandBorder => {

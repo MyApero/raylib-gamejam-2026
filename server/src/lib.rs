@@ -61,6 +61,11 @@ mod constants {
     /// XP is deliberately not part of the test, since idle time-XP ticks may
     /// have granted a few by the time they're stale enough to qualify).
     pub const REAP_MAX_INVENTORY_ROWS: usize = 1;
+    /// F10 (Hexaworld.md's Admin section): SHA-256 of the admin password —
+    /// never the plaintext, since this repo is public. `claim_admin` hashes
+    /// the caller's input and compares hex digests.
+    pub const ADMIN_PASSWORD_SHA256: &str =
+        "f0e4b0d252ed221c13e08c7814be13da5fb34a22d3145a8e6d7d4cc15d9fe1cc";
 }
 
 /// Axial hex geometry, slot-lattice mapping and cell-id packing — see
@@ -506,8 +511,40 @@ fn take_paint_token(ctx: &ReducerContext) -> Result<(User, u32), String> {
     Ok((user, color))
 }
 
+/// F10: hex-encoded SHA-256 digest of `password`, compared against
+/// `constants::ADMIN_PASSWORD_SHA256` by `claim_admin`.
+fn hash_password(password: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(password.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// F10: shared guard for `set_frozen`/`delete_island_cells` — both are
+/// admin-only, not gated by `check_not_frozen` below (the admin must still
+/// be able to act, in particular to unfreeze, while the game is frozen).
+fn require_admin(ctx: &ReducerContext) -> Result<(), String> {
+    let config = ctx.db.config().id().find(0).ok_or("config not initialized")?;
+    if config.admin != Some(ctx.sender()) {
+        return Err("admin only".to_string());
+    }
+    Ok(())
+}
+
+/// F10 (Hexaworld.md's Admin section: "can freeze the game so no one can
+/// interact anymore"): shared guard called first by every player-facing
+/// mutating reducer. Scheduled/system reducers (rerank, time-XP, reap,
+/// connect/disconnect) and the three admin reducers deliberately do NOT call
+/// this — freeze stops PLAYER interaction, not the world's background clocks
+/// or the admin's own tools.
+fn check_not_frozen(ctx: &ReducerContext) -> Result<(), String> {
+    if ctx.db.config().id().find(0).is_some_and(|c| c.frozen) {
+        return Err("the game is frozen".to_string());
+    }
+    Ok(())
+}
+
 #[spacetimedb::reducer]
 pub fn set_pos(ctx: &ReducerContext, cx: f32, cy: f32) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     let user = ctx
         .db
         .user()
@@ -600,6 +637,7 @@ fn apply_merge(ctx: &ReducerContext, a: Identity, b: Identity, merged_hue: u16, 
 
 #[spacetimedb::reducer]
 pub fn set_name(ctx: &ReducerContext, name: String) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     if name.is_empty() {
         return Err("Names must not be empty".to_string());
     }
@@ -610,6 +648,7 @@ pub fn set_name(ctx: &ReducerContext, name: String) -> Result<(), String> {
 
 #[spacetimedb::reducer]
 pub fn set_lock(ctx: &ReducerContext, locked: bool) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     let user = ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
     ctx.db.user().identity().update(User { locked, ..user });
     Ok(())
@@ -617,6 +656,7 @@ pub fn set_lock(ctx: &ReducerContext, locked: bool) -> Result<(), String> {
 
 #[spacetimedb::reducer]
 pub fn set_brush(ctx: &ReducerContext, hue: u16, sat: u8, val: u8) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     let user = ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
     if hue > 359 {
         return Err("hue out of range".to_string());
@@ -642,6 +682,7 @@ pub fn set_brush(ctx: &ReducerContext, hue: u16, sat: u8, val: u8) -> Result<(),
 
 #[spacetimedb::reducer]
 pub fn paint_island_cell(ctx: &ReducerContext, q_local: i32, r_local: i32) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     if geometry::hexdist(q_local, r_local) > constants::ISLAND_RADIUS {
         return Err("cell is outside the island".to_string());
     }
@@ -676,6 +717,7 @@ pub fn paint_island_cell(ctx: &ReducerContext, q_local: i32, r_local: i32) -> Re
 
 #[spacetimedb::reducer]
 pub fn paint_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     if geometry::in_any_island_territory(q, r) {
         return Err("cell belongs to an island".to_string());
     }
@@ -720,6 +762,7 @@ pub fn paint_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), Str
 /// also still spends one).
 #[spacetimedb::reducer]
 pub fn erase_island_cell(ctx: &ReducerContext, q_local: i32, r_local: i32) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     if geometry::hexdist(q_local, r_local) > constants::ISLAND_RADIUS {
         return Err("cell is outside the island".to_string());
     }
@@ -739,6 +782,7 @@ pub fn erase_island_cell(ctx: &ReducerContext, q_local: i32, r_local: i32) -> Re
 /// (canvas bound, not island territory), same token charge.
 #[spacetimedb::reducer]
 pub fn erase_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     if geometry::in_any_island_territory(q, r) {
         return Err("cell belongs to an island".to_string());
     }
@@ -762,6 +806,7 @@ pub fn erase_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), Str
 /// the wire signature doesn't need to change if this is ever revisited.
 #[spacetimedb::reducer]
 pub fn merge_with_cell(ctx: &ReducerContext, cell_kind: u8, cell_id: u32) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
     let (tile_hue, painter) = match cell_kind {
         0 => {
@@ -797,6 +842,7 @@ pub fn merge_with_cell(ctx: &ReducerContext, cell_kind: u8, cell_id: u32) -> Res
 
 #[spacetimedb::reducer]
 pub fn reset_account(ctx: &ReducerContext) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     let user = ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
     for inv in ctx.db.inventory().owner().filter(&ctx.sender()).collect::<Vec<_>>() {
         ctx.db.inventory().id().delete(inv.id);
@@ -832,6 +878,7 @@ pub fn reset_account(ctx: &ReducerContext) -> Result<(), String> {
 /// either, this is the server-side backstop for a raw reducer call.
 #[spacetimedb::reducer]
 pub fn like_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     let island = ctx.db.island().id().find(island_id).ok_or("unknown island")?;
     if island.owner == ctx.sender() {
         return Err("cannot like your own island".to_string());
@@ -853,6 +900,7 @@ pub fn like_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
 /// in `like_island` only looks at the CURRENT `island_like` rows.
 #[spacetimedb::reducer]
 pub fn unlike_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     let island = ctx.db.island().id().find(island_id).ok_or("unknown island")?;
     let existing = ctx
         .db
@@ -874,6 +922,7 @@ pub fn unlike_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String>
 /// from it. Always allowed to overwrite (no confirm step needed server-side).
 #[spacetimedb::reducer]
 pub fn set_island_link(ctx: &ReducerContext, rate_id: u32) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     let island = ctx.db.island().owner().find(ctx.sender()).ok_or("you do not own an island")?;
     ctx.db.island().id().update(Island { itch_rate_id: Some(rate_id), ..island });
     Ok(())
@@ -884,6 +933,7 @@ pub fn set_island_link(ctx: &ReducerContext, rate_id: u32) -> Result<(), String>
 /// `disable_island_border` had previously hidden it.
 #[spacetimedb::reducer]
 pub fn set_island_border(ctx: &ReducerContext) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     let user = ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
     let island = ctx.db.island().owner().find(ctx.sender()).ok_or("you do not own an island")?;
     let color = geometry::pack_hsv(user.hue, user.sat, user.val);
@@ -897,6 +947,7 @@ pub fn set_island_border(ctx: &ReducerContext) -> Result<(), String> {
 /// nothing currently reads `border_color` while `border_hidden` is set.
 #[spacetimedb::reducer]
 pub fn disable_island_border(ctx: &ReducerContext) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     let island = ctx.db.island().owner().find(ctx.sender()).ok_or("you do not own an island")?;
     ctx.db.island().id().update(Island { border_hidden: true, ..island });
     Ok(())
@@ -908,8 +959,71 @@ pub fn disable_island_border(ctx: &ReducerContext) -> Result<(), String> {
 /// before it was hidden.
 #[spacetimedb::reducer]
 pub fn show_island_border(ctx: &ReducerContext) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     let island = ctx.db.island().owner().find(ctx.sender()).ok_or("you do not own an island")?;
     ctx.db.island().id().update(Island { border_hidden: false, ..island });
+    Ok(())
+}
+
+/// F10 (Hexaworld.md's Admin section): "1 identity with a password that is
+/// admin" — grants `config.admin` to whoever proves knowledge of the
+/// password by hashing their input and comparing against
+/// `constants::ADMIN_PASSWORD_SHA256`. Idempotent for the current admin.
+/// `client_connected` already gave the caller an island (everyone gets one),
+/// so claiming admin just relocates it to the reserved world-center slot 0
+/// — swapping slots with whichever island currently holds it (there may be
+/// none yet, or a previous admin's if the author re-claims under a new
+/// identity) rather than deleting anything. `slot` is `#[unique]`, so the
+/// claimant is bumped through a temporary out-of-range value first, same
+/// technique `rerank_fire` uses, to avoid colliding with the island it's
+/// swapping with.
+#[spacetimedb::reducer]
+pub fn claim_admin(ctx: &ReducerContext, password: String) -> Result<(), String> {
+    if hash_password(&password) != constants::ADMIN_PASSWORD_SHA256 {
+        return Err("wrong password".to_string());
+    }
+    let config = ctx.db.config().id().find(0).ok_or("config not initialized")?;
+    if config.admin == Some(ctx.sender()) {
+        return Ok(());
+    }
+    let claimant = ctx.db.island().owner().find(ctx.sender()).ok_or("you do not own an island")?;
+    if claimant.slot != 0 {
+        let vacated_slot = claimant.slot;
+        ctx.db.island().id().update(Island { slot: vacated_slot + 1_000_000, ..claimant.clone() });
+        if let Some(prev) = ctx.db.island().slot().find(0) {
+            ctx.db.island().id().update(Island { slot: vacated_slot, ..prev });
+        }
+        ctx.db.island().id().update(Island { slot: 0, ..claimant });
+    }
+    ctx.db.config().id().update(Config { admin: Some(ctx.sender()), ..config });
+    Ok(())
+}
+
+/// F10 (Hexaworld.md's Admin section): "can freeze the game so no one can
+/// interact anymore" — the panic button `check_not_frozen` enforces against
+/// every player-facing mutating reducer. Admin-only, and deliberately not
+/// itself gated by `check_not_frozen`, so the admin can always unfreeze.
+#[spacetimedb::reducer]
+pub fn set_frozen(ctx: &ReducerContext, frozen: bool) -> Result<(), String> {
+    require_admin(ctx)?;
+    let config = ctx.db.config().id().find(0).ok_or("config not initialized")?;
+    ctx.db.config().id().update(Config { frozen, ..config });
+    Ok(())
+}
+
+/// F10 (Hexaworld.md's Admin section): "can delete tiles" — a moderation
+/// tool for offensive/abusive island art. Wipes every painted cell on the
+/// target island; the island row itself (ownership, likes, link, border,
+/// slot) is untouched, so the owner keeps their spot and can repaint from
+/// scratch. Admin-only, not gated by `check_not_frozen` (moderation should
+/// still work while the game is frozen).
+#[spacetimedb::reducer]
+pub fn delete_island_cells(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
+    require_admin(ctx)?;
+    ctx.db.island().id().find(island_id).ok_or("unknown island")?;
+    for cell in ctx.db.island_cell().island_id().filter(&island_id).collect::<Vec<_>>() {
+        ctx.db.island_cell().id().delete(cell.id);
+    }
     Ok(())
 }
 
@@ -920,6 +1034,7 @@ pub fn show_island_border(ctx: &ReducerContext) -> Result<(), String> {
 /// calling this reducer, so this check is the server-side backstop for a raw call.
 #[spacetimedb::reducer]
 pub fn click_link(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
+    check_not_frozen(ctx)?;
     let island = ctx.db.island().id().find(island_id).ok_or("unknown island")?;
     if island.owner == ctx.sender() {
         return Err("cannot credit your own link click".to_string());

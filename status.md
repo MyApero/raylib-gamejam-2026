@@ -7,7 +7,98 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** Author follow-up on the border-customization feature
+**Current batch:** F10 Admin (P2, first item — see plan.md's P2 section).
+Hexaworld.md's Admin spec: "1 identity with a password that is admin, can
+delete tiles, can freeze the game so no one can interact anymore, can
+restore backups, holds the center tile."
+
+1. **`claim_admin(password)`** — hashes the input (SHA-256) and compares
+   against `constants::ADMIN_PASSWORD_SHA256`; only the digest is committed,
+   never the plaintext (repo is public). Grants `config.admin`. Idempotent
+   for the current admin. Everyone already gets an island on first connect
+   (`client_connected`), so claiming admin relocates the caller's EXISTING
+   island to the reserved world-center slot 0 rather than creating a new
+   one — swapping slots with whatever island currently holds slot 0 (none
+   yet, or a previous admin's if re-claimed under a different identity)
+   via the same "bump through a temporary out-of-range slot first" technique
+   `rerank_fire` already uses, since `slot` is `#[unique]`.
+2. **`set_frozen(frozen)`** — admin-only (`require_admin`); flips
+   `config.frozen`. New shared guard `check_not_frozen`, called first by
+   every player-facing mutating reducer (`set_pos`, `set_name`, `set_lock`,
+   `set_brush`, paint/erase (both island + margin), `merge_with_cell`,
+   `reset_account`, like/unlike, `set_island_link`,
+   `set_island_border`/`disable_island_border`/`show_island_border`,
+   `click_link` — 17 total), rejects with "the game is frozen" while set.
+   Scheduled/system reducers (rerank, time-XP, reap, connect/disconnect)
+   and the three admin reducers themselves are NOT gated — freeze stops
+   PLAYER interaction, not the world's background clocks or the admin's
+   own tools (in particular, the admin must always be able to unfreeze).
+3. **`delete_island_cells(island_id)`** — admin-only; wipes every
+   `island_cell` row for the target island (moderation for offensive art).
+   The island row itself (ownership, likes, link, border, slot) is
+   untouched.
+4. **Ops docs** (`WORK.md`, new "Admin (F10)" section) — `spacetime call`
+   examples for all three reducers against `-s local`/prod, how to rotate
+   the password (regenerate the SHA-256 digest, swap the constant), and a
+   "Backups" subsection: plain `spacetime sql` dump-per-table commands
+   (Hexaworld.md's "can restore backups" — manual restore-by-hand, no
+   automated snapshot/replay, matching plan.md's "admin tooling is minimal
+   for now" scope).
+
+**Verify status:** `cargo check -p server`/`-p client --bin client` and
+`./build-web.sh` all clean (both the wasm32-unknown-unknown module target
+and the emscripten web target — `sha2` compiles fine on both). **VERIFIED
+live** end-to-end via a throwaway Node WebSocket probe (same v1.json.
+spacetimedb technique as prior batches) against the local instance, with
+`spacetime sql` polling for ground truth between steps (the probe's own
+CallReducer/TransactionUpdate ack-matching timed out for an unclear reason,
+but every DB-side effect below landed exactly as expected, so the sql
+checks are what's cited as VERIFIED):
+   - Wrong password: `config.admin` unchanged.
+   - Correct password: `config.admin` set to the caller; caller's island
+     slot moved from its original value to `0`. Re-run with the same
+     (already-admin) caller: no-op, slot stays `0` (idempotence).
+     Re-run as a DIFFERENT identity with the correct password (a second
+     probe run): the NEW caller's island took slot 0, and the PREVIOUS
+     admin's island was swapped into the new caller's vacated slot instead
+     of being deleted or colliding — exercises the trickier swap-with-
+     existing-occupant path, not just the empty-slot-0 case.
+   - Non-admin `set_frozen(true)`: `config.frozen` unchanged.
+   - Admin `set_frozen(true)`: `config.frozen` flips to `true`.
+   - `paint_island_cell` while frozen: rejected, `island_cell` row count
+     unchanged.
+   - Admin `set_frozen(false)` then `paint_island_cell`: succeeds, row
+     count +1 — confirms `check_not_frozen` isn't a one-way latch.
+   - Non-admin `delete_island_cells`: rejected, `island_cell` row count
+     unchanged.
+   - Admin `delete_island_cells(<island_id>)`: every `island_cell` row for
+     that specific island gone, confirmed via a filtered `spacetime sql`.
+   All 17 `check_not_frozen` call sites are the identical one-line guard;
+   only `paint_island_cell` was exercised live end-to-end, the other 16 are
+   REASONED by code identity with that verified call site (same pattern
+   this file has used for sibling reducers in prior batches). No admin UI
+   in either client — F10 is CLI-only ops tooling per plan.md's "admin
+   tooling is minimal for now," so nothing to hand-test in the GUI. Local
+   instance re-published clean (fresh state, no leftover test identities)
+   after the probe run.
+
+Files touched: `server/Cargo.toml` (+`sha2`), `server/src/lib.rs`
+(`ADMIN_PASSWORD_SHA256` constant, `hash_password`/`require_admin`/
+`check_not_frozen` helpers, `claim_admin`/`set_frozen`/`delete_island_cells`
+reducers, `check_not_frozen(ctx)?;` added to 17 existing reducers),
+`WORK.md` (Admin + Backups sections).
+
+**A note on the password:** since this repo is public, I (the executor)
+generated a random password and committed only its SHA-256 digest — I did
+not choose one myself for the author to guess or reuse, and the plaintext is
+deliberately NOT recorded anywhere in this repo. It was reported once,
+directly to the author in chat, for private storage. Rotate it any time via
+the command in `WORK.md`'s new Admin section if a memorable one is preferred
+before it's ever used against production.
+
+---
+
+**Previous batch:** Author follow-up on the border-customization feature
 (same day, 2026-07-11) — "cleaner way to change Isle border": a single
 "Border: Shown/Hidden" toggle instead of the separate status line + "Disable
 border" button, and "Set border to current color" should preview the
@@ -1897,33 +1988,46 @@ Implementation notes:
       "My Isle" footer button, countdown banner) VERIFIED — author
       hand-tested across three feedback rounds and confirmed it feels good.
       Builds all clean, package size fine. COMMITTED.
-- [ ] F9 — island links (jam rate id only), link-click XP, time XP —
+- [x] F9 — island links (jam rate id only), link-click XP, time XP —
       implemented (see the batch notes above); server-side dedupe/guards
-      VERIFIED via CLI, client wiring + the 60s time-XP tick REASONED only
-      — awaiting the author's hand-test before checking this off —
+      VERIFIED via CLI, client wiring + the 60s time-XP tick author
+      hand-tested and confirmed working (2026-07-11). COMMITTED.
 - [x] F9.5 — post-deploy bug sweep (10 items: account import bug, FPS at
       scale, merge range, recent-colors, modal click-through, cursor scale,
       island-info-on-hover redesign, Safari wheel-zoom clamp, zero-gap ->
       gapped tiling, dead-player reap) — all VERIFIED across their
       individual batches above. COMMITTED.
-- [ ] F9.6 — UX polish batch (8 items: eraser, middle-click eyedropper,
+- [x] F9.6 — UX polish batch (8 items: eraser, middle-click eyedropper,
       heart icon, color-overlay ergonomics, help overlay, keyboard/right-
       drag camera, launch intro, borderless far zoom) — see the batch notes
       above. Eraser reducers VERIFIED live; everything else REASONED (both
       targets build clean, web release build succeeds, package size fine).
-      Author hand-testing IN PROGRESS: one real click-through bug found and
-      fixed (Colors button self-closing, see the batch above), footer
-      layout and two constants (`INTRO_DURATION`, `BORDERLESS_ZOOM_THRESHOLD`)
-      re-tuned — still awaiting the rest of the pass before checking this off —
+      Author hand-test pass complete (2026-07-11): one real click-through bug
+      found and fixed (Colors button self-closing, see the batch above),
+      footer layout and two constants (`INTRO_DURATION`,
+      `BORDERLESS_ZOOM_THRESHOLD`) re-tuned, author confirmed the rest feels
+      good. COMMITTED.
 
 ## P2 (only if time remains)
-- [ ] F10 admin — [ ] F11 flying gift — [ ] F12 polish/bots/sounds —
+- [x] F10 admin — `claim_admin`/`set_frozen`/`delete_island_cells` reducers
+      (SHA-256-gated password, freeze toggle enforced on all 17
+      player-facing mutating reducers, moderation cell-wipe), admin island
+      relocated to slot 0 on claim, ops docs + backup dump commands in
+      `WORK.md`. VERIFIED live end-to-end via a throwaway WebSocket probe +
+      `spacetime sql` (see the batch notes above). No client UI — CLI-only
+      per plan.md's "admin tooling is minimal for now." NOT yet published
+      to the production VPS (same access gap as the border feature above).
+      COMMITTED.
+- [ ] F11 flying gift — [ ] F12 polish/bots/sounds —
 - [ ] F13 hexa event (6-cursor hexagon: pooled dictionaries, one-time XP, snap rendering) —
 - [x] Customizable island border color/transparency (from backlog, author override
       2026-07-11) — server + both clients VERIFIED via `spacetime call`/`spacetime sql`
-      against the local instance; client rendering REASONED, not yet author-hand-tested;
-      not yet published to the production VPS. See the batch notes at the top of this
-      file and plan.md's backlog entry.
+      against the local instance; client rendering (including the follow-up
+      Shown/Hidden toggle + swatch preview) author hand-tested and confirmed
+      working (2026-07-11). NOT yet published to the production VPS — that
+      publish requires VPS shell access this environment doesn't have; the
+      author will run it (see the commands left in the prior turn). See the
+      batch notes at the top of this file and plan.md's backlog entry.
 
 ## Notes / deviations from plan.md
 - **New at F6 (author-directed, not in plan.md's original text):** players

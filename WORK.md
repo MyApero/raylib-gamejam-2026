@@ -114,6 +114,52 @@ git pull
 Caddy serves the updated static files immediately — no reload needed (that
 hot-reload gotcha only applies to editing the Caddyfile itself, see above).
 
+## Admin (F10)
+
+No in-game admin UI — these are CLI-only ops tools, called against whichever
+server you're pointed at (swap `-s local` for the production server name):
+
+```bash
+# claim admin for the identity `spacetime call` is currently using (grants
+# config.admin, relocates that identity's island to the reserved slot 0)
+spacetime call hexmerge claim_admin '["<the admin password>"]' -s local
+
+# freeze/unfreeze all player interaction (painting, merging, moving, liking,
+# link editing, border editing) — a panic button for active abuse; the admin
+# reducers themselves stay callable while frozen
+spacetime call hexmerge set_frozen '[true]' -s local
+spacetime call hexmerge set_frozen '[false]' -s local
+
+# wipe every painted cell on a given island (moderation for offensive/abusive
+# art) — the island row itself (ownership, likes, link, border, slot) is
+# untouched, so the owner keeps their spot
+spacetime call hexmerge delete_island_cells '[<island_id>]' -s local
+```
+
+The admin password is never committed in plaintext — only its SHA-256 digest
+lives in `server/src/lib.rs` (`constants::ADMIN_PASSWORD_SHA256`). To change
+it, generate a new digest and swap the constant:
+
+```bash
+python3 -c "import hashlib; print(hashlib.sha256(b'<new password>').hexdigest())"
+```
+
+### Backups
+
+No automated backup job — restoring "from a backup" (Hexaworld.md's Admin
+section) means re-publishing a `spacetime sql` dump. Dump the world state
+before anything risky (a schema migration, a manual DB edit):
+
+```bash
+for t in config user inventory island island_like island_link_click island_cell margin_cell; do
+  spacetime sql hexmerge -s local "SELECT * FROM $t" > "backup-$t-$(date +%Y%m%dT%H%M%S).txt"
+done
+```
+
+These are plain-text `spacetime sql` table dumps (for manual inspection/
+restore-by-hand), not a reducer-replayable snapshot — there's no automated
+restore path, matching plan.md's "Admin tooling is minimal for now" scope.
+
 ## Connection logging
 
 Player connect/disconnect events are logged in two places:
