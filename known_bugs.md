@@ -12,3 +12,15 @@ id is very confidential as it can be used to take the account
 - [ ] A player that creates an ilot by connecting and disconnects just after without doing a single "action" (modifying a cell, merging) should be considered as dead and he should be removed from the world after a while (like 5 minutes). His ilot would be removed and his user too (that would reduce the total number of players).
 
 - [ ] 40FPS with 10 ilots? What's happening already, it should be smoother. 30 fps with 18 max players.
+
+- [ ] Scroll on macos (safari) is bugged
+
+- [ ] Ilot info should only be hover
+
+- [ ] Dezoom should reduce the size of other's cursor
+
+- [ ] More range to merge
+
+- [ ] Import account doesn't work, it creates another one
+
+- [ ] reset account doesn't reset the last 3 selected colors

@@ -52,9 +52,19 @@
     </style>
   </head>
   <body>
-    <div id="dual">
-      <iframe src="game.html?slot=1" allow="autoplay"></iframe>
-      <iframe src="game.html?slot=2" allow="autoplay"></iframe>
-    </div>
+    <div id="dual"></div>
+    <script>
+      // How many game panes to show on one screen: 1 (solo) or 2 (local
+      // two-player test). Each pane is its own iframe with a namespaced
+      // ?slot=N so they get distinct SpacetimeDB identities.
+      var PANES = 1;
+      var dual = document.getElementById('dual');
+      for (var i = 1; i <= PANES; i++) {
+        var f = document.createElement('iframe');
+        f.src = 'game.html?slot=' + i;
+        f.setAttribute('allow', 'autoplay');
+        dual.appendChild(f);
+      }
+    </script>
   </body>
 </html>

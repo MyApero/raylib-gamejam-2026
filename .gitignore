@@ -88,3 +88,6 @@ client/target/
 
 raylib
 emsdk
+
+# itch submission package
+hexaworld-itch.zip
