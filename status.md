@@ -7,7 +7,59 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9.5 — one more author follow-up, immediately after the
+**Current batch:** F9.5 item 10 — dead-player reap (last item in the
+sweep). Scheduled reducer (`reap_dead_players`, new `reap_schedule` table,
+60s repeating tick, same lazy-seeding pattern as `time_xp_schedule`/
+`rerank_warn_schedule`) deletes a player entirely once they're offline,
+stale 5+ minutes (`REAP_IDLE_SECS`), their island has zero painted cells,
+and their inventory has at most 1 row (the seed hue — XP is deliberately
+excluded from the test, since idle time-XP ticks may have granted a few by
+the time someone's stale enough to qualify). Deletes, in order: the
+island's `island_like` and `island_link_click` rows, the user's
+`inventory` rows, the `island` row, then the `user` row. Accepted edge case
+(matches plan.md's own call): a reset veteran idling 5 minutes with a still-
+empty island gets reaped too — indistinguishable from "never played" with
+the data available, and acceptable for the jam.
+
+**Two correctness fixes this required, both real bugs waiting to happen the
+moment ANY island could ever be deleted** (neither reachable before this
+batch, since nothing ever deleted an island until now):
+1. **Slot assignment used `ctx.db.island().count() + 1`.** Once reaping can
+   delete an island out of the middle of the sequence, `count()` under-
+   reports the highest slot actually in use — the next new player could get
+   handed a slot a still-live island already owns, tripping `Island.slot`'s
+   `#[unique]` constraint. Replaced with `lowest_free_slot` (new helper): a
+   sorted scan for the smallest unused slot `>= 1`, which both avoids the
+   collision and reuses a reaped player's freed slot instead of letting the
+   world grow unbounded — actually "frees the slot" the way plan.md's
+   wording asks for, not just frees a user row.
+2. **`paint_margin_cell`'s canvas-bound check used the same `count()` as a
+   proxy for "highest slot in use."** Same under-reporting problem — after a
+   reap, the margin bound could shrink below cells that legitimately border
+   a still-live high-numbered island, wrongly rejecting valid paints there.
+   Changed to the actual `max(slot)` over live islands.
+
+**VERIFIED live**, not just by inspection — republished locally with
+`REAP_PERIOD_SECS`/`REAP_IDLE_SECS` temporarily dropped to 5s each (restored
+to 60s/300s before this final publish), opened a real WebSocket connection
+(Python, same technique as item 1's probe) which created a genuine user +
+island, closed it cleanly, waited past the shortened idle window, and
+confirmed via `spacetime sql` that BOTH the `user` and `island` rows were
+gone afterward — while three OTHER, still-`online: true` sessions (the
+author's own live hand-testing browser tabs, reconnecting after this
+batch's earlier republishes) were correctly left untouched, proving the
+`!user.online` guard holds under real concurrent load, not just a
+single-player synthetic test. Also incidentally confirmed `lowest_free_slot`
+working correctly in the same live run: the remaining 3 real islands held
+slots 1/2/3 with no gaps despite earlier reaps having freed slots out of
+the middle of the sequence. Republished with the restored real constants,
+regenerated bindings (new `reap_schedule_type.rs`), both clients build
+clean (no client-side changes needed — this is entirely server-observed
+through rows disappearing from existing subscriptions).
+
+---
+
+**Previous batch:** F9.5 — one more author follow-up, immediately after the
 zero-gap tiling landed: "great, i just want a gap of 2 or 3 now" (not
 literally zero after all — a little breathing room).
 

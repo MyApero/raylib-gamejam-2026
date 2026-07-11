@@ -45,6 +45,16 @@ mod constants {
     /// unlocked inventory entry — lets the Hue slider nudge a shade without
     /// bloating the inventory with one row per nudge.
     pub const HUE_TOLERANCE: u16 = 5;
+    /// F9.5 item 10: how often the dead-player reap sweep runs, and how
+    /// stale (`online == false` and `last_seen` older than this) a user must
+    /// be before it's even considered a candidate.
+    pub const REAP_PERIOD_SECS: i64 = 60;
+    pub const REAP_IDLE_SECS: i64 = 300;
+    /// A candidate is only actually reaped if their island has zero painted
+    /// cells AND their inventory is at most this many rows (the seed hue —
+    /// XP is deliberately not part of the test, since idle time-XP ticks may
+    /// have granted a few by the time they're stale enough to qualify).
+    pub const REAP_MAX_INVENTORY_ROWS: usize = 1;
 }
 
 /// Axial hex geometry, slot-lattice mapping and cell-id packing — see
@@ -343,6 +353,18 @@ pub struct TimeXpSchedule {
     scheduled_at: ScheduleAt,
 }
 
+/// F9.5 item 10: repeating tick (same lazy-seeding pattern as
+/// `time_xp_schedule`) that reaps drive-by players — see `reap_dead_players`.
+/// Server-internal, not `public`; clients only ever observe its effect
+/// through `user`/`island` rows disappearing.
+#[spacetimedb::table(accessor = reap_schedule, scheduled(reap_dead_players))]
+pub struct ReapSchedule {
+    #[primary_key]
+    #[auto_inc]
+    scheduled_id: u64,
+    scheduled_at: ScheduleAt,
+}
+
 #[spacetimedb::table(accessor = island_cell, public)]
 pub struct IslandCell {
     #[primary_key]
@@ -390,6 +412,25 @@ fn random_name(ctx: &ReducerContext) -> String {
     let a = NAME_ADJECTIVES[rng.gen_range(0..NAME_ADJECTIVES.len())];
     let n = NAME_NOUNS[rng.gen_range(0..NAME_NOUNS.len())];
     format!("{a}{n}")
+}
+
+/// F9.5 (dead-player reap): smallest slot `>= 1` not currently held by a
+/// live island — slot 0 is reserved for the admin island, never assigned
+/// here. `O(n log n)` in the current island count, called only on connect
+/// (a rare event, not a hot per-frame path), so the sort is cheap enough not
+/// to warrant a smarter free-list structure.
+fn lowest_free_slot(ctx: &ReducerContext) -> u32 {
+    let mut used: Vec<u32> = ctx.db.island().iter().map(|i| i.slot).collect();
+    used.sort_unstable();
+    let mut candidate = 1u32;
+    for slot in used {
+        if slot == candidate {
+            candidate += 1;
+        } else if slot > candidate {
+            break;
+        }
+    }
+    candidate
 }
 
 fn level_of(xp: u64) -> u64 {
@@ -623,8 +664,13 @@ pub fn paint_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), Str
     if geometry::in_any_island_territory(q, r) {
         return Err("cell belongs to an island".to_string());
     }
-    // Player islands occupy slots 1..=count (slot 0 is reserved for admin).
-    let highest_slot = ctx.db.island().count() as u32;
+    // F9.5 (dead-player reap): was `ctx.db.island().count()`, which only
+    // equalled the highest live slot number while slots were never reused —
+    // once reaping can delete an island out of the middle of the sequence,
+    // `count()` under-reports the true highest slot still in use, which
+    // would shrink the margin bound below cells that legitimately border a
+    // still-live high-numbered island. Use the actual max.
+    let highest_slot = ctx.db.island().iter().map(|i| i.slot).max().unwrap_or(0);
     let bound = constants::SLOT_SPACING * (geometry::occupied_rings(highest_slot) + 1);
     if geometry::hexdist(q, r) > bound {
         return Err("cell is outside the current canvas bounds".to_string());
@@ -827,6 +873,62 @@ pub fn time_xp_tick(ctx: &ReducerContext, _arg: TimeXpSchedule) -> Result<(), St
     Ok(())
 }
 
+/// F9.5 item 10: reaps "drive-by" players — connected once, never actually
+/// played, then disappeared — freeing their slot and deflating the total
+/// player count. A candidate must be offline, stale
+/// (`last_seen` older than `REAP_IDLE_SECS`), have an island with ZERO
+/// painted cells, and an inventory of at most `REAP_MAX_INVENTORY_ROWS`
+/// (just the seed hue — XP is deliberately not part of the test, since idle
+/// time-XP ticks may have granted a few by the time they're stale enough).
+/// Accepted edge case (author-approved): a reset veteran idling 5 minutes
+/// with a still-empty island gets reaped too — the reducer can't
+/// distinguish "never played" from "reset and hasn't repainted yet", and
+/// jam-testing found that an acceptable tradeoff. Restricted to the
+/// scheduler itself, same as every other scheduled reducer here.
+#[spacetimedb::reducer]
+pub fn reap_dead_players(ctx: &ReducerContext, _arg: ReapSchedule) -> Result<(), String> {
+    if ctx.sender() != ctx.database_identity() {
+        return Err("reap_dead_players may not be invoked by clients".to_string());
+    }
+    let candidates: Vec<Identity> = ctx
+        .db
+        .user()
+        .iter()
+        .filter(|u| !u.online)
+        .filter(|u| {
+            ctx.timestamp
+                .duration_since(u.last_seen)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(i64::MAX)
+                >= constants::REAP_IDLE_SECS
+        })
+        .map(|u| u.identity)
+        .collect();
+
+    for who in candidates {
+        let Some(island) = ctx.db.island().owner().find(who) else { continue };
+        if ctx.db.island_cell().iter().any(|c| c.island_id == island.id) {
+            continue;
+        }
+        let inv_count = ctx.db.inventory().owner().filter(&who).count();
+        if inv_count > constants::REAP_MAX_INVENTORY_ROWS {
+            continue;
+        }
+        for like in ctx.db.island_like().island_id().filter(&island.id).collect::<Vec<_>>() {
+            ctx.db.island_like().id().delete(like.id);
+        }
+        for click in ctx.db.island_link_click().island_id().filter(&island.id).collect::<Vec<_>>() {
+            ctx.db.island_link_click().id().delete(click.id);
+        }
+        for inv in ctx.db.inventory().owner().filter(&who).collect::<Vec<_>>() {
+            ctx.db.inventory().id().delete(inv.id);
+        }
+        ctx.db.island().id().delete(island.id);
+        ctx.db.user().identity().delete(who);
+    }
+    Ok(())
+}
+
 /// F8 re-rank, step 1/2 (repeating, `RERANK_PERIOD_SECS`): only sets the
 /// countdown clients render, then schedules the actual sort
 /// `RERANK_WARNING_SECS` later. Restricted to the scheduler itself — see the
@@ -897,6 +999,13 @@ pub fn client_connected(ctx: &ReducerContext) {
             scheduled_at: TimeDuration::from_micros(constants::TIME_XP_PERIOD_SECS * 1_000_000).into(),
         });
     }
+    // F9.5 item 10: same lazy-seeding pattern as the two schedules above.
+    if ctx.db.reap_schedule().count() == 0 {
+        ctx.db.reap_schedule().insert(ReapSchedule {
+            scheduled_id: 0,
+            scheduled_at: TimeDuration::from_micros(constants::REAP_PERIOD_SECS * 1_000_000).into(),
+        });
+    }
 
     if let Some(user) = ctx.db.user().identity().find(ctx.sender()) {
         ctx.db.user().identity().update(User { online: true, last_seen: ctx.timestamp, ..user });
@@ -929,7 +1038,15 @@ pub fn client_connected(ctx: &ReducerContext) {
 
     // Slot 0 is reserved for the (not yet implemented, P2/F10) admin island
     // at the world center — the first real player must start at slot 1.
-    let slot = ctx.db.island().count() as u32 + 1;
+    // F9.5 (dead-player reap): was `count() + 1`, which only ever assigned a
+    // genuinely free slot while slots were never reused (no gaps possible).
+    // Once reaping can delete an island out of the middle of the sequence,
+    // `count()` under-counts and this would hand out a slot a still-live
+    // island already owns, tripping `Island.slot`'s `#[unique]` constraint.
+    // Scans for the smallest unused slot instead, which both avoids that
+    // collision and reuses a reaped player's freed slot for the next
+    // newcomer instead of letting the world grow unbounded.
+    let slot = lowest_free_slot(ctx);
     let (q, r) = geometry::slot_coords(slot);
     let (cx, cy) = geometry::slot_center(q, r);
     let _ = (cx, cy); // fine-axial center; clients derive render position from slot (Q, R) directly

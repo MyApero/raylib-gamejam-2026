@@ -23,7 +23,12 @@ uniform 2-tile gap (author's final call: "a gap of 2 or 3"). See status.md.
 Left unchecked pending the author's own visual confirmation on the deployed
 build)
 
-- [ ] A player that creates an ilot by connecting and disconnects just after without doing a single "action" (modifying a cell, merging) should be considered as dead and he should be removed from the world after a while (like 5 minutes). His ilot would be removed and his user too (that would reduce the total number of players).
+- [x] A player that creates an ilot by connecting and disconnects just after without doing a single "action" (modifying a cell, merging) should be considered as dead and he should be removed from the world after a while (like 5 minutes). His ilot would be removed and his user too (that would reduce the total number of players).
+(F9.5 item 10: `reap_dead_players`, a new 60s scheduled reducer — deletes
+`user`+`island`(+its `island_like`/`island_link_click` rows)+`inventory` for
+anyone offline, stale 5+ minutes, with an unpainted island and at most the
+seed-hue inventory row. VERIFIED live against a local instance with real
+WebSocket connections; see status.md)
 
 - [x] 40FPS with 10 ilots? What's happening already, it should be smoother. 30 fps with 18 max players.
 (F9.5 item 2: both clients rebuilt a full HashMap from every island_cell row
