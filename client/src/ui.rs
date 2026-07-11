@@ -24,11 +24,11 @@ const RESET_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
 const IMPORT_TOKEN_MAX_LEN: usize = 2048;
 
 pub const HEADER_H: f32 = 28.0;
-/// F9.6 item 1: grew from 44 to fit a second footer row for the Eraser
-/// toggle without cramming the already-tight first row (which was down to
-/// ~6px of spare width). Both `main.rs`/`bin/web.rs` derive the map
-/// viewport from this constant, so nothing else needed to change.
-pub const FOOTER_H: f32 = 78.0;
+/// Author-requested: back to a single footer row now that Eraser/Lock are
+/// icon-only and fit to the left of the name field again. Both
+/// `main.rs`/`bin/web.rs` derive the map viewport from this constant, so
+/// nothing else needed to change.
+pub const FOOTER_H: f32 = 44.0;
 const SCREEN_W: f32 = 720.0;
 const SCREEN_H: f32 = 720.0;
 
@@ -357,28 +357,33 @@ fn inventory_btn_rect() -> Rectangle {
     Rectangle::new(174.0, SCREEN_H - FOOTER_H + 7.0, 64.0, 30.0)
 }
 
-fn name_field_rect() -> Rectangle {
-    Rectangle::new(250.0, SCREEN_H - FOOTER_H + 7.0, 200.0, 30.0)
+/// Author-requested: icon-only (see `draw_footer`), sitting directly left of
+/// the name field.
+fn eraser_btn_rect() -> Rectangle {
+    Rectangle::new(246.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
 }
 
+/// Author-requested: icon-only (see `draw_footer`), left of the name field,
+/// right next to the eraser toggle.
 fn lock_btn_rect() -> Rectangle {
-    Rectangle::new(458.0, SCREEN_H - FOOTER_H + 7.0, 90.0, 30.0)
+    Rectangle::new(280.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
+}
+
+/// Author-requested: narrower than before now that the eraser/lock icons
+/// moved to its left.
+fn name_field_rect() -> Rectangle {
+    Rectangle::new(318.0, SCREEN_H - FOOTER_H + 7.0, 150.0, 30.0)
 }
 
 fn account_btn_rect() -> Rectangle {
-    Rectangle::new(558.0, SCREEN_H - FOOTER_H + 7.0, 80.0, 30.0)
+    Rectangle::new(478.0, SCREEN_H - FOOTER_H + 7.0, 80.0, 30.0)
 }
 
 /// Author-requested: a footer button to open the caller's own island-info
 /// popup, replacing the old "click your own island" gesture (which just
 /// painted the cell it was released on, so the popup never actually showed).
 fn my_island_btn_rect() -> Rectangle {
-    Rectangle::new(642.0, SCREEN_H - FOOTER_H + 7.0, 72.0, 30.0)
-}
-
-/// F9.6 item 1: second footer row (see `FOOTER_H`'s comment).
-fn eraser_btn_rect() -> Rectangle {
-    Rectangle::new(8.0, SCREEN_H - FOOTER_H + 41.0, 90.0, 30.0)
+    Rectangle::new(566.0, SCREEN_H - FOOTER_H + 7.0, 72.0, 30.0)
 }
 
 fn overlay_rect() -> Rectangle {
@@ -593,6 +598,11 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             state.island_popup = None;
             state.help_open = false;
         }
+        // Must return here: the footer button sits below `overlay_rect()`,
+        // so without this the "click outside the panel closes it" check
+        // further down would see this same click, land outside the panel,
+        // and immediately close the overlay it just opened.
+        return actions;
     }
     if clicked && point_in(mouse, lock_btn_rect()) {
         actions.set_lock = Some(!info.locked);
@@ -1038,21 +1048,20 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     d.draw_rectangle_rec(ib, Color::new(40, 40, 48, 255));
     d.draw_text("Colors", ib.x as i32 + 6, ib.y as i32 + 7, 14, Color::RAYWHITE);
 
+    // Author-requested: icon-only, left of the name field.
+    let eb = eraser_btn_rect();
+    d.draw_rectangle_rec(eb, if state.eraser_on { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
+    draw_eraser_icon(d, eb);
+
+    let lb = lock_btn_rect();
+    d.draw_rectangle_rec(lb, if info.locked { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
+    draw_lock_icon(d, lb, info.locked);
+
     let nf = name_field_rect();
     d.draw_rectangle_rec(nf, Color::new(28, 28, 34, 255));
     d.draw_rectangle_lines_ex(nf, 1.0, if state.name_focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
     let label = if state.name_input.is_empty() && !state.name_focused { "name..." } else { &state.name_input };
     d.draw_text(label, nf.x as i32 + 6, nf.y as i32 + 7, 14, Color::RAYWHITE);
-
-    let lb = lock_btn_rect();
-    d.draw_rectangle_rec(lb, if info.locked { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
-    d.draw_text(
-        if info.locked { "Lock: on" } else { "Lock: off" },
-        lb.x as i32 + 6,
-        lb.y as i32 + 7,
-        14,
-        Color::RAYWHITE,
-    );
 
     let ab = account_btn_rect();
     d.draw_rectangle_rec(ab, Color::new(40, 40, 48, 255));
@@ -1061,17 +1070,42 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     let mb = my_island_btn_rect();
     d.draw_rectangle_rec(mb, Color::new(40, 40, 48, 255));
     d.draw_text("My Isle", mb.x as i32 + 6, mb.y as i32 + 9, 10, Color::RAYWHITE);
+}
 
-    // F9.6 item 1.
-    let eb = eraser_btn_rect();
-    d.draw_rectangle_rec(eb, if state.eraser_on { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
-    d.draw_text(
-        if state.eraser_on { "Eraser: on" } else { "Eraser: off" },
-        eb.x as i32 + 6,
-        eb.y as i32 + 9,
-        10,
-        Color::RAYWHITE,
+/// Author-requested: icon-only Eraser button — classic two-tone (pink cap /
+/// white body) eraser glyph, diagonal cut.
+fn draw_eraser_icon(d: &mut impl RaylibDraw, r: Rectangle) {
+    let w = 16.0;
+    let h = 11.0;
+    let x = r.x + (r.width - w) / 2.0;
+    let y = r.y + (r.height - h) / 2.0;
+    let body = Rectangle::new(x, y, w, h);
+    d.draw_rectangle_rounded(body, 0.3, 4, Color::new(235, 235, 240, 255));
+    d.draw_triangle(
+        Vector2::new(x, y + h),
+        Vector2::new(x, y),
+        Vector2::new(x + w * 0.55, y),
+        Color::new(235, 120, 150, 255),
     );
+    d.draw_rectangle_rounded_lines(body, 0.3, 4, Color::new(40, 40, 48, 255));
+}
+
+/// Author-requested: icon-only Lock button — padlock glyph, shackle swung
+/// open when unlocked so the two states read apart even in grayscale.
+fn draw_lock_icon(d: &mut impl RaylibDraw, r: Rectangle, locked: bool) {
+    let cx = r.x + r.width / 2.0;
+    let body_w = 14.0;
+    let body_h = 10.0;
+    let body_y = r.y + r.height / 2.0 - 1.0;
+    let body = Rectangle::new(cx - body_w / 2.0, body_y, body_w, body_h);
+    let shackle_cy = body_y - 2.0;
+    let icon_color = Color::new(235, 235, 240, 255);
+    if locked {
+        d.draw_ring(Vector2::new(cx, shackle_cy), 3.5, 5.5, 180.0, 360.0, 16, icon_color);
+    } else {
+        d.draw_ring(Vector2::new(cx + 3.0, shackle_cy), 3.5, 5.5, 180.0, 340.0, 16, icon_color);
+    }
+    d.draw_rectangle_rounded(body, 0.25, 4, icon_color);
 }
 
 /// F9.6 item 5: minimal controls list, toggled by Escape (see `handle_input`).

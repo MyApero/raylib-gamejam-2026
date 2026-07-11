@@ -55,12 +55,12 @@ const HOVER_OPEN_DELAY: Duration = Duration::from_millis(200);
 const MIDDLE_CLICK_TOL_PX: f32 = 8.0;
 /// F9.6 item 7: how long the launch intro's ease from the whole-world view
 /// to the player's island takes, absent any input (which skips it instantly).
-const INTRO_DURATION: Duration = Duration::from_millis(1750);
+const INTRO_DURATION: Duration = Duration::from_millis(3000);
 /// F9.6 item 8: on-screen hex size (world-unit radius 1.0 * `camera.zoom`,
 /// in pixels) below which the per-tile outline pass is skipped — the
 /// author's "borderless far zoom" note picked ~4-6px; the executor settled
 /// on 5.
-const BORDERLESS_ZOOM_THRESHOLD: f32 = 5.0;
+const BORDERLESS_ZOOM_THRESHOLD: f32 = 2.0;
 /// F9.6 item 6: keyboard pan speed, world units/sec at zoom 1.0 (divided by
 /// the current zoom so it feels like a constant SCREEN speed, same trick as
 /// the border-thickness fix above). Q/E zoom rate is a fraction-per-second
