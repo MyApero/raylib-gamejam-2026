@@ -7,7 +7,131 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9.5 item 10 — dead-player reap (last item in the
+**Current batch:** Out-of-plan mobile bugfix, then all of F9.6 (items 1-8,
+one combined batch at the author's request — normally 1-2 items/batch, but
+this was a coherent UX polish sweep and the author asked for the whole thing).
+
+**Mobile bugfix (author-reported mid-batch, before F9.6 started):**
+double-click-to-like wasn't registering on a real phone. Root cause
+(REASONED, matches the symptom exactly): `game.html`'s canvas is fixed at
+720x720 internal render resolution but only `width: 100vmin` on screen —
+on most phones that's well under 720 CSS px, so the browser upscales, and
+any physical finger-jitter between the two taps of a double-tap gets
+magnified by that same ratio once mapped into game-space pixels.
+`LONG_PRESS_TOL_PX` (8px, tuned for mouse precision) was used both for the
+single-press hold-still/drag check AND for matching the second tap's
+position against the first — the fix adds a separate, more forgiving
+`DOUBLE_CLICK_TOL_PX` (28px) used ONLY for the second-tap-position-match,
+leaving the existing single-press tolerance untouched (narrowest fix that
+addresses the reported symptom without loosening drag-vs-click detection
+elsewhere). Mirrored identically in `main.rs` and `bin/web.rs`. Both clients
+build clean. REASONED, not independently re-verified on real touch hardware
+by me (no phone available) — awaiting the author's next mobile hand-test.
+touch-action:none was already set on the canvas, ruled out as a cause.
+
+**F9.6 items 1-8:**
+1. **Eraser** (decision 18) — `erase_island_cell`/`erase_margin_cell`
+   reducers added, same validation + token charge as the matching paint
+   reducer (`erase_island_cell`: radius bound + caller-owns-island, scoped
+   entirely via `ctx.sender()` same as `paint_island_cell` — structurally
+   can't target another player's island, no separate cross-identity check
+   needed; `erase_margin_cell`: territory + canvas-bound check only, no
+   ownership, matching `paint_margin_cell`'s "everyone's to paint" design).
+   **VERIFIED live** via a throwaway Node WebSocket probe (same technique as
+   the F5/F9.5-item-10 probes): fresh identity, paint then erase an island
+   cell AND a margin cell, confirmed via `spacetime sql` that both rows were
+   actually gone afterward (not just a "committed" status); also confirmed
+   `erase_margin_cell` rejects the exact same coordinate `paint_margin_cell`
+   rejects ("cell belongs to an island") — validation parity, not just
+   independently-plausible logic. Republished locally, bindings regenerated
+   (`erase_island_cell_reducer.rs`/`erase_margin_cell_reducer.rs`).
+   Client: `X` key (not `E` — item 6 claims that for zoom) + new footer
+   toggle button toggle paint/erase mode (`UiState.eraser_on`, shared
+   `ui.rs`); painting block in both `main.rs`/`bin/web.rs` branches to the
+   erase reducer when on; own cursor renders gray + a small eraser badge
+   instead of the brush-hue pointer. `FOOTER_H` grew 44->78 (a second row)
+   to fit the new button without cramming the already ~6px-of-slack first
+   row. Client-side wiring REASONED (compiles clean, both targets) —
+   awaiting author hand-test for feel/layout.
+2. **Middle-click eyedropper** — clean middle press+release within 8px
+   (`MIDDLE_CLICK_TOL_PX`, doesn't disable the existing middle-drag pan,
+   which runs off `is_mouse_button_down` every frame regardless and treats
+   a real click's near-zero delta as a no-op pan) picks the hovered tile's
+   exact h/s/v (any island's cell or a margin cell — `painted_color_at`,
+   new in both clients); applies via `set_brush` if the hue is already
+   owned (client-side `have_hue` check, server re-validates), saturation
+   clamped to the level's `sat_cap`; otherwise a new plain-text toast
+   ("not unlocked — long-press to merge") via `UiState::show_info_toast`
+   (required making `Toast.hue` an `Option` so the flash swatch is
+   optional). Mouse only, per plan.md — no touch path added. REASONED,
+   builds clean both targets.
+3. **Heart icon for like** — `world::draw_heart` (two circles + a triangle,
+   filled = liked, outline = not), replacing the "Likes: N" text-only line
+   in both the own-island popup and the foreign-island hover tooltip, both
+   clients (shared `ui.rs`). REASONED — no screenshot capability here to
+   confirm the pixel composition actually reads as a heart at 14-18px;
+   flagged for the author's visual check.
+4. **Color overlay ergonomics** — Escape closes it (folded into item 5's
+   Escape handler below); clicking anywhere outside `overlay_rect()` also
+   closes it now (previously only the X button did); swatches sorted by hue
+   (`sorted_hues`, used identically by the click hit-test and the draw loop
+   so indices stay in sync); hovering a swatch shows its hex code (of the
+   swatch AS RENDERED, i.e. at the current brush sat/val, not a canonical
+   100/100) in a small label above it. REASONED, builds clean.
+5. **Keybindings/help overlay** — Escape with nothing open shows a minimal
+   controls list (`UiState.help_open`, `draw_help_overlay`); Escape with
+   any one of {help, inventory overlay, account overlay, island popup} open
+   closes THAT one (checked in that priority order, one per keypress).
+   Every place that opens one of the other three overlays now also clears
+   `help_open`, keeping the "exactly one modal at a time" invariant item 4
+   already relied on. REASONED, builds clean.
+6. **Keyboard + right-drag camera** — WASD/arrow keys pan (speed divided by
+   zoom so it feels like a constant SCREEN speed, same trick already used
+   for border thickness), Q/E zoom (wheel untouched); right-click-drag pans
+   (added to the existing middle-drag/Shift+left-drag `panning` condition);
+   all swallowed while `UiState::text_field_focused()` (new: name/import/
+   link-edit) is true, so typing doesn't drive the camera. Mirrored
+   identically in `main.rs`/`bin/web.rs`. REASONED — the web build's
+   keyboard path additionally assumes the canvas/document receives key
+   events without needing explicit focus (untested on a real page load by
+   me); mouse/touch paths are unaffected either way.
+7. **Launch intro** — first frame the player's own island resolves, the
+   camera starts at a "whole occupied world" framing (`world_fit`: bounding
+   box of every known island's center, zoomed to fit) and eases
+   (cubic ease-out) to the player's island over 1.75s; any mouse button,
+   wheel, keypress, or (web only, since touch matters most there) an active
+   touch point skips straight to the final pose. Replaces the old instant
+   snap; `centered_on_island`'s meaning is unchanged ("camera has settled,
+   other logic can take over"), only how it gets there. REASONED, builds
+   clean both targets — timing/ease feel not hand-tested by me.
+8. **Borderless far zoom** — `world::draw_hex`'s outline param is now
+   `Option<Color>`; both clients compute `show_tile_outline = camera.zoom
+   >= BORDERLESS_ZOOM_THRESHOLD` (5.0, executor's pick within the author's
+   ~4-6px note) once per frame and pass `None` past that zoom to skip the
+   per-tile outline draw call entirely (both the island-cell and
+   margin-cell draw sites). REASONED, builds clean.
+
+**Verify status:** server-side eraser reducers VERIFIED live (see item 1).
+Everything else in this batch is client rendering/input — REASONED from
+code + both `cargo check`/`cargo build --release` (native) and the
+emscripten `wasm32-unknown-emscripten` target (native `cargo check` clean,
+`./build-web.sh` release build succeeds, `du -sh client/web` = 952K, well
+under 64 MB) are clean with no warnings, but none of it has been hand-tested
+in an actual running client by me — per this repo's standing protocol, the
+author drives real runtime testing (`cargo run -p client --bin client`,
+and the web build in a browser/phone) rather than me launching the GUI.
+Republished server picks up both the eraser reducers and the author's
+concurrent live constant tuning (`MARGIN_GAP_TILES`=6, `MERGE_DIST`=1.5) —
+no conflict, both landed in the same publish.
+
+Files touched: `server/src/lib.rs` (2 new reducers), `client/src/main.rs`,
+`client/src/bin/web.rs`, `client/src/ui.rs`, `client/src/world.rs`,
+`client/src/module_bindings/{erase_island_cell,erase_margin_cell}_reducer.rs`
++ regenerated `mod.rs`.
+
+---
+
+**Previous batch:** F9.5 item 10 — dead-player reap (last item in the
 sweep). Scheduled reducer (`reap_dead_players`, new `reap_schedule` table,
 60s repeating tick, same lazy-seeding pattern as `time_xp_schedule`/
 `rerank_warn_schedule`) deletes a player entirely once they're offline,
@@ -1472,6 +1596,17 @@ Implementation notes:
 - [ ] F9 — island links (jam rate id only), link-click XP, time XP —
       implemented (see the batch notes above); server-side dedupe/guards
       VERIFIED via CLI, client wiring + the 60s time-XP tick REASONED only
+      — awaiting the author's hand-test before checking this off —
+- [x] F9.5 — post-deploy bug sweep (10 items: account import bug, FPS at
+      scale, merge range, recent-colors, modal click-through, cursor scale,
+      island-info-on-hover redesign, Safari wheel-zoom clamp, zero-gap ->
+      gapped tiling, dead-player reap) — all VERIFIED across their
+      individual batches above. COMMITTED.
+- [ ] F9.6 — UX polish batch (8 items: eraser, middle-click eyedropper,
+      heart icon, color-overlay ergonomics, help overlay, keyboard/right-
+      drag camera, launch intro, borderless far zoom) — see the batch notes
+      above. Eraser reducers VERIFIED live; everything else REASONED (both
+      targets build clean, web release build succeeds, package size fine)
       — awaiting the author's hand-test before checking this off —
 
 ## P2 (only if time remains)

@@ -12,17 +12,25 @@ mod constants {
     // reach zero gap at ANY spacing value, only shrink an always-triangular
     // gap toward it, because the coarse step directions point at the
     // hexagon's VERTICES rather than the middle of a flat edge), with a
-    // deliberate uniform 2-tile gap left between neighbors (not zero —
-    // author wanted a little breathing room after all). This is still
+    // deliberate uniform gap left between neighbors (not zero — author
+    // wanted a little breathing room after all).
+    //
+    // MUST be even: the placement radius is bumped by `MARGIN_GAP_TILES / 2`
+    // on top of `ISLAND_RADIUS` (see `geometry::SLOT_PLACEMENT_RADIUS`), and
+    // that bump contributes to the gap symmetrically from both neighboring
+    // islands — so the resulting gap is always exactly `2 * bump`, i.e.
+    // always even. An odd value here is not geometrically reachable with
+    // this tiling and would silently round down via integer division.
+    pub const MARGIN_GAP_TILES: i32 = 6;
     // exactly the hexdist between any two ADJACENT islands' centers in that
     // tiling — verified computationally, not just algebra on paper.
-    pub const SLOT_SPACING: i32 = 2 * (ISLAND_RADIUS + 1) + 1;
+    pub const SLOT_SPACING: i32 = 2 * (ISLAND_RADIUS + MARGIN_GAP_TILES / 2) + 1;
     // F9.5 item 3 (author-reported: "more range to merge" / known_bugs.md):
     // raised from 1.0 — the deployed build's range felt too short in
     // hand-testing. Mirrored in plan.md's constants table; re-tune both
     // together if the author's further hand-testing settles on a different
     // value.
-    pub const MERGE_DIST: f32 = 2.0;
+    pub const MERGE_DIST: f32 = 1.5;
     // 50x the original plan.md values (1000 tiles / 20s sustained) — author
     // felt the original paint rate limit too restrictive in hand-testing.
     pub const PAINT_BUCKET_MAX: f32 = 1000.0;
@@ -60,7 +68,7 @@ mod constants {
 /// Axial hex geometry, slot-lattice mapping and cell-id packing — see
 /// plan.md "Geometry spec". Pure functions only; no DB access.
 mod geometry {
-    use super::constants::ISLAND_RADIUS;
+    use super::constants::{ISLAND_RADIUS, MARGIN_GAP_TILES};
 
     /// Hex-of-hexes tiling basis (F9.5): the two coarse-lattice generators
     /// that tile hex-distance-`R` "super-hexagons" (`3R²+3R+1` cells each)
@@ -73,15 +81,18 @@ mod geometry {
     /// that abstract index into an actual fine-grid position, in
     /// `slot_center`.
     ///
-    /// Deliberately `ISLAND_RADIUS + 1`, not `ISLAND_RADIUS` itself: tiling
-    /// on the ACTUAL island radius touches with zero gap at all (verified
-    /// too, but the author wanted a little breathing room between islands
-    /// after seeing it) — placing islands as if they were one tile bigger,
-    /// while their real paintable interior (`ISLAND_RADIUS`, everywhere else
-    /// in this file) stays 13, leaves a uniform 2-tile gap on every side
-    /// instead. `R` here means this bumped placement radius, not
-    /// `ISLAND_RADIUS`.
-    const SLOT_PLACEMENT_RADIUS: i32 = ISLAND_RADIUS + 1;
+    /// Deliberately `ISLAND_RADIUS + MARGIN_GAP_TILES / 2`, not
+    /// `ISLAND_RADIUS` itself: tiling on the ACTUAL island radius touches
+    /// with zero gap at all (verified too, but the author wanted a little
+    /// breathing room between islands after seeing it) — placing islands as
+    /// if they were `MARGIN_GAP_TILES / 2` tiles bigger, while their real
+    /// paintable interior (`ISLAND_RADIUS`, everywhere else in this file)
+    /// stays unchanged, leaves a uniform `MARGIN_GAP_TILES`-tile gap on
+    /// every side instead (the bump is shared symmetrically by both
+    /// neighboring islands, so the gap is exactly `2 * bump` —
+    /// `MARGIN_GAP_TILES` must stay even, see its doc comment). `R` here
+    /// means this bumped placement radius, not `ISLAND_RADIUS`.
+    const SLOT_PLACEMENT_RADIUS: i32 = ISLAND_RADIUS + MARGIN_GAP_TILES / 2;
     const SLOT_U: (i32, i32) = (SLOT_PLACEMENT_RADIUS, SLOT_PLACEMENT_RADIUS + 1);
     const SLOT_V: (i32, i32) = (-(SLOT_PLACEMENT_RADIUS + 1), 2 * SLOT_PLACEMENT_RADIUS + 1);
     /// Determinant of the [`SLOT_U`, `SLOT_V`] basis matrix — the
@@ -694,6 +705,47 @@ pub fn paint_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), Str
             painted_at: ctx.timestamp,
         });
     }
+    Ok(())
+}
+
+/// F9.6 item 1 (eraser, decision 18): same validation as `paint_island_cell`
+/// (radius bound + ownership), same token charge — an erase costs a paint
+/// token just like a paint does, so it can't be used to bypass the rate
+/// limit. Deleting a cell that was never painted is a harmless no-op (the
+/// token is still spent, matching how re-painting an already-painted cell
+/// also still spends one).
+#[spacetimedb::reducer]
+pub fn erase_island_cell(ctx: &ReducerContext, q_local: i32, r_local: i32) -> Result<(), String> {
+    if geometry::hexdist(q_local, r_local) > constants::ISLAND_RADIUS {
+        return Err("cell is outside the island".to_string());
+    }
+    let island = ctx
+        .db
+        .island()
+        .owner()
+        .find(ctx.sender())
+        .ok_or("you do not own an island")?;
+    take_paint_token(ctx)?;
+    let id = geometry::island_cell_id(island.id, q_local, r_local);
+    ctx.db.island_cell().id().delete(id);
+    Ok(())
+}
+
+/// F9.6 item 1 (eraser, decision 18): same validation as `paint_margin_cell`
+/// (canvas bound, not island territory), same token charge.
+#[spacetimedb::reducer]
+pub fn erase_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), String> {
+    if geometry::in_any_island_territory(q, r) {
+        return Err("cell belongs to an island".to_string());
+    }
+    let highest_slot = ctx.db.island().iter().map(|i| i.slot).max().unwrap_or(0);
+    let bound = constants::SLOT_SPACING * (geometry::occupied_rings(highest_slot) + 1);
+    if geometry::hexdist(q, r) > bound {
+        return Err("cell is outside the current canvas bounds".to_string());
+    }
+    take_paint_token(ctx)?;
+    let id = geometry::margin_cell_id(q, r);
+    ctx.db.margin_cell().id().delete(id);
     Ok(())
 }
 

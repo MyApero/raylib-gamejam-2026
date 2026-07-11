@@ -9,6 +9,10 @@ use std::sync::OnceLock;
 
 pub mod constants {
     pub const ISLAND_RADIUS: i32 = 13;
+    /// Gap (in fine hex tiles) left between neighboring islands' paintable
+    /// interiors — mirrors `server::constants::MARGIN_GAP_TILES` exactly.
+    /// MUST be even: see that constant's doc comment for why.
+    pub const MARGIN_GAP_TILES: i32 = 6;
     /// Client-side send-rate cap for `set_pos`; the server has no matching
     /// limit (cursor spam is cheap), this just avoids flooding the socket.
     pub const CURSOR_SEND_HZ: f32 = 20.0;
@@ -69,9 +73,9 @@ pub const DIRECTIONS: [(i32, i32); 6] = [(1, 0), (1, -1), (0, -1), (-1, 0), (-1,
 /// `SLOT_PLACEMENT_RADIUS`/`SLOT_U`/`SLOT_V`/`SLOT_DET` exactly; see their
 /// comments there for why this (not a naive per-axis scale) is what makes
 /// neighboring islands share a flat edge, and why the placement radius is
-/// deliberately bumped by 1 over the real `ISLAND_RADIUS` (a uniform 2-tile
-/// gap, not zero).
-const SLOT_PLACEMENT_RADIUS: i32 = constants::ISLAND_RADIUS + 1;
+/// deliberately bumped by `MARGIN_GAP_TILES / 2` over the real
+/// `ISLAND_RADIUS` (a uniform `MARGIN_GAP_TILES`-tile gap, not zero).
+const SLOT_PLACEMENT_RADIUS: i32 = constants::ISLAND_RADIUS + constants::MARGIN_GAP_TILES / 2;
 const SLOT_U: (i32, i32) = (SLOT_PLACEMENT_RADIUS, SLOT_PLACEMENT_RADIUS + 1);
 const SLOT_V: (i32, i32) = (-(SLOT_PLACEMENT_RADIUS + 1), 2 * SLOT_PLACEMENT_RADIUS + 1);
 const SLOT_DET: i32 = SLOT_U.0 * SLOT_V.1 - SLOT_U.1 * SLOT_V.0;
@@ -199,6 +203,41 @@ pub fn draw_plus_hint(d: &mut impl RaylibDraw, m: Vector2) {
     d.draw_line_ex(Vector2::new(cx, cy - 4.0), Vector2::new(cx, cy + 4.0), 2.0, Color::RAYWHITE);
 }
 
+/// F9.6 item 3: heart icon for the island popup/tooltip's like count —
+/// filled (solid red) if the viewer has already liked the island, outline
+/// (just the stroke) otherwise. Two lobes (circles) plus a downward-pointing
+/// triangle, the standard heart-from-primitives composition.
+pub fn draw_heart(d: &mut impl RaylibDraw, center: Vector2, size: f32, filled: bool, color: Color) {
+    let lobe_r = size * 0.28;
+    let lobe_y = center.y - size * 0.12;
+    let left = Vector2::new(center.x - lobe_r * 0.95, lobe_y);
+    let right = Vector2::new(center.x + lobe_r * 0.95, lobe_y);
+    let top = Vector2::new(center.x, center.y + size * 0.55);
+    let bl = Vector2::new(center.x - size * 0.5, center.y - size * 0.05);
+    let br = Vector2::new(center.x + size * 0.5, center.y - size * 0.05);
+    if filled {
+        d.draw_circle_v(left, lobe_r, color);
+        d.draw_circle_v(right, lobe_r, color);
+        d.draw_triangle(bl, top, br, color);
+    } else {
+        d.draw_circle_lines(left.x as i32, left.y as i32, lobe_r, color);
+        d.draw_circle_lines(right.x as i32, right.y as i32, lobe_r, color);
+        d.draw_triangle_lines(bl, top, br, color);
+    }
+}
+
+/// F9.6 item 1: small eraser badge near the screen-space cursor, shown
+/// whenever paint/erase mode is toggled on — distinct from `draw_plus_hint`
+/// (which only ever appears in paint mode, hovering a foreign tile), so the
+/// two never compete for the same corner in practice.
+pub fn draw_eraser_badge(d: &mut impl RaylibDraw, m: Vector2) {
+    let cx = m.x + 18.0;
+    let cy = m.y + 2.0;
+    d.draw_circle(cx as i32, cy as i32, 8.0, Color::new(20, 20, 24, 220));
+    d.draw_rectangle_lines(cx as i32 - 4, cy as i32 - 3, 8, 6, Color::RAYWHITE);
+    d.draw_line_ex(Vector2::new(cx - 5.0, cy + 5.0), Vector2::new(cx + 5.0, cy - 5.0), 1.5, Color::new(230, 90, 90, 255));
+}
+
 /// Progress ring around the screen-space cursor while long-pressing toward a
 /// merge (`frac` 0.0..1.0 of the hold threshold elapsed).
 pub fn draw_hold_ring(d: &mut impl RaylibDraw, m: Vector2, frac: f32) {
@@ -207,10 +246,16 @@ pub fn draw_hold_ring(d: &mut impl RaylibDraw, m: Vector2, frac: f32) {
 }
 
 /// Filled+outlined flat-top hex at world `center` with world-unit `radius`
-/// (normally 1.0; camera zoom handles on-screen scale).
-pub fn draw_hex(d: &mut impl RaylibDraw, center: Vector2, radius: f32, fill: Color, line: Color) {
+/// (normally 1.0; camera zoom handles on-screen scale). `line: None` skips
+/// the outline pass entirely — F9.6 item 8 (borderless far zoom): once the
+/// on-screen hex size drops below a few pixels the outline is both a wasted
+/// draw call and visual noise (the fill alone reads as a painting at that
+/// distance), so the caller passes `None` past its own zoom threshold.
+pub fn draw_hex(d: &mut impl RaylibDraw, center: Vector2, radius: f32, fill: Color, line: Option<Color>) {
     d.draw_poly(center, 6, radius, 0.0, fill);
-    d.draw_poly_lines_ex(center, 6, radius, 0.0, radius * 0.04, line);
+    if let Some(line) = line {
+        d.draw_poly_lines_ex(center, 6, radius, 0.0, radius * 0.04, line);
+    }
 }
 
 /// Filled pointer/arrow at screen-space `m` (apex at the tip), for the local

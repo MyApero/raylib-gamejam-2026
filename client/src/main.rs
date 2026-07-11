@@ -30,11 +30,44 @@ const LONG_PRESS_TOL_PX: f32 = 8.0;
 /// `LONG_PRESS_TOL_PX`) toggle a like/unlike instead of opening the info
 /// popup — see `pending_info_click`.
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
+/// Author-reported (mobile hand-test, 2026-07-11): double-click-to-like
+/// wasn't registering on a phone. Root cause: the canvas is fixed at 720x720
+/// internal render resolution (`client/web/game.html`'s `width: 100vmin`),
+/// but on most phone screens that's displayed well under 720 CSS px, so the
+/// browser upscales — any physical finger jitter between the two taps of a
+/// double-tap gets magnified by that same ratio once mapped into game-space
+/// coordinates. `LONG_PRESS_TOL_PX` (8px) was tuned for mouse precision and
+/// is far too tight for two independent finger contacts; this is a separate,
+/// more forgiving tolerance used ONLY to match the second tap's position
+/// against the first (the "is this the same click" check), not for the
+/// existing single-press hold-still/drag detection, which stays as-is.
+const DOUBLE_CLICK_TOL_PX: f32 = 28.0;
 /// F9.5 item 7 / decision 17: how long the cursor must sit continuously over
 /// a foreign island before its info popup opens on its own — long enough
 /// that a paint stroke's cursor briefly sweeping past a neighboring border
 /// doesn't flicker it open.
 const HOVER_OPEN_DELAY: Duration = Duration::from_millis(200);
+/// F9.6 item 2: middle-click eyedropper — a clean middle press+release
+/// within this tolerance/window is a "click"; drifting past it (or holding
+/// past the window without release) is the existing middle-drag PAN gesture
+/// instead, which stays completely unaffected since it's driven separately
+/// by `is_mouse_button_down` every frame regardless of this.
+const MIDDLE_CLICK_TOL_PX: f32 = 8.0;
+/// F9.6 item 7: how long the launch intro's ease from the whole-world view
+/// to the player's island takes, absent any input (which skips it instantly).
+const INTRO_DURATION: Duration = Duration::from_millis(1750);
+/// F9.6 item 8: on-screen hex size (world-unit radius 1.0 * `camera.zoom`,
+/// in pixels) below which the per-tile outline pass is skipped — the
+/// author's "borderless far zoom" note picked ~4-6px; the executor settled
+/// on 5.
+const BORDERLESS_ZOOM_THRESHOLD: f32 = 5.0;
+/// F9.6 item 6: keyboard pan speed, world units/sec at zoom 1.0 (divided by
+/// the current zoom so it feels like a constant SCREEN speed, same trick as
+/// the border-thickness fix above). Q/E zoom rate is a fraction-per-second
+/// multiplier, chosen so a held key covers roughly the same range as a few
+/// mouse-wheel notches per second.
+const KEY_PAN_SPEED: f32 = 400.0;
+const KEY_ZOOM_RATE: f32 = 1.4;
 
 /// `credentials::File` keys its storage path only by this string
 /// (`~/.spacetimedb_client_credentials/<key>`), shared by every process on
@@ -59,6 +92,35 @@ fn island_world_center(island: &Island) -> Vector2 {
     let (q, r) = world::slot_coords(island.slot);
     let (cx, cy) = world::slot_center(q, r);
     world::axial_to_world(cx, cy)
+}
+
+/// F9.6 item 7 (launch intro): a camera pose (target, zoom) framing every
+/// currently-known island's center — the "whole occupied world" the intro
+/// starts from before easing to the player's own island. Falls back to the
+/// player-fit pose itself if no islands are known yet (can't happen once
+/// `my_island` resolves, since that means at least one island — the
+/// caller's own — exists; defensive only).
+fn world_fit(ctx: &DbConnection, fallback: Vector2, fallback_zoom: f32) -> (Vector2, f32) {
+    let mut min = Vector2::new(f32::MAX, f32::MAX);
+    let mut max = Vector2::new(f32::MIN, f32::MIN);
+    let mut any = false;
+    for island in ctx.db.island().iter() {
+        let center = island_world_center(&island);
+        any = true;
+        min.x = min.x.min(center.x);
+        min.y = min.y.min(center.y);
+        max.x = max.x.max(center.x);
+        max.y = max.y.max(center.y);
+    }
+    if !any {
+        return (fallback, fallback_zoom);
+    }
+    let target = Vector2::new((min.x + max.x) / 2.0, (min.y + max.y) / 2.0);
+    // Padding: an island's own radius (so the outermost islands aren't
+    // clipped at their edge) plus a little breathing room.
+    let span = (max.x - min.x).max(max.y - min.y) + ISLAND_RADIUS as f32 * 4.0;
+    let zoom = (620.0 / span.max(1.0)).clamp(0.25, ISLAND_FIT_ZOOM);
+    (target, zoom)
 }
 
 /// What a hovered world cell is paintable as, from `me`'s point of view.
@@ -114,6 +176,29 @@ fn merge_target_at(ctx: &DbConnection, world_q: i32, world_r: i32) -> Option<(u8
         .iter()
         .find(|c| c.island_id == island.id && c.q == lq && c.r == lr)
         .map(|c| (0u8, c.id, world::unpack_hsv(c.color).0))
+}
+
+/// F9.6 item 2 (middle-click eyedropper): the color actually painted at
+/// absolute world axial `(q, r)`, whichever kind of cell it is — any
+/// player's island cell, or a margin cell. `None` if nothing's been painted
+/// there. Unlike `merge_target_at`, margin tiles count here (the eyedropper
+/// isn't a color-discovery mechanism the way long-press-merge is — it only
+/// ever picks a hue the caller already owns, see `have_hue` at the call
+/// site — so the "no color discovery from the margin" rule doesn't apply).
+fn painted_color_at(ctx: &DbConnection, world_q: i32, world_r: i32) -> Option<(u16, u8, u8)> {
+    if let Some((island, lq, lr)) = island_at(ctx, world_q, world_r) {
+        return ctx
+            .db
+            .island_cell()
+            .iter()
+            .find(|c| c.island_id == island.id && c.q == lq && c.r == lr)
+            .map(|c| world::unpack_hsv(c.color));
+    }
+    ctx.db
+        .margin_cell()
+        .iter()
+        .find(|c| c.q == world_q && c.r == world_r)
+        .map(|c| world::unpack_hsv(c.color))
 }
 
 fn short_hex(id: Identity) -> String {
@@ -247,6 +332,13 @@ fn main() {
         rotation: 0.0,
         zoom: ISLAND_FIT_ZOOM,
     };
+    // F9.6 item 7: `None` until the launch intro starts (the first frame
+    // `my_island` resolves); `Some(start_time)` while it eases toward the
+    // island; `centered_on_island` (below) becomes true once it's done or
+    // skipped, same as it always has, so every OTHER frame's camera logic
+    // (Center button, zoom/pan) is completely unaware the intro ever existed.
+    let mut intro_started_at: Option<Instant> = None;
+    let mut intro_from: Option<(Vector2, f32)> = None;
     let mut centered_on_island = false;
 
     let mut last_sent_pos: Option<Vector2> = None;
@@ -285,6 +377,12 @@ fn main() {
     // sees "no modal open" and would let the SAME press paint. Latches at
     // press-start for the whole gesture, cleared on release.
     let mut suppress_map_until_release = false;
+    // F9.6 item 2: middle-click eyedropper — press position, checked on
+    // release for `MIDDLE_CLICK_TOL_PX` drift. A clean release fires the
+    // eyedropper; nothing here disables the existing middle-drag PAN (see
+    // `panning` below), which runs off `is_mouse_button_down` every frame
+    // regardless — a real click's incidental pan delta is imperceptible.
+    let mut middle_click: Option<Vector2> = None;
 
     while !rl.window_should_close() {
         if let Err(e) = ctx.frame_tick() {
@@ -297,16 +395,44 @@ fn main() {
         let mouse_screen = rl.get_mouse_position();
         let mouse_world = rl.get_screen_to_world2D(mouse_screen, camera);
 
+        // F9.6 item 7: launch intro. First frame the player's own island is
+        // known, camera starts framing the whole occupied world (`world_fit`)
+        // and eases to the island over `INTRO_DURATION`; any input skips
+        // straight to the final pose. `centered_on_island` still means
+        // exactly what it always did ("the camera has settled on the
+        // player's island, `main`'s other camera logic can take over") —
+        // only how it gets there changed.
         if let Some(me) = me {
             if !centered_on_island {
                 if let Some(island) = my_island(&ctx, me) {
-                    camera.target = island_world_center(&island);
-                    camera.zoom = ISLAND_FIT_ZOOM;
+                    let to_target = island_world_center(&island);
+                    let to_zoom = ISLAND_FIT_ZOOM;
+                    let start = *intro_started_at.get_or_insert_with(Instant::now);
+                    let (from_target, from_zoom) = *intro_from.get_or_insert_with(|| world_fit(&ctx, to_target, to_zoom));
+                    let any_input = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+                        || rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE)
+                        || rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_RIGHT)
+                        || rl.get_mouse_wheel_move() != 0.0
+                        || rl.get_key_pressed().is_some();
+                    let t = (start.elapsed().as_secs_f32() / INTRO_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+                    if any_input || t >= 1.0 {
+                        camera.target = to_target;
+                        camera.zoom = to_zoom;
+                        centered_on_island = true;
+                    } else {
+                        // Ease-out cubic: fast start, settles gently rather
+                        // than snapping to a stop.
+                        let ease = 1.0 - (1.0 - t).powi(3);
+                        camera.target = Vector2::new(
+                            from_target.x + (to_target.x - from_target.x) * ease,
+                            from_target.y + (to_target.y - from_target.y) * ease,
+                        );
+                        camera.zoom = from_zoom + (to_zoom - from_zoom) * ease;
+                    }
                     // Mouse-wheel zoom re-anchors `offset` to the cursor to
                     // zoom toward it; reset it back to screen-center or the
                     // island would land off-target after any prior scroll.
                     camera.offset = Vector2::new(360.0, 360.0);
-                    centered_on_island = true;
                 }
             }
         }
@@ -497,6 +623,7 @@ fn main() {
         let map_input_allowed = !suppress_map_until_release
             && !ui_state.overlay_open
             && !ui_state.account_open
+            && !ui_state.help_open
             && !ui_state.island_popup.as_ref().is_some_and(|p| p.is_own);
 
         // Zoom toward the cursor (official raylib recipe): re-anchor
@@ -511,8 +638,41 @@ fn main() {
             camera.zoom = (camera.zoom * (1.0 + wheel * 0.1)).clamp(0.25, 60.0);
         }
 
+        // F9.6 item 6: WASD/arrow-key pan, Q/E zoom. Swallowed while a text
+        // field owns keyboard input (name/import/link fields) so typing
+        // doesn't also drive the camera.
+        if map_input_allowed && !ui_state.text_field_focused() {
+            let dt = rl.get_frame_time();
+            let mut dx = 0.0;
+            let mut dy = 0.0;
+            if rl.is_key_down(KeyboardKey::KEY_LEFT) || rl.is_key_down(KeyboardKey::KEY_A) {
+                dx -= 1.0;
+            }
+            if rl.is_key_down(KeyboardKey::KEY_RIGHT) || rl.is_key_down(KeyboardKey::KEY_D) {
+                dx += 1.0;
+            }
+            if rl.is_key_down(KeyboardKey::KEY_UP) || rl.is_key_down(KeyboardKey::KEY_W) {
+                dy -= 1.0;
+            }
+            if rl.is_key_down(KeyboardKey::KEY_DOWN) || rl.is_key_down(KeyboardKey::KEY_S) {
+                dy += 1.0;
+            }
+            if dx != 0.0 || dy != 0.0 {
+                let speed = KEY_PAN_SPEED / camera.zoom;
+                camera.target.x += dx * speed * dt;
+                camera.target.y += dy * speed * dt;
+            }
+            if rl.is_key_down(KeyboardKey::KEY_Q) {
+                camera.zoom = (camera.zoom * (1.0 - KEY_ZOOM_RATE * dt)).clamp(0.25, 60.0);
+            }
+            if rl.is_key_down(KeyboardKey::KEY_E) {
+                camera.zoom = (camera.zoom * (1.0 + KEY_ZOOM_RATE * dt)).clamp(0.25, 60.0);
+            }
+        }
+
         let panning = map_input_allowed
             && (rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
+                || rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT)
                 || (rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
                     && rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)));
         if panning {
@@ -531,7 +691,9 @@ fn main() {
             }
         }
 
-        // Painting: left-drag, not while panning (SHIFT held).
+        // Painting/erasing: left-drag, not while panning (SHIFT/middle/right
+        // held). F9.6 item 1: which reducer fires depends on
+        // `ui_state.eraser_on` — same target-cell classification either way.
         if map_input_allowed {
             if let Some(me) = me {
                 if rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && !panning {
@@ -545,12 +707,18 @@ fn main() {
                         let fresh_cell = stroke_last != Some(key);
                         let rate_ok = last_paint_at.elapsed() >= Duration::from_secs_f32(1.0 / CLIENT_PAINT_HZ);
                         if fresh_cell && rate_ok {
-                            match key {
-                                (0, lq, lr) => {
+                            match (key, ui_state.eraser_on) {
+                                ((0, lq, lr), false) => {
                                     let _ = ctx.reducers.paint_island_cell(lq, lr);
                                 }
-                                (1, q, r) => {
+                                ((0, lq, lr), true) => {
+                                    let _ = ctx.reducers.erase_island_cell(lq, lr);
+                                }
+                                ((1, q, r), false) => {
                                     let _ = ctx.reducers.paint_margin_cell(q, r);
+                                }
+                                ((1, q, r), true) => {
+                                    let _ = ctx.reducers.erase_margin_cell(q, r);
                                 }
                                 _ => unreachable!(),
                             }
@@ -563,6 +731,39 @@ fn main() {
         }
         if rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
             stroke_last = None;
+        }
+
+        // F9.6 item 2: middle-click eyedropper. A clean press+release within
+        // `MIDDLE_CLICK_TOL_PX` picks the hovered tile's color; if the caller
+        // already owns that hue (within `HUE_TOLERANCE`, same window
+        // `set_brush` itself enforces), it's applied with saturation clamped
+        // to the level cap — otherwise a toast explains why nothing happened.
+        if !map_input_allowed {
+            middle_click = None;
+        } else {
+            if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE) {
+                middle_click = Some(mouse_screen);
+            }
+            if rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_MIDDLE) {
+                if let Some(press) = middle_click.take() {
+                    let dx = mouse_screen.x - press.x;
+                    let dy = mouse_screen.y - press.y;
+                    if (dx * dx + dy * dy).sqrt() <= MIDDLE_CLICK_TOL_PX {
+                        if let Some(me) = me {
+                            let (wq, wr) = world::world_to_axial(mouse_world);
+                            if let Some((hue, sat, val)) = painted_color_at(&ctx, wq, wr) {
+                                if have_hue(&ctx, me, hue) {
+                                    let level = ctx.db.user().identity().find(&me).map_or(0, |u| world::level_of(u.xp));
+                                    let sat = sat.min(world::sat_cap(level));
+                                    let _ = ctx.reducers.set_brush(hue, sat, val);
+                                } else {
+                                    ui_state.show_info_toast("not unlocked — long-press to merge".to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Long-press-to-merge: hold LMB steady on a painted cell for
@@ -620,7 +821,7 @@ fn main() {
                                 let ddy = pos.y - mouse_screen.y;
                                 id == island_id
                                     && t.elapsed() < DOUBLE_CLICK_WINDOW
-                                    && (ddx * ddx + ddy * ddy).sqrt() <= LONG_PRESS_TOL_PX
+                                    && (ddx * ddx + ddy * ddy).sqrt() <= DOUBLE_CLICK_TOL_PX
                             });
                             if is_double {
                                 let liked = already_liked(&ctx, island_id, me);
@@ -790,6 +991,11 @@ fn main() {
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::new(18, 18, 24, 255));
 
+        // F9.6 item 8: past this zoom, a tile's on-screen radius is under
+        // `BORDERLESS_ZOOM_THRESHOLD` px — skip the per-tile outline draw
+        // call (visual noise at that size anyway; a small render win too).
+        let show_tile_outline = camera.zoom >= BORDERLESS_ZOOM_THRESHOLD;
+
         {
             let mut d2 = d.begin_mode2D(camera);
 
@@ -814,7 +1020,7 @@ fn main() {
                         let (h, s, v) = world::unpack_hsv(c.color);
                         world::hsv_color(h, s, v)
                     });
-                    world::draw_hex(&mut d2, cell_world, 1.0, fill, Color::new(40, 40, 46, 255));
+                    world::draw_hex(&mut d2, cell_world, 1.0, fill, show_tile_outline.then_some(Color::new(40, 40, 46, 255)));
                 }
                 // Author-caught: sat/val used to be a fixed (85, 95),
                 // making the border a different shade than the owner's
@@ -856,7 +1062,7 @@ fn main() {
                     continue;
                 }
                 let (h, s, v) = world::unpack_hsv(cell.color);
-                world::draw_hex(&mut d2, p, 1.0, world::hsv_color(h, s, v), Color::new(30, 30, 34, 255));
+                world::draw_hex(&mut d2, p, 1.0, world::hsv_color(h, s, v), show_tile_outline.then_some(Color::new(30, 30, 34, 255)));
             }
 
             // Hover highlight: only on cells the caller could actually paint
@@ -924,10 +1130,16 @@ fn main() {
             };
             ui::draw(&mut d, &ui_state, &info, mouse_screen);
 
+            // F9.6 item 1: eraser mode draws the cursor in a neutral gray
+            // instead of the brush hue, plus a small eraser badge — visibly
+            // distinct from paint mode at a glance.
             let (hue, sat, val) = brush;
-            world::draw_cursor(&mut d, mouse_screen, world::hsv_color(hue, sat, val));
+            let cursor_color = if ui_state.eraser_on { Color::new(210, 210, 216, 255) } else { world::hsv_color(hue, sat, val) };
+            world::draw_cursor(&mut d, mouse_screen, cursor_color);
         }
-        if hover_takeable {
+        if ui_state.eraser_on {
+            world::draw_eraser_badge(&mut d, mouse_screen);
+        } else if hover_takeable {
             world::draw_plus_hint(&mut d, mouse_screen);
         }
         if let Some(frac) = long_press.as_ref().filter(|lp| !lp.fired && lp.target.is_some()).map(|lp| {

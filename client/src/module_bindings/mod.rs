@@ -9,6 +9,8 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 pub mod click_link_reducer;
 pub mod config_table;
 pub mod config_type;
+pub mod erase_island_cell_reducer;
+pub mod erase_margin_cell_reducer;
 pub mod inventory_table;
 pub mod inventory_type;
 pub mod island_cell_table;
@@ -42,6 +44,8 @@ pub mod user_type;
 pub use click_link_reducer::click_link;
 pub use config_table::*;
 pub use config_type::Config;
+pub use erase_island_cell_reducer::erase_island_cell;
+pub use erase_margin_cell_reducer::erase_margin_cell;
 pub use inventory_table::*;
 pub use inventory_type::Inventory;
 pub use island_cell_table::*;
@@ -81,6 +85,8 @@ pub use user_type::User;
 
 pub enum Reducer {
     ClickLink { island_id: u32 },
+    EraseIslandCell { q_local: i32, r_local: i32 },
+    EraseMarginCell { q: i32, r: i32 },
     LikeIsland { island_id: u32 },
     MergeWithCell { cell_kind: u8, cell_id: u32 },
     PaintIslandCell { q_local: i32, r_local: i32 },
@@ -102,6 +108,8 @@ impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
             Reducer::ClickLink { .. } => "click_link",
+            Reducer::EraseIslandCell { .. } => "erase_island_cell",
+            Reducer::EraseMarginCell { .. } => "erase_margin_cell",
             Reducer::LikeIsland { .. } => "like_island",
             Reducer::MergeWithCell { .. } => "merge_with_cell",
             Reducer::PaintIslandCell { .. } => "paint_island_cell",
@@ -122,6 +130,18 @@ impl __sdk::Reducer for Reducer {
             Reducer::ClickLink { island_id } => {
                 __sats::bsatn::to_vec(&click_link_reducer::ClickLinkArgs {
                     island_id: island_id.clone(),
+                })
+            }
+            Reducer::EraseIslandCell { q_local, r_local } => {
+                __sats::bsatn::to_vec(&erase_island_cell_reducer::EraseIslandCellArgs {
+                    q_local: q_local.clone(),
+                    r_local: r_local.clone(),
+                })
+            }
+            Reducer::EraseMarginCell { q, r } => {
+                __sats::bsatn::to_vec(&erase_margin_cell_reducer::EraseMarginCellArgs {
+                    q: q.clone(),
+                    r: r.clone(),
                 })
             }
             Reducer::LikeIsland { island_id } => {

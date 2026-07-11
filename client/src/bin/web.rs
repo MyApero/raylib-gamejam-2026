@@ -59,8 +59,24 @@ const LONG_PRESS_HOLD: Duration = Duration::from_millis(400);
 const LONG_PRESS_TOL_PX: f32 = 8.0;
 /// Author-requested: mirrors `main.rs`'s `DOUBLE_CLICK_WINDOW` exactly.
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
+/// Mirrors `main.rs`'s `DOUBLE_CLICK_TOL_PX` exactly — see its comment there.
+/// Matters far more here than on native: this is the actual touch path
+/// (author-reported broken on a real phone), where the canvas's fixed
+/// 720x720 internal resolution gets upscaled from a much smaller on-screen
+/// CSS size on most phones, magnifying inter-tap finger jitter into
+/// game-space pixels well past the 8px mouse-tuned tolerance.
+const DOUBLE_CLICK_TOL_PX: f32 = 28.0;
 /// F9.5 item 7 / decision 17: mirrors `main.rs`'s `HOVER_OPEN_DELAY` exactly.
 const HOVER_OPEN_DELAY: Duration = Duration::from_millis(200);
+/// F9.6 item 2: mirrors `main.rs`'s `MIDDLE_CLICK_TOL_PX` exactly.
+const MIDDLE_CLICK_TOL_PX: f32 = 8.0;
+/// F9.6 item 7: mirrors `main.rs`'s `INTRO_DURATION` exactly.
+const INTRO_DURATION: Duration = Duration::from_millis(1750);
+/// F9.6 item 8: mirrors `main.rs`'s `BORDERLESS_ZOOM_THRESHOLD` exactly.
+const BORDERLESS_ZOOM_THRESHOLD: f32 = 5.0;
+/// F9.6 item 6: mirrors `main.rs`'s `KEY_PAN_SPEED`/`KEY_ZOOM_RATE` exactly.
+const KEY_PAN_SPEED: f32 = 400.0;
+const KEY_ZOOM_RATE: f32 = 1.4;
 
 unsafe extern "C" {
     fn emscripten_run_script_string(script: *const c_char) -> *const c_char;
@@ -492,6 +508,43 @@ fn merge_target_at(tables: &Tables, world_q: i32, world_r: i32) -> Option<(u8, u
         .map(|(&id, c)| (0u8, id, world::unpack_hsv(c.color).0))
 }
 
+/// F9.6 item 2 (middle-click eyedropper): mirrors `main.rs`'s
+/// `painted_color_at` — the color at world axial `(q, r)`, any island's cell
+/// or a margin cell, whichever it is.
+fn painted_color_at(tables: &Tables, world_q: i32, world_r: i32) -> Option<(u16, u8, u8)> {
+    if let Some((island_id, lq, lr)) = island_at(tables, world_q, world_r) {
+        return tables
+            .island_cells
+            .values()
+            .find(|c| c.island_id == island_id && c.q == lq && c.r == lr)
+            .map(|c| world::unpack_hsv(c.color));
+    }
+    tables.margin_cells.values().find(|c| c.q == world_q && c.r == world_r).map(|c| world::unpack_hsv(c.color))
+}
+
+/// F9.6 item 7 (launch intro): mirrors `main.rs`'s `world_fit` — a camera
+/// pose framing every currently-known island's center.
+fn world_fit(tables: &Tables, fallback: Vector2, fallback_zoom: f32) -> (Vector2, f32) {
+    let mut min = Vector2::new(f32::MAX, f32::MAX);
+    let mut max = Vector2::new(f32::MIN, f32::MIN);
+    let mut any = false;
+    for island in tables.islands.values() {
+        let center = island_world_center(island);
+        any = true;
+        min.x = min.x.min(center.x);
+        min.y = min.y.min(center.y);
+        max.x = max.x.max(center.x);
+        max.y = max.y.max(center.y);
+    }
+    if !any {
+        return (fallback, fallback_zoom);
+    }
+    let target = Vector2::new((min.x + max.x) / 2.0, (min.y + max.y) / 2.0);
+    let span = (max.x - min.x).max(max.y - min.y) + ISLAND_RADIUS as f32 * 4.0;
+    let zoom = (620.0 / span.max(1.0)).clamp(0.25, ISLAND_FIT_ZOOM);
+    (target, zoom)
+}
+
 /// Display label for a merge partner in the "new color" toast: their name if
 /// set (every player gets a random one at first connect, server-side).
 /// Falls back to a generic label, never the partner's identity — mirrors
@@ -577,6 +630,9 @@ struct State {
     tables: Tables,
     camera: Camera2D,
     centered_on_island: bool,
+    /// F9.6 item 7: mirrors `main.rs`'s `intro_started_at`/`intro_from`.
+    intro_started_at: Option<Instant>,
+    intro_from: Option<(Vector2, f32)>,
     ui_state: ui::UiState,
     known_inventory_ids: HashSet<u64>,
     inventory_seeded: bool,
@@ -597,6 +653,8 @@ struct State {
     /// and touch).
     hover_target: Option<(u32, Instant)>,
     pinch: Option<Pinch>,
+    /// F9.6 item 2: mirrors `main.rs`'s `middle_click`.
+    middle_click: Option<Vector2>,
     stroke_last: Option<(u8, i32, i32)>,
     last_paint_at: Instant,
     last_sent_pos: Option<Vector2>,
@@ -672,11 +730,37 @@ fn frame(state: &mut State) {
     let mouse_screen = state.rl.get_mouse_position();
     let mouse_world = state.rl.get_screen_to_world2D(mouse_screen, state.camera);
 
+    // F9.6 item 7: launch intro — mirrors `main.rs` exactly. Camera starts
+    // framing the whole occupied world and eases to the player's island over
+    // `INTRO_DURATION`; any input skips straight to the final pose.
     if let Some(me) = me {
         if !state.centered_on_island {
             if let Some((island, _)) = my_island(&state.tables, me) {
-                recenter(&mut state.camera, island);
-                state.centered_on_island = true;
+                let to_target = island_world_center(island);
+                let to_zoom = ISLAND_FIT_ZOOM;
+                let start = *state.intro_started_at.get_or_insert_with(Instant::now);
+                let (from_target, from_zoom) =
+                    *state.intro_from.get_or_insert_with(|| world_fit(&state.tables, to_target, to_zoom));
+                let any_input = state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+                    || state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE)
+                    || state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_RIGHT)
+                    || state.rl.get_mouse_wheel_move() != 0.0
+                    || state.rl.get_touch_point_count() > 0
+                    || state.rl.get_key_pressed().is_some();
+                let t = (start.elapsed().as_secs_f32() / INTRO_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+                if any_input || t >= 1.0 {
+                    state.camera.target = to_target;
+                    state.camera.zoom = to_zoom;
+                    state.centered_on_island = true;
+                } else {
+                    let ease = 1.0 - (1.0 - t).powi(3);
+                    state.camera.target = Vector2::new(
+                        from_target.x + (to_target.x - from_target.x) * ease,
+                        from_target.y + (to_target.y - from_target.y) * ease,
+                    );
+                    state.camera.zoom = from_zoom + (to_zoom - from_zoom) * ease;
+                }
+                state.camera.offset = Vector2::new(360.0, 360.0);
             }
         }
     }
@@ -851,6 +935,7 @@ fn frame(state: &mut State) {
     let map_input_allowed = !state.suppress_map_until_release
         && !state.ui_state.overlay_open
         && !state.ui_state.account_open
+        && !state.ui_state.help_open
         && !state.ui_state.island_popup.as_ref().is_some_and(|p| p.is_own);
 
     // Two-finger pinch/pan (touch); single-finger tap/drag is already
@@ -884,9 +969,41 @@ fn frame(state: &mut State) {
         state.camera.zoom = (state.camera.zoom * (1.0 + wheel * 0.1)).clamp(0.25, 60.0);
     }
 
+    // F9.6 item 6: WASD/arrow-key pan, Q/E zoom — mirrors `main.rs` exactly,
+    // including the text-field-focus guard.
+    if map_input_allowed && !gesturing && !state.ui_state.text_field_focused() {
+        let dt = state.rl.get_frame_time();
+        let mut dx = 0.0;
+        let mut dy = 0.0;
+        if state.rl.is_key_down(KeyboardKey::KEY_LEFT) || state.rl.is_key_down(KeyboardKey::KEY_A) {
+            dx -= 1.0;
+        }
+        if state.rl.is_key_down(KeyboardKey::KEY_RIGHT) || state.rl.is_key_down(KeyboardKey::KEY_D) {
+            dx += 1.0;
+        }
+        if state.rl.is_key_down(KeyboardKey::KEY_UP) || state.rl.is_key_down(KeyboardKey::KEY_W) {
+            dy -= 1.0;
+        }
+        if state.rl.is_key_down(KeyboardKey::KEY_DOWN) || state.rl.is_key_down(KeyboardKey::KEY_S) {
+            dy += 1.0;
+        }
+        if dx != 0.0 || dy != 0.0 {
+            let speed = KEY_PAN_SPEED / state.camera.zoom;
+            state.camera.target.x += dx * speed * dt;
+            state.camera.target.y += dy * speed * dt;
+        }
+        if state.rl.is_key_down(KeyboardKey::KEY_Q) {
+            state.camera.zoom = (state.camera.zoom * (1.0 - KEY_ZOOM_RATE * dt)).clamp(0.25, 60.0);
+        }
+        if state.rl.is_key_down(KeyboardKey::KEY_E) {
+            state.camera.zoom = (state.camera.zoom * (1.0 + KEY_ZOOM_RATE * dt)).clamp(0.25, 60.0);
+        }
+    }
+
     let panning = map_input_allowed
         && !gesturing
         && (state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
+            || state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT)
             || (state.rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
                 && state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)));
     if panning {
@@ -907,8 +1024,9 @@ fn frame(state: &mut State) {
         }
     }
 
-    // Painting: left-drag (or one-finger touch-drag), not while panning or
-    // two-finger gesturing.
+    // Painting/erasing: left-drag (or one-finger touch-drag), not while
+    // panning or two-finger gesturing. F9.6 item 1: which reducer fires
+    // depends on `ui_state.eraser_on` — mirrors `main.rs` exactly.
     if map_input_allowed && !gesturing {
         if let Some(me) = me {
             if state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && !panning {
@@ -922,9 +1040,11 @@ fn frame(state: &mut State) {
                     let fresh_cell = state.stroke_last != Some(key);
                     let rate_ok = state.last_paint_at.elapsed() >= Duration::from_secs_f32(1.0 / CLIENT_PAINT_HZ);
                     if fresh_cell && rate_ok {
-                        match key {
-                            (0, lq, lr) => call_reducer("paint_island_cell", serde_json::json!([lq, lr])),
-                            (1, q, r) => call_reducer("paint_margin_cell", serde_json::json!([q, r])),
+                        match (key, state.ui_state.eraser_on) {
+                            ((0, lq, lr), false) => call_reducer("paint_island_cell", serde_json::json!([lq, lr])),
+                            ((0, lq, lr), true) => call_reducer("erase_island_cell", serde_json::json!([lq, lr])),
+                            ((1, q, r), false) => call_reducer("paint_margin_cell", serde_json::json!([q, r])),
+                            ((1, q, r), true) => call_reducer("erase_margin_cell", serde_json::json!([q, r])),
                             _ => unreachable!(),
                         }
                         state.stroke_last = Some(key);
@@ -936,6 +1056,37 @@ fn frame(state: &mut State) {
     }
     if state.rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
         state.stroke_last = None;
+    }
+
+    // F9.6 item 2: middle-click eyedropper — mirrors `main.rs` exactly.
+    // Mouse only (per plan.md: "no touch equivalent"), so no touch-count
+    // gating is needed here beyond the ordinary `map_input_allowed` check.
+    if !map_input_allowed {
+        state.middle_click = None;
+    } else {
+        if state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE) {
+            state.middle_click = Some(mouse_screen);
+        }
+        if state.rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_MIDDLE) {
+            if let Some(press) = state.middle_click.take() {
+                let dx = mouse_screen.x - press.x;
+                let dy = mouse_screen.y - press.y;
+                if (dx * dx + dy * dy).sqrt() <= MIDDLE_CLICK_TOL_PX {
+                    if let Some(me) = me {
+                        let (wq, wr) = world::world_to_axial(mouse_world);
+                        if let Some((hue, sat, val)) = painted_color_at(&state.tables, wq, wr) {
+                            if have_hue(&state.tables, me, hue) {
+                                let level = state.tables.users.get(me).map_or(0, |u| world::level_of(u.xp));
+                                let sat = sat.min(world::sat_cap(level));
+                                call_reducer("set_brush", serde_json::json!([hue, sat, val]));
+                            } else {
+                                state.ui_state.show_info_toast("not unlocked — long-press to merge".to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Long-press-to-merge: hold steady on a painted cell for
@@ -973,7 +1124,7 @@ fn frame(state: &mut State) {
                             let ddy = pos.y - mouse_screen.y;
                             id == island_id
                                 && t.elapsed() < DOUBLE_CLICK_WINDOW
-                                && (ddx * ddx + ddy * ddy).sqrt() <= LONG_PRESS_TOL_PX
+                                && (ddx * ddx + ddy * ddy).sqrt() <= DOUBLE_CLICK_TOL_PX
                         });
                         if is_double {
                             let liked = already_liked(&state.tables, island_id, me);
@@ -1117,6 +1268,9 @@ fn frame(state: &mut State) {
         .collect();
 
     let camera = state.camera;
+    // F9.6 item 8: mirrors `main.rs` — skip the per-tile outline pass past
+    // this zoom (visual noise at that size; a small render win too).
+    let show_tile_outline = camera.zoom >= BORDERLESS_ZOOM_THRESHOLD;
     let hover_takeable;
     let mut d = state.rl.begin_drawing(&state.thread);
     d.clear_background(Color::new(18, 18, 24, 255));
@@ -1144,7 +1298,7 @@ fn frame(state: &mut State) {
                     let (h, s, v) = world::unpack_hsv(c.color);
                     world::hsv_color(h, s, v)
                 });
-                world::draw_hex(&mut d2, cell_world, 1.0, fill, Color::new(40, 40, 46, 255));
+                world::draw_hex(&mut d2, cell_world, 1.0, fill, show_tile_outline.then_some(Color::new(40, 40, 46, 255)));
             }
             // Author-caught: mirrors `main.rs` — sat/val is now
             // `START_SAT`/100 exactly (was a fixed 85/95 lookalike shade).
@@ -1176,7 +1330,7 @@ fn frame(state: &mut State) {
                 continue;
             }
             let (h, s, v) = world::unpack_hsv(cell.color);
-            world::draw_hex(&mut d2, p, 1.0, world::hsv_color(h, s, v), Color::new(30, 30, 34, 255));
+            world::draw_hex(&mut d2, p, 1.0, world::hsv_color(h, s, v), show_tile_outline.then_some(Color::new(30, 30, 34, 255)));
         }
 
         let (hq, hr) = world::world_to_axial(mouse_world);
@@ -1227,10 +1381,16 @@ fn frame(state: &mut State) {
         };
         ui::draw(&mut d, &state.ui_state, &info, mouse_screen);
 
+        // F9.6 item 1: mirrors `main.rs` — eraser mode draws the cursor in a
+        // neutral gray plus a small eraser badge instead of the brush hue.
         let (hue, sat, val) = brush;
-        world::draw_cursor(&mut d, mouse_screen, world::hsv_color(hue, sat, val));
+        let cursor_color =
+            if state.ui_state.eraser_on { Color::new(210, 210, 216, 255) } else { world::hsv_color(hue, sat, val) };
+        world::draw_cursor(&mut d, mouse_screen, cursor_color);
     }
-    if hover_takeable {
+    if state.ui_state.eraser_on {
+        world::draw_eraser_badge(&mut d, mouse_screen);
+    } else if hover_takeable {
         world::draw_plus_hint(&mut d, mouse_screen);
     }
     if let Some(frac) = state
@@ -1264,6 +1424,8 @@ fn main() {
             zoom: ISLAND_FIT_ZOOM,
         },
         centered_on_island: false,
+        intro_started_at: None,
+        intro_from: None,
         ui_state: ui::UiState::new(),
         known_inventory_ids: HashSet::new(),
         inventory_seeded: false,
@@ -1272,6 +1434,7 @@ fn main() {
         pending_info_click: None,
         hover_target: None,
         pinch: None,
+        middle_click: None,
         stroke_last: None,
         last_paint_at: Instant::now(),
         last_sent_pos: None,

@@ -88,7 +88,8 @@ pointing here).
 | Constant | Value | Meaning |
 |---|---|---|
 | `ISLAND_RADIUS` | 13 | hex distance from island center to edge (side 14, 547 cells) |
-| `SLOT_SPACING` | 29 | fine-hex distance between adjacent island slot centers, on the "hex-of-hexes" tiling basis added at F9.5 (`geometry::SLOT_U`/`SLOT_V`, generated from `ISLAND_RADIUS + 1`) — flat sides face flat sides with a uniform 2-tile gap, not the old same-axis scaling's inescapable triangular gaps at every spacing value |
+| `MARGIN_GAP_TILES` | 6 | gap (fine hex tiles) left between neighboring islands' paintable interiors — MUST be even, since the placement radius is bumped by `MARGIN_GAP_TILES / 2` and that bump contributes symmetrically from both neighbors (raised from 2 — author wanted more pixel-war breathing room) |
+| `SLOT_SPACING` | 33 | fine-hex distance between adjacent island slot centers, on the "hex-of-hexes" tiling basis added at F9.5 (`geometry::SLOT_U`/`SLOT_V`, generated from `ISLAND_RADIUS + MARGIN_GAP_TILES / 2`) — flat sides face flat sides with a uniform `MARGIN_GAP_TILES`-tile gap, not the old same-axis scaling's inescapable triangular gaps at every spacing value |
 | `MERGE_DIST` | 2.0 | cursor-merge trigger distance, world units (raised from 1.0 — deployed-build testing found the range too short; author tunes by feel at F9.5, keep this row in sync with the settled value) |
 | `PAINT_BUCKET_MAX` | 1000.0 | rate limit: bucket capacity (raised 50x from the original 20.0 — felt too restrictive in hand-testing) |
 | `PAINT_REFILL_PER_SEC` | 50.0 | rate limit: 1000 tiles / 20 s (raised 50x from the original 1.0, same ratio) |

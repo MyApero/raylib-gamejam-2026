@@ -24,7 +24,11 @@ const RESET_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
 const IMPORT_TOKEN_MAX_LEN: usize = 2048;
 
 pub const HEADER_H: f32 = 28.0;
-pub const FOOTER_H: f32 = 44.0;
+/// F9.6 item 1: grew from 44 to fit a second footer row for the Eraser
+/// toggle without cramming the already-tight first row (which was down to
+/// ~6px of spare width). Both `main.rs`/`bin/web.rs` derive the map
+/// viewport from this constant, so nothing else needed to change.
+pub const FOOTER_H: f32 = 78.0;
 const SCREEN_W: f32 = 720.0;
 const SCREEN_H: f32 = 720.0;
 
@@ -52,10 +56,11 @@ fn hue_offset_signed(current: u16, base: u16) -> i32 {
 }
 
 /// "New color obtained" feedback for a just-inserted `inventory` row of the
-/// caller's own — a toast line plus a fading flash of the new hue.
+/// caller's own — a toast line plus a fading flash of the new hue. `hue:
+/// None` (F9.6 item 2's plain info toasts) just skips the flash swatch.
 struct Toast {
     text: String,
-    hue: u16,
+    hue: Option<u16>,
     shown_at: Instant,
 }
 
@@ -108,6 +113,13 @@ pub struct UiState {
     /// the popup opens on the caller's own island — see `open_island_info`.
     link_edit_input: String,
     link_edit_focused: bool,
+    /// F9.6 item 1: paint/erase mode toggle — footer button or the `X` key
+    /// (not `E`, which item 6 claims for keyboard zoom-in).
+    pub eraser_on: bool,
+    /// F9.6 item 5: minimal keybindings/help overlay, opened by Escape when
+    /// nothing else is open (closed by Escape again, matching item 4's rule
+    /// for every other overlay). Mutually exclusive with the other three.
+    pub help_open: bool,
 }
 
 /// One floating like/unlike pop — see `UiState::spawn_like_anim`.
@@ -155,7 +167,16 @@ impl UiState {
             like_anims: Vec::new(),
             link_edit_input: String::new(),
             link_edit_focused: false,
+            eraser_on: false,
+            help_open: false,
         }
+    }
+
+    /// F9.6 item 6: whether a text field currently owns keyboard input —
+    /// `main.rs`/`bin/web.rs` check this before letting WASD/arrows/Q/E pan
+    /// or zoom the camera, so typing a name doesn't also drive it.
+    pub fn text_field_focused(&self) -> bool {
+        self.name_focused || self.import_focused || self.link_edit_focused
     }
 
     /// Author-requested: called by the caller right after firing
@@ -171,6 +192,7 @@ impl UiState {
     pub fn open_island_info(&mut self, info: IslandInfo) {
         self.overlay_open = false;
         self.account_open = false;
+        self.help_open = false;
         // F9: seed the link edit field from the current value every time the
         // popup (re)opens on your own island, so editing starts from what's
         // actually set rather than whatever was last typed.
@@ -198,7 +220,7 @@ impl UiState {
     pub fn show_merge_toast(&mut self, hue: u16, partner_label: &str) {
         self.toast = Some(Toast {
             text: format!("new color, obtained with {partner_label}"),
-            hue,
+            hue: Some(hue),
             shown_at: Instant::now(),
         });
         self.note_used_hue(hue);
@@ -212,9 +234,15 @@ impl UiState {
     pub fn show_levelup_toast(&mut self, level: u64, sat_cap: u8, current_hue: u16) {
         self.toast = Some(Toast {
             text: format!("Level up! Lv{level} — saturation cap now {sat_cap}%"),
-            hue: current_hue,
+            hue: Some(current_hue),
             shown_at: Instant::now(),
         });
+    }
+
+    /// F9.6 item 2: plain-text toast (no flash swatch) — used for the
+    /// middle-click eyedropper's "not unlocked" feedback.
+    pub fn show_info_toast(&mut self, text: String) {
+        self.toast = Some(Toast { text, hue: None, shown_at: Instant::now() });
     }
 
     /// Seeds the name field from the server row exactly once. After that the
@@ -348,6 +376,11 @@ fn my_island_btn_rect() -> Rectangle {
     Rectangle::new(642.0, SCREEN_H - FOOTER_H + 7.0, 72.0, 30.0)
 }
 
+/// F9.6 item 1: second footer row (see `FOOTER_H`'s comment).
+fn eraser_btn_rect() -> Rectangle {
+    Rectangle::new(8.0, SCREEN_H - FOOTER_H + 41.0, 90.0, 30.0)
+}
+
 fn overlay_rect() -> Rectangle {
     Rectangle::new(60.0, 60.0, 600.0, 560.0)
 }
@@ -450,6 +483,23 @@ fn effective_hue(state: &UiState, info: &HudInfo) -> u16 {
     state.pending_select.unwrap_or(info.brush.0)
 }
 
+/// F9.6 item 4: `info.hues` reflects DB iteration order (effectively
+/// insertion order); the inventory grid instead shows them sorted by hue so
+/// nearby colors sit next to each other. Both `handle_input`'s swatch click
+/// loop and `draw_overlay` call this so index `i` -> `swatch_rect(i)` always
+/// means the same hue in both places.
+fn sorted_hues(info: &HudInfo) -> Vec<u16> {
+    let mut hues = info.hues.to_vec();
+    hues.sort_unstable();
+    hues
+}
+
+/// F9.6 item 4: swatch hex code, as actually rendered (current brush
+/// sat/val, not some canonical 100/100) — mirrors `swatch_color`.
+fn color_hex(c: Color) -> String {
+    format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+}
+
 pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) -> Actions {
     if state.toast.as_ref().is_some_and(|t| t.shown_at.elapsed() >= TOAST_DURATION) {
         state.toast = None;
@@ -488,6 +538,36 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     let held = rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT);
     let released = rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT);
 
+    // F9.6 item 5: Escape closes whatever single overlay is open (item 4's
+    // rule, applied uniformly to all four); with nothing open, it toggles
+    // the help overlay instead. Checked first and returns immediately so a
+    // frame that opens/closes an overlay doesn't also fall through to the
+    // click handling below.
+    if rl.is_key_pressed(KeyboardKey::KEY_ESCAPE) {
+        if state.help_open {
+            state.help_open = false;
+        } else if state.overlay_open {
+            state.overlay_open = false;
+            state.dragging = Drag::None;
+        } else if state.account_open {
+            state.account_open = false;
+        } else if state.island_popup.is_some() {
+            state.island_popup = None;
+        } else {
+            state.help_open = true;
+        }
+        return actions;
+    }
+    // F9.6 item 1: eraser toggle — `X` (not `E`, which item 6 gives to
+    // keyboard zoom-in), swallowed while a text field owns keyboard input so
+    // typing a name containing "x" doesn't flip it.
+    if rl.is_key_pressed(KeyboardKey::KEY_X) && !state.text_field_focused() {
+        state.eraser_on = !state.eraser_on;
+    }
+    if clicked && point_in(mouse, eraser_btn_rect()) {
+        state.eraser_on = !state.eraser_on;
+    }
+
     if clicked && point_in(mouse, center_btn_rect()) {
         actions.center_camera = true;
     }
@@ -511,6 +591,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         if state.overlay_open {
             state.account_open = false;
             state.island_popup = None;
+            state.help_open = false;
         }
     }
     if clicked && point_in(mouse, lock_btn_rect()) {
@@ -521,12 +602,14 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         if state.account_open {
             state.overlay_open = false;
             state.island_popup = None;
+            state.help_open = false;
         }
     }
     if clicked && point_in(mouse, my_island_btn_rect()) {
         actions.open_own_island = true;
         state.overlay_open = false;
         state.account_open = false;
+        state.help_open = false;
     }
 
     // Name field: click to focus/blur (blur commits), Enter commits+blurs.
@@ -553,6 +636,16 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             state.name_focused = false;
             actions.set_name = Some(state.name_input.clone());
         }
+    }
+
+    // F9.6 item 5: help overlay is modal too — closes on its X button or an
+    // outside click (matching item 4's rule for the inventory overlay),
+    // besides the Escape toggle handled at the top of this function.
+    if state.help_open {
+        if clicked && (point_in(mouse, overlay_close_rect()) || !point_in(mouse, overlay_rect())) {
+            state.help_open = false;
+        }
+        return actions;
     }
 
     // Account overlay is modal too, and mutually exclusive with the
@@ -672,7 +765,19 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         state.overlay_open = false;
         return actions;
     }
-    for (i, &hue) in info.hues.iter().enumerate() {
+    // F9.6 item 4: clicking anywhere outside the panel closes it too (not
+    // just the X button) — everything interactive inside the panel (close
+    // button, swatches, sliders) is checked individually below/above, so a
+    // click that matched none of them landed on the dimmed backdrop.
+    if clicked && !point_in(mouse, overlay_rect()) {
+        state.overlay_open = false;
+        state.dragging = Drag::None;
+        return actions;
+    }
+    // F9.6 item 4: swatches sorted by hue — `draw_overlay` iterates the same
+    // sorted order so swatch indices (and thus `swatch_rect(i)`) line up
+    // between the two.
+    for (i, &hue) in sorted_hues(info).iter().enumerate() {
         if clicked && point_in(mouse, swatch_rect(i)) {
             actions.set_brush = Some((hue, info.brush.1.min(info.sat_cap), info.brush.2));
             state.base_hue = hue;
@@ -731,7 +836,7 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
     draw_header(d, info);
     draw_footer(d, state, info);
     if state.overlay_open {
-        draw_overlay(d, state, info);
+        draw_overlay(d, state, info, mouse);
     } else if state.account_open {
         draw_account_overlay(d, state, info);
     } else if let Some(popup) = &state.island_popup {
@@ -740,6 +845,8 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         } else {
             draw_island_tooltip(d, popup, mouse);
         }
+    } else if state.help_open {
+        draw_help_overlay(d);
     }
     if let Some(toast) = &state.toast {
         draw_toast(d, toast, info);
@@ -768,7 +875,13 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
     d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
 
     d.draw_text(&format!("Owner: {}", popup.owner_label), o.x as i32 + 20, o.y as i32 + 54, 16, Color::RAYWHITE);
-    d.draw_text(&format!("Likes: {}", popup.likes), o.x as i32 + 20, o.y as i32 + 80, 16, Color::RAYWHITE);
+    // F9.6 item 3: heart glyph in place of the old text-only "Likes: N" —
+    // filled when the viewer (the popup only ever opens on your OWN island,
+    // so this is always `false` here in practice, kept for symmetry with
+    // the tooltip below which does need it) has already liked it.
+    let heart_color = if popup.already_liked { Color::new(230, 70, 90, 255) } else { Color::new(160, 160, 168, 255) };
+    world::draw_heart(d, Vector2::new(o.x + 30.0, o.y + 86.0), 18.0, popup.already_liked, heart_color);
+    d.draw_text(&format!("{}", popup.likes), o.x as i32 + 44, o.y as i32 + 78, 16, Color::RAYWHITE);
     d.draw_text(&format!("Created {}", popup.age_label), o.x as i32 + 20, o.y as i32 + 106, 16, Color::LIGHTGRAY);
 
     let link_label = match popup.link_id {
@@ -821,7 +934,11 @@ fn draw_island_tooltip(d: &mut impl RaylibDraw, popup: &IslandInfo, mouse: Vecto
     let mut ty = rect.y as i32 + TOOLTIP_PAD as i32;
     d.draw_text(&popup.owner_label, tx, ty, 15, Color::RAYWHITE);
     ty += TOOLTIP_LINE_H as i32;
-    d.draw_text(&format!("Likes: {}", popup.likes), tx, ty, 13, Color::LIGHTGRAY);
+    // F9.6 item 3: heart glyph (filled = you've already liked this island)
+    // instead of the old text-only "Likes: N".
+    let heart_color = if popup.already_liked { Color::new(230, 70, 90, 255) } else { Color::new(160, 160, 168, 255) };
+    world::draw_heart(d, Vector2::new(tx as f32 + 8.0, ty as f32 + 7.0), 14.0, popup.already_liked, heart_color);
+    d.draw_text(&format!("{}", popup.likes), tx + 20, ty, 13, Color::LIGHTGRAY);
     ty += TOOLTIP_LINE_H as i32;
     d.draw_text(&popup.age_label, tx, ty, 12, Color::GRAY);
     if let Some(id) = popup.link_id {
@@ -871,11 +988,16 @@ fn draw_toast(d: &mut impl RaylibDraw, toast: &Toast, info: &HudInfo) {
     let bar = Rectangle::new(180.0, HEADER_H + 10.0, 360.0, 34.0);
     d.draw_rectangle_rec(bar, Color::new(24, 24, 30, alpha));
     d.draw_rectangle_lines_ex(bar, 1.0, Color::new(255, 215, 0, alpha));
-    let swatch = Rectangle::new(bar.x + 6.0, bar.y + 6.0, 22.0, 22.0);
-    let mut flash = world::hsv_color(toast.hue, info.sat_cap, 90);
-    flash.a = alpha;
-    d.draw_rectangle_rec(swatch, flash);
-    d.draw_text(&toast.text, bar.x as i32 + 36, bar.y as i32 + 9, 14, Color::new(255, 255, 255, alpha));
+    let text_x = if let Some(hue) = toast.hue {
+        let swatch = Rectangle::new(bar.x + 6.0, bar.y + 6.0, 22.0, 22.0);
+        let mut flash = world::hsv_color(hue, info.sat_cap, 90);
+        flash.a = alpha;
+        d.draw_rectangle_rec(swatch, flash);
+        bar.x as i32 + 36
+    } else {
+        bar.x as i32 + 10
+    };
+    d.draw_text(&toast.text, text_x, bar.y as i32 + 9, 14, Color::new(255, 255, 255, alpha));
 }
 
 fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo) {
@@ -939,9 +1061,52 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     let mb = my_island_btn_rect();
     d.draw_rectangle_rec(mb, Color::new(40, 40, 48, 255));
     d.draw_text("My Isle", mb.x as i32 + 6, mb.y as i32 + 9, 10, Color::RAYWHITE);
+
+    // F9.6 item 1.
+    let eb = eraser_btn_rect();
+    d.draw_rectangle_rec(eb, if state.eraser_on { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
+    d.draw_text(
+        if state.eraser_on { "Eraser: on" } else { "Eraser: off" },
+        eb.x as i32 + 6,
+        eb.y as i32 + 9,
+        10,
+        Color::RAYWHITE,
+    );
 }
 
-fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
+/// F9.6 item 5: minimal controls list, toggled by Escape (see `handle_input`).
+fn draw_help_overlay(d: &mut impl RaylibDraw) {
+    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
+
+    let o = overlay_rect();
+    d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
+    d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
+    d.draw_text("Controls", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+
+    let close = overlay_close_rect();
+    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
+    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
+
+    const LINES: &[&str] = &[
+        "Left-drag on your island or the margin: paint",
+        "X or the Eraser button: toggle paint/erase",
+        "Middle-click a painted tile: eyedropper (must be unlocked)",
+        "Long-press a foreign tile: merge/take its color",
+        "Double-click/-tap a foreign island: like / unlike",
+        "Hover (or tap) a foreign island: info",
+        "WASD / arrow keys: pan     Q / E: zoom",
+        "Right-drag, middle-drag, or Shift+left-drag: pan",
+        "Mouse wheel / pinch: zoom",
+        "Escape: close this / any open panel",
+    ];
+    let mut ty = o.y as i32 + 54;
+    for line in LINES {
+        d.draw_text(line, o.x as i32 + 20, ty, 15, Color::RAYWHITE);
+        ty += 26;
+    }
+}
+
+fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vector2) {
     // Dim the world behind the modal.
     d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
 
@@ -954,9 +1119,13 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
     d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
 
-    for (i, &hue) in info.hues.iter().enumerate() {
+    // F9.6 item 4: sorted by hue (see `sorted_hues`), and a hex-code label
+    // pops up above whichever swatch the mouse is currently over.
+    let mut hovered_hex: Option<(Rectangle, String)> = None;
+    for (i, &hue) in sorted_hues(info).iter().enumerate() {
         let r = swatch_rect(i);
-        d.draw_rectangle_rec(r, swatch_color(hue, info));
+        let color = swatch_color(hue, info);
+        d.draw_rectangle_rec(r, color);
         // Compare against the Hue slider's anchor, not the live (possibly
         // nudged) brush hue — otherwise dragging the slider away from 0
         // makes every swatch look unselected even though you're still
@@ -967,6 +1136,16 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
             if selected { 3.0 } else { 1.0 },
             if selected { Color::GOLD } else { Color::new(200, 200, 200, 160) },
         );
+        if point_in(mouse, r) {
+            hovered_hex = Some((r, color_hex(color)));
+        }
+    }
+    if let Some((r, hex)) = hovered_hex {
+        let label_w = 8.0 * hex.len() as f32 + 8.0;
+        let label = Rectangle::new(r.x, r.y - 20.0, label_w, 18.0);
+        d.draw_rectangle_rec(label, Color::new(10, 10, 14, 235));
+        d.draw_rectangle_lines_ex(label, 1.0, Color::new(120, 120, 130, 200));
+        d.draw_text(&hex, label.x as i32 + 4, label.y as i32 + 2, 13, Color::RAYWHITE);
     }
 
     let tol = world::constants::HUE_TOLERANCE;
