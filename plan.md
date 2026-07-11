@@ -92,6 +92,10 @@ pointing here).
 | `LONG_PRESS_SLOP_PX` | 8 | max pointer travel during a long press |
 | `RERANK_PERIOD` | 300 s | island re-ranking interval (P1) |
 | `RERANK_WARNING` | 5 s | countdown before islands move (P1) |
+| `HUE_TOLERANCE` | 5° | hue-slider nudge range (added in F4); every "same hue" comparison uses circular distance ≤ this, never exact equality |
+| `HEXA_SIZE` | 6 | cursors needed to ignite a Hexa event (P2) |
+| `HEXA_RADIUS` | 2.0 | cluster radius for Hexa detection, world units (P2) |
+| `XP_HEXA` | 150 | one-time-per-player Hexa bonus (P2) |
 
 ## Geometry spec (flat-top hexes, axial coordinates)
 
@@ -401,6 +405,22 @@ Verify:
 
 ---
 
+## Freeze window rule (author decision, 2026-07-11)
+
+NOTHING ships after the submission deadline — not even server-side. From
+2026-07-12 18:00 UTC until voting ends (2026-07-18 18:00 UTC), the module, the
+standalone site, and the itch build are all frozen: the game people rate is exactly
+the game that was submitted. Consequences:
+- P1/P2 features count only if they are deployed AND hand-tested before the deadline;
+  otherwise they wait until after voting ends.
+- During the window, ops is watch-only: keep VPS/Caddy/SpacetimeDB up (uptime is not
+  an update). Sole exception, at the author's explicit call: emergency service
+  restoration (server down, crash loop, actively abused exploit) — restore service,
+  change no gameplay.
+- After voting ends, updates resume freely (itch re-uploads become possible again);
+  redeploy server + site + itch build together, so schema compatibility with the old
+  frozen client never becomes a constraint.
+
 # P1 — after the game is submittable
 
 ## F8 — Likes, island info, 5-minute re-ranking
@@ -436,3 +456,35 @@ Verify:
 - **F12 Polish**: sounds (raylib `LoadSound`, CC0 assets only), bots adapted to the new
   schema (they keep the world alive for raters), help overlay explaining merge, page
   styling on itch.
+- **F13 Hexa event** — the merge mechanic at 6 (author-designed).
+  - *Trigger* (server, in `set_pos` after the pairwise-merge scan): count eligible
+    cursors — online, `last_seen` < `PRESENCE_TIMEOUT`, not locked — within
+    `HEXA_RADIUS` of the caller whose brush hue matches the caller's within
+    `HUE_TOLERANCE` (circular distance; exact equality would break with the ±5° hue
+    slider). Count includes the caller; at `HEXA_SIZE` (6), ignite.
+  - *Effect*: the participants' color dictionaries are pooled — every hue owned by any
+    participant is granted to every participant missing it (a 6-player hexagon shares
+    everything its members know). `XP_HEXA` to each participant, ONCE per player ever.
+    Pooling is idempotent for a fixed group (a second ignition grants nothing new), so
+    no cooldown is needed. (Author-confirmed: pooling is among the 6 participants
+    only — never server-wide.)
+  - *Schema*: per the freeze window rule, F13 ships either before the deadline
+    (unlikely) or after voting ends — in both cases server + all clients redeploy
+    together, so no compatibility constraint applies. Keep dedicated tables anyway,
+    for cleanliness: `hexa_reward(identity pk, at)` = who already received the
+    one-time XP; `hexa_event(id auto_inc, at, cx, cy, member_count)` for the ignition
+    animation. Granted inventory rows use `obtained_with = None` + a `hexa_event`
+    timestamp join for the special "obtained in a Hexa" mention.
+  - *Rendering* (client-only; the frozen itch build simply won't show it): cursors
+    currently merged (same hue within tolerance, within `HEXA_RADIUS`) are DISPLAYED
+    snapped onto the vertices of a regular hexagon around the cluster centroid — real
+    network positions are untouched (detection keeps using them); display positions
+    lerp to their vertex slot; vertex assignment is stable (sort members by identity).
+    After a pairwise merge your cursor visibly settles beside your partner's: two
+    vertices of an incomplete hexagon, waiting for four more. At 6: ignition — flash
+    the hexagon edges, toast, inventory visibly fills.
+  - *Verify*: 6 clients (native instances + web iframes + adapted bots) with distinct
+    hues converge → pairwise merges cascade, snap rendering forms the hexagon, at 6
+    every participant's inventory becomes the union (`spacetime sql`: identical hue
+    sets per participant), XP granted exactly once (re-form the hexagon → no new XP,
+    `hexa_reward` row count unchanged).
