@@ -63,3 +63,5 @@ tokens into a corrupt JWT, which the server rejected — see status.md)
 (F9.5 item 4: `UiState::note_reset_hue` clears the ring before reseeding with
 the fresh post-reset hue, instead of just prepending onto stale pre-reset
 entries — see status.md)
+
+- [ ] Can't enter your name on mobile

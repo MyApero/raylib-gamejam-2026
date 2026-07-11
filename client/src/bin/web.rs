@@ -724,7 +724,10 @@ fn frame(state: &mut State) {
                     state.camera.zoom = to_zoom;
                     state.centered_on_island = true;
                 } else {
-                    let ease = 1.0 - (1.0 - t).powi(3);
+                    // Ease-in-out-circ: slow start, fast middle, gentle
+                    // landing (author-requested, other_ideas.md; mirrors
+                    // `main.rs`).
+                    let ease = world::ease_in_out_circ(t);
                     state.camera.target = Vector2::new(
                         from_target.x + (to_target.x - from_target.x) * ease,
                         from_target.y + (to_target.y - from_target.y) * ease,
@@ -1222,7 +1225,7 @@ fn frame(state: &mut State) {
     // `ISLAND_FIT_ZOOM`), floored so they stay findable when zoomed out.
     let other_cursor_scale = (state.camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
 
-    let other_cursors: Vec<(Vector2, Color)> = state
+    let other_cursors: Vec<(Vector2, Color, bool)> = state
         .tables
         .users
         .iter()
@@ -1234,6 +1237,7 @@ fn frame(state: &mut State) {
             (
                 state.rl.get_world_to_screen2D(Vector2::new(u.cx, u.cy), state.camera),
                 world::hsv_color(u.hue, u.sat, u.val),
+                u.locked,
             )
         })
         .collect();
@@ -1310,7 +1314,9 @@ fn frame(state: &mut State) {
         if hover_paintable {
             let hover_center = world::axial_to_world(hq, hr);
             d2.draw_poly(hover_center, 6, 1.0, 0.0, Color::new(255, 255, 255, 70));
-            d2.draw_poly_lines_ex(hover_center, 6, 1.0, 0.0, 0.06, Color::new(255, 255, 255, 210));
+            // Mirrors `main.rs`: constant screen pixel width like the island
+            // border, so it stays visible zoomed all the way out.
+            d2.draw_poly_lines_ex(hover_center, 6, 1.0, 0.0, HOVER_BORDER_PX / camera.zoom, Color::new(255, 255, 255, 210));
         }
 
         hover_takeable = map_input_allowed
@@ -1320,8 +1326,8 @@ fn frame(state: &mut State) {
             });
     }
 
-    for &(screen, color) in &other_cursors {
-        world::draw_cursor_scaled(&mut d, screen, color, other_cursor_scale);
+    for &(screen, color, locked) in &other_cursors {
+        world::draw_cursor_scaled(&mut d, screen, color, other_cursor_scale, locked);
     }
 
     let own_brush = me.and_then(|me| state.tables.users.get(me)).map(|u| ((u.hue, u.sat, u.val), u.xp, u.locked));
@@ -1357,7 +1363,7 @@ fn frame(state: &mut State) {
         let (hue, sat, val) = brush;
         let cursor_color =
             if state.ui_state.eraser_on { Color::new(210, 210, 216, 255) } else { world::hsv_color(hue, sat, val) };
-        world::draw_cursor(&mut d, mouse_screen, cursor_color);
+        world::draw_cursor(&mut d, mouse_screen, cursor_color, locked);
     }
     if state.ui_state.eraser_on {
         world::draw_eraser_badge(&mut d, mouse_screen);

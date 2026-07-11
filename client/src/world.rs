@@ -98,6 +98,12 @@ pub mod constants {
     /// roughly the same range as a few mouse-wheel notches per second.
     pub const KEY_PAN_SPEED: f32 = 400.0;
     pub const KEY_ZOOM_RATE: f32 = 1.4;
+    /// Author-requested: the hovered-tile highlight's outline should "act
+    /// like the ilot border" — a constant SCREEN pixel width (divided by
+    /// camera zoom at the draw site, same trick as the island border),
+    /// instead of the fixed world-unit thickness it had before, which shrank
+    /// under a pixel and vanished at low zoom.
+    pub const HOVER_BORDER_PX: f32 = 2.0;
 }
 
 pub fn level_of(xp: u64) -> u64 {
@@ -114,6 +120,19 @@ pub fn sat_cap(level: u64) -> u8 {
 pub fn hue_dist(a: u16, b: u16) -> i32 {
     let diff = (a as i32 - b as i32).unsigned_abs() as i32;
     diff.min(360 - diff)
+}
+
+/// Ease-in-out-circ (author-requested for the launch intro: slow start,
+/// accelerating through the middle, slowing again into the landing — not
+/// the ease-OUT-cubic the intro originally shipped with, which was fast at
+/// the start instead). Standard formula: two mirrored quarter-circle arcs,
+/// one per half of `t`.
+pub fn ease_in_out_circ(t: f32) -> f32 {
+    if t < 0.5 {
+        (1.0 - (1.0 - (2.0 * t).powi(2)).sqrt()) / 2.0
+    } else {
+        ((1.0 - (-2.0 * t + 2.0).powi(2)).sqrt() + 1.0) / 2.0
+    }
 }
 
 pub fn hexdist(dq: i32, dr: i32) -> i32 {
@@ -332,8 +351,8 @@ pub fn draw_hex(d: &mut impl RaylibDraw, center: Vector2, radius: f32, fill: Col
 /// Filled pointer/arrow at screen-space `m` (apex at the tip), for the local
 /// player's own mouse cursor — always drawn at `scale` 1.0 so its size stays
 /// constant regardless of camera zoom, matching the real mouse pointer.
-pub fn draw_cursor(d: &mut impl RaylibDraw, m: Vector2, color: Color) {
-    draw_cursor_scaled(d, m, color, 1.0);
+pub fn draw_cursor(d: &mut impl RaylibDraw, m: Vector2, color: Color, locked: bool) {
+    draw_cursor_scaled(d, m, color, 1.0, locked);
 }
 
 /// F9.5 item 6: other players' cursors used to always render at the same
@@ -342,10 +361,19 @@ pub fn draw_cursor(d: &mut impl RaylibDraw, m: Vector2, color: Color) {
 /// tiles once zoomed out far — `scale` lets the caller shrink/grow it with
 /// camera zoom instead (still screen-space geometry, just resized before
 /// drawing), typically clamped to a minimum so it doesn't vanish either.
-pub fn draw_cursor_scaled(d: &mut impl RaylibDraw, m: Vector2, color: Color, scale: f32) {
+///
+/// `locked` (author-requested): `set_lock`'s outline reads thicker — screen
+/// pixels, not scaled by `scale`, so it stays a clearly-visible ring even on
+/// a shrunk-down other-player cursor — so Lock state is visible at a glance
+/// without opening anyone's info popup. Needs `draw_line_ex` per edge rather
+/// than `draw_triangle_lines`, which has no thickness parameter.
+pub fn draw_cursor_scaled(d: &mut impl RaylibDraw, m: Vector2, color: Color, scale: f32, locked: bool) {
     let tip = m;
     let left = Vector2::new(m.x, m.y + 18.0 * scale);
     let right = Vector2::new(m.x + 13.0 * scale, m.y + 13.0 * scale);
     d.draw_triangle(tip, left, right, color);
-    d.draw_triangle_lines(tip, left, right, Color::BLACK);
+    let outline_px = if locked { 3.0 } else { 1.0 };
+    d.draw_line_ex(tip, left, outline_px, Color::BLACK);
+    d.draw_line_ex(left, right, outline_px, Color::BLACK);
+    d.draw_line_ex(right, tip, outline_px, Color::BLACK);
 }

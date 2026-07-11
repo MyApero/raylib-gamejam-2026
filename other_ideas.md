@@ -48,19 +48,31 @@ status.md)
 - [ ] Bot at the middle with a color and a highlight "Merge with me!"
 - [ ] Customise your Isle border color or make it transparent (remove)
 
-- [ ] Slow then fast for the start animation (easeInOutCirc)
-(NOT done as requested — the launch intro I built (F9.6 item 7) eases
-OUT: fast at the start, slowing into the landing on your island. This item
-asks for the opposite (slow start, accelerating finish). Flagging rather
-than checking it off; swap `1.0 - (1.0 - t).powi(3)` for `t.powi(3)` in
-both `main.rs`/`bin/web.rs` if that's still wanted.)
-- [ ] Better icon for the eraser icon
-(Partially addressed, not by me: the author's own follow-up commit
-`cc6a47b` replaced the FOOTER button's text label with a proper two-tone
-eraser glyph. The cursor-side badge shown near the mouse while erasing
-(`world::draw_eraser_badge`) is still my original placeholder circle — may
-be what this item is actually about.)
-- [ ] When Locked, border of the cursor should be thicker
-- [ ] Leaderboard should take like as a first metric and also number of tiles drawn in his ilot
-- [ ] white border around the tile you hover should act like the ilot border, always visible even when zoomed out
+- [x] Slow then fast for the start animation (easeInOutCirc)
+(Done: `world::ease_in_out_circ` replaces the old ease-out-cubic
+`1.0 - (1.0 - t).powi(3)` in both `main.rs`/`bin/web.rs`'s launch-intro
+easing. Slow start, fast middle, gentle landing, as asked.)
+- [x] Better icon for the eraser icon
+(Done, author picked from 6 candidates: the paint/erase toggle button now
+shows a diagonal pencil (`draw_pencil_icon`) by default — the icon reflects
+which TOOL is active, not a static "click to erase" glyph — and swaps to
+the classic two-tone eraser icon plus a red outline (`draw_rectangle_lines_ex`)
+while erasing is on. Both `client/src/ui.rs`, shared by native + web.)
+- [x] When Locked, border of the cursor should be thicker
+(Done: `draw_cursor`/`draw_cursor_scaled` take a `locked` flag and draw a
+3px (vs 1px) black outline when true — applied to your own cursor AND every
+other online player's cursor, since `user.locked` is already visible via
+the subscription, so Lock state reads at a glance without opening anyone's
+info popup.)
+- [x] Leaderboard should take like as a first metric and also number of tiles drawn in his ilot
+(Done: `rerank_fire` (server) now sorts by likes desc, then painted-cell
+count desc (one O(n) pass over `island_cell` building a per-island count),
+ties by `created_at` as before — the "hidden leaderboard" Hexaworld.md
+describes now rewards active painters too, not just liked islands.)
+- [x] white border around the tile you hover should act like the ilot border, always visible even when zoomed out
+(Done: the hover highlight's outline used a fixed WORLD-unit thickness
+(0.06) that shrank under a pixel at low zoom, same failure mode the island
+border had before its own fix — now `HOVER_BORDER_PX / camera.zoom`
+(`world::constants::HOVER_BORDER_PX` = 2.0), the identical screen-space-
+constant trick, in both clients.)
 - [ ] Put a clear hexel title with a ENTER

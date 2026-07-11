@@ -1048,10 +1048,20 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     d.draw_rectangle_rec(ib, Color::new(40, 40, 48, 255));
     d.draw_text("Colors", ib.x as i32 + 6, ib.y as i32 + 7, 14, Color::RAYWHITE);
 
-    // Author-requested: icon-only, left of the name field.
+    // Author-requested: icon-only, left of the name field. The icon itself
+    // now shows which TOOL is active (pencil = painting, eraser = erasing)
+    // rather than a static "eraser" glyph that only ever meant "click to
+    // erase" — a red border is the active-state signal instead of a solid
+    // fill, so it reads apart from the Lock button's fill-based signal
+    // right next to it.
     let eb = eraser_btn_rect();
-    d.draw_rectangle_rec(eb, if state.eraser_on { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
-    draw_eraser_icon(d, eb);
+    d.draw_rectangle_rec(eb, Color::new(40, 40, 48, 255));
+    if state.eraser_on {
+        d.draw_rectangle_lines_ex(eb, 2.0, Color::new(220, 70, 70, 255));
+        draw_eraser_icon(d, eb);
+    } else {
+        draw_pencil_icon(d, eb);
+    }
 
     let lb = lock_btn_rect();
     d.draw_rectangle_rec(lb, if info.locked { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
@@ -1072,8 +1082,64 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     d.draw_text("My Isle", mb.x as i32 + 6, mb.y as i32 + 9, 10, Color::RAYWHITE);
 }
 
+/// Rotates `p` around `center` by `angle_rad` (screen-space, y-down).
+fn rotate_around(p: Vector2, center: Vector2, angle_rad: f32) -> Vector2 {
+    let (s, c) = angle_rad.sin_cos();
+    let dx = p.x - center.x;
+    let dy = p.y - center.y;
+    Vector2::new(center.x + dx * c - dy * s, center.y + dx * s + dy * c)
+}
+
+/// Fills a convex quad (corners given in order) as two triangles — raylib
+/// has no rotated-rectangle primitive that keeps this file's "primitives
+/// only" rule, so a rotated rect is just two `draw_triangle` calls.
+fn draw_quad(d: &mut impl RaylibDraw, p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, color: Color) {
+    d.draw_triangle(p0, p1, p2, color);
+    d.draw_triangle(p0, p2, p3, color);
+}
+
+/// Author-requested: default (paint-mode) icon for the paint/erase toggle —
+/// a diagonal pencil with a pink eraser cap and a dark tip, swapped for
+/// `draw_eraser_icon` while `state.eraser_on` is true (see `draw_footer`),
+/// so the button always shows which tool is currently active.
+fn draw_pencil_icon(d: &mut impl RaylibDraw, r: Rectangle) {
+    let center = Vector2::new(r.x + r.width / 2.0, r.y + r.height / 2.0);
+    let angle = 45f32.to_radians();
+    let half_w = 3.0;
+    let cap_top = center.y - 12.0;
+    let cap_bottom = center.y - 6.0;
+    let body_bottom = center.y + 7.0;
+    let tip = center.y + 12.0;
+    let left = center.x - half_w;
+    let right = center.x + half_w;
+
+    let cap = [
+        rotate_around(Vector2::new(left, cap_top), center, angle),
+        rotate_around(Vector2::new(right, cap_top), center, angle),
+        rotate_around(Vector2::new(right, cap_bottom), center, angle),
+        rotate_around(Vector2::new(left, cap_bottom), center, angle),
+    ];
+    draw_quad(d, cap[0], cap[1], cap[2], cap[3], Color::new(235, 120, 150, 255));
+
+    let body = [
+        rotate_around(Vector2::new(left, cap_bottom), center, angle),
+        rotate_around(Vector2::new(right, cap_bottom), center, angle),
+        rotate_around(Vector2::new(right, body_bottom), center, angle),
+        rotate_around(Vector2::new(left, body_bottom), center, angle),
+    ];
+    draw_quad(d, body[0], body[1], body[2], body[3], Color::new(235, 235, 240, 255));
+
+    let point = [
+        rotate_around(Vector2::new(left, body_bottom), center, angle),
+        rotate_around(Vector2::new(right, body_bottom), center, angle),
+        rotate_around(Vector2::new(center.x, tip), center, angle),
+    ];
+    d.draw_triangle(point[0], point[1], point[2], Color::new(70, 55, 45, 255));
+}
+
 /// Author-requested: icon-only Eraser button — classic two-tone (pink cap /
-/// white body) eraser glyph, diagonal cut.
+/// white body) eraser glyph, diagonal cut. Shown only while erasing is
+/// active — the default (paint-mode) icon is `draw_pencil_icon`.
 fn draw_eraser_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     let w = 16.0;
     let h = 11.0;

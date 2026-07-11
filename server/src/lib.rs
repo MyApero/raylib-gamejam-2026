@@ -1,5 +1,6 @@
 use spacetimedb::rand::Rng;
 use spacetimedb::{Identity, ReducerContext, ScheduleAt, Table, TimeDuration, Timestamp};
+use std::collections::HashMap;
 
 /// Canonical constants — see plan.md "Canonical constants" table. Mirror
 /// these EXACTLY in the native and web clients.
@@ -998,7 +999,9 @@ pub fn rerank_warn(ctx: &ReducerContext, _arg: RerankWarnSchedule) -> Result<(),
 }
 
 /// F8 re-rank, step 2/2 (one-shot, fired by `rerank_warn`): re-sorts islands
-/// by likes desc, ties by `created_at`, and rewrites `island.slot`
+/// by likes desc, then painted-tile count desc (author-requested: the
+/// "hidden leaderboard" — Hexaworld.md — should reward active painters, not
+/// just liked ones), ties by `created_at`, and rewrites `island.slot`
 /// accordingly. Slot 0 (reserved for the P2/F10 admin island) is never
 /// touched — only slots 1.. are re-sorted. Cell coordinates are
 /// island-relative, so moving an island is just this one row write; no
@@ -1008,8 +1011,20 @@ pub fn rerank_fire(ctx: &ReducerContext, _arg: RerankFireSchedule) -> Result<(),
     if ctx.sender() != ctx.database_identity() {
         return Err("rerank_fire may not be invoked by clients".to_string());
     }
+    // One O(n) pass over every painted cell instead of a per-island scan
+    // (which would be O(islands * cells)) — cheap enough to build fresh on
+    // every re-rank tick (every `RERANK_PERIOD_SECS`, not per-frame).
+    let mut tile_counts: HashMap<u32, u32> = HashMap::new();
+    for cell in ctx.db.island_cell().iter() {
+        *tile_counts.entry(cell.island_id).or_insert(0) += 1;
+    }
     let mut ranked: Vec<Island> = ctx.db.island().iter().filter(|i| i.slot != 0).collect();
-    ranked.sort_by(|a, b| b.likes.cmp(&a.likes).then_with(|| a.created_at.cmp(&b.created_at)));
+    ranked.sort_by(|a, b| {
+        b.likes
+            .cmp(&a.likes)
+            .then_with(|| tile_counts.get(&b.id).unwrap_or(&0).cmp(tile_counts.get(&a.id).unwrap_or(&0)))
+            .then_with(|| a.created_at.cmp(&b.created_at))
+    });
     // `slot` is `#[unique]`, so a direct permutation could momentarily
     // assign a slot another still-unmoved island already holds — reslot in
     // two passes via a temporary range no real slot ever reaches.

@@ -364,9 +364,9 @@ fn main() {
                         camera.zoom = to_zoom;
                         centered_on_island = true;
                     } else {
-                        // Ease-out cubic: fast start, settles gently rather
-                        // than snapping to a stop.
-                        let ease = 1.0 - (1.0 - t).powi(3);
+                        // Ease-in-out-circ: slow start, fast middle, gentle
+                        // landing (author-requested, other_ideas.md).
+                        let ease = world::ease_in_out_circ(t);
                         camera.target = Vector2::new(
                             from_target.x + (to_target.x - from_target.x) * ease,
                             from_target.y + (to_target.y - from_target.y) * ease,
@@ -912,7 +912,7 @@ fn main() {
         // Screen-space projection for other players' cursors, computed here
         // (not inside the draw call) because `rl` can't be borrowed again
         // once `begin_drawing` hands out its mutable borrow below.
-        let other_cursors: Vec<(Vector2, Color)> = ctx
+        let other_cursors: Vec<(Vector2, Color, bool)> = ctx
             .db
             .user()
             .iter()
@@ -927,6 +927,7 @@ fn main() {
                 (
                     rl.get_world_to_screen2D(Vector2::new(u.cx, u.cy), camera),
                     world::hsv_color(u.hue, u.sat, u.val),
+                    u.locked,
                 )
             })
             .collect();
@@ -1019,7 +1020,12 @@ fn main() {
             if hover_paintable {
                 let hover_center = world::axial_to_world(hq, hr);
                 d2.draw_poly(hover_center, 6, 1.0, 0.0, Color::new(255, 255, 255, 70));
-                d2.draw_poly_lines_ex(hover_center, 6, 1.0, 0.0, 0.06, Color::new(255, 255, 255, 210));
+                // Author-requested: acts like the island border above — a
+                // constant SCREEN pixel width (divided by zoom to convert
+                // back to world units), not a fixed world-unit thickness, so
+                // it stays visible zoomed all the way out instead of
+                // shrinking under a pixel.
+                d2.draw_poly_lines_ex(hover_center, 6, 1.0, 0.0, HOVER_BORDER_PX / camera.zoom, Color::new(255, 255, 255, 210));
             }
 
             // Eyedropper hint: a cell not paintable by the caller (someone
@@ -1035,8 +1041,8 @@ fn main() {
         // Other players' cursors sit under the HUD (world-space indicators);
         // only the caller's own cursor needs to stay visible over the
         // header/footer/overlay, so it's drawn last, after the HUD.
-        for &(screen, color) in &other_cursors {
-            world::draw_cursor_scaled(&mut d, screen, color, other_cursor_scale);
+        for &(screen, color, locked) in &other_cursors {
+            world::draw_cursor_scaled(&mut d, screen, color, other_cursor_scale, locked);
         }
 
         let own_brush = me.map(|me| {
@@ -1079,7 +1085,7 @@ fn main() {
             // distinct from paint mode at a glance.
             let (hue, sat, val) = brush;
             let cursor_color = if ui_state.eraser_on { Color::new(210, 210, 216, 255) } else { world::hsv_color(hue, sat, val) };
-            world::draw_cursor(&mut d, mouse_screen, cursor_color);
+            world::draw_cursor(&mut d, mouse_screen, cursor_color, locked);
         }
         if ui_state.eraser_on {
             world::draw_eraser_badge(&mut d, mouse_screen);

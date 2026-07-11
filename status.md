@@ -7,7 +7,79 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** Author hand-test follow-up on F9.6 (own commit,
+**Current batch:** Author-requested UX polish, five `other_ideas.md` items
+taken directly (not routed through plan.md batching — a short, well-scoped
+punch list the author asked for in one sitting):
+
+1. **Launch intro easing** — swapped the ease-out-cubic
+   (`1.0 - (1.0 - t).powi(3)`) for a new shared `world::ease_in_out_circ`
+   (standard two-quarter-circle formula) in both `main.rs`/`bin/web.rs`'s
+   intro camera ease. Matches the author's explicit ask (slow start, fast
+   middle, gentle landing) — `other_ideas.md` had this flagged as
+   deliberately NOT done from an earlier batch's ease-out choice.
+2. **Eraser icon** — the author didn't like the existing two-tone eraser
+   glyph and asked to choose a replacement themselves. Published an
+   Artifact with 6 candidate icons (all drawable with the same raylib
+   primitives the real icon uses — rectangles, triangles, lines, circles —
+   no image assets, consistent with `ui.rs`'s "primitives only" rule),
+   rendered at the real in-game colors/button size. Author picked pencil
+   (option E's tip) with a twist beyond the original prompt: the paint/erase
+   toggle button now shows a diagonal pencil (`draw_pencil_icon`, new) by
+   default — the icon reflects which TOOL is currently active, not a
+   static "click to erase" glyph — and swaps to the original eraser icon
+   plus a red outline (`draw_rectangle_lines_ex`, replacing the old solid-
+   red-fill active state) while erasing is on. `client/src/ui.rs`, shared
+   by both clients.
+3. **Locked cursor border** — `draw_cursor`/`draw_cursor_scaled`
+   (`world.rs`) take a new `locked: bool`, drawing a 3px black outline
+   (vs 1px normally) via `draw_line_ex` per edge instead of
+   `draw_triangle_lines` (no thickness parameter). Wired for both the
+   caller's own cursor AND every other online player's cursor — `user.locked`
+   is already in the subscription, so this was a small, essentially free
+   extension beyond just the caller's own cursor, and lets you tell at a
+   glance whether someone else has Lock on (no merge will trigger) without
+   opening their info popup.
+4. **Leaderboard (rerank) tile-count metric** — `rerank_fire` (server)
+   sorted by likes desc then `created_at` only; now sorts by likes desc,
+   then total painted-cell count desc (one O(n) pass over `island_cell`
+   building a per-island `HashMap` count, since this only runs once per
+   `RERANK_PERIOD_SECS` tick, not per-frame), `created_at` kept as the
+   final tiebreak. Matches Hexaworld.md's "hidden leaderboard" concept —
+   now rewards active painters too, not just liked islands.
+5. **Hover-tile border visibility at low zoom** — the hover highlight's
+   outline (`draw_poly_lines_ex`) used a fixed WORLD-unit thickness (0.06),
+   the exact same failure mode the island border had before its own
+   zoom-independent fix earlier in this file: shrinks under a screen pixel
+   and vanishes zoomed out. Applied the identical fix — new
+   `world::constants::HOVER_BORDER_PX` (2.0) divided by `camera.zoom` at
+   the draw site, in both clients — so it now "acts like the ilot border",
+   per the author's own phrasing.
+
+**Verify status:** `cargo check -p server`, `cargo check -p client --bin
+client --bin bot`, and `./build-web.sh` (release, emscripten target) are
+all clean, no warnings — REASONED/build-verified only. Item 4 (server
+change) republished to the local instance (`./server/publish.sh`) and
+bindings regenerated (`./generate_module_bindings.sh`); no schema change,
+so `module_bindings/` came out byte-identical (`git status` confirms
+nothing to commit there) — republish itself succeeded, but the actual
+re-sort behavior wasn't exercised live (needs several islands with
+differing like/tile counts and a real rerank tick, left for the author's
+hand-test). Items 1/2/3/5 are client rendering only, not hand-tested in a
+running client by me, per this repo's standing protocol (the author drives
+real runtime testing); the eraser-icon choice itself came from the author
+reviewing the rendered Artifact preview directly rather than a code read,
+which is as close to a visual sign-off as this protocol gets pre-hand-test.
+
+Files touched: `client/src/world.rs` (`ease_in_out_circ`, `draw_cursor`/
+`draw_cursor_scaled` locked param, `HOVER_BORDER_PX`), `client/src/ui.rs`
+(`draw_pencil_icon`, `rotate_around`, `draw_quad`, footer eraser-button
+draw), `client/src/main.rs`, `client/src/bin/web.rs` (intro ease, cursor
+call sites, hover border thickness), `server/src/lib.rs` (`rerank_fire`
+tile-count sort).
+
+---
+
+**Previous batch:** Author hand-test follow-up on F9.6 (own commit,
 `cc6a47b "fix: open colors"` — the author ran the client, found issues, and
 patched them directly rather than routing through the executor; logged here
 for the record, same as previous author-direct-edit batches).
