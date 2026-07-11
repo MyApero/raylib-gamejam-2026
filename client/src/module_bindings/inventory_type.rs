@@ -12,6 +12,7 @@ pub struct Inventory {
     pub hue: u16,
     pub obtained_at: __sdk::Timestamp,
     pub obtained_with: Option<__sdk::Identity>,
+    pub from_gift: bool,
 }
 
 impl __sdk::InModule for Inventory {
@@ -27,6 +28,7 @@ pub struct InventoryCols {
     pub hue: __sdk::__query_builder::Col<Inventory, u16>,
     pub obtained_at: __sdk::__query_builder::Col<Inventory, __sdk::Timestamp>,
     pub obtained_with: __sdk::__query_builder::Col<Inventory, Option<__sdk::Identity>>,
+    pub from_gift: __sdk::__query_builder::Col<Inventory, bool>,
 }
 
 impl __sdk::__query_builder::HasCols for Inventory {
@@ -38,6 +40,7 @@ impl __sdk::__query_builder::HasCols for Inventory {
             hue: __sdk::__query_builder::Col::new(table_name, "hue"),
             obtained_at: __sdk::__query_builder::Col::new(table_name, "obtained_at"),
             obtained_with: __sdk::__query_builder::Col::new(table_name, "obtained_with"),
+            from_gift: __sdk::__query_builder::Col::new(table_name, "from_gift"),
         }
     }
 }

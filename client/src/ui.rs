@@ -291,6 +291,15 @@ impl UiState {
         self.toast = Some(Toast { text, hue: None, shown_at: Instant::now() });
     }
 
+    /// F11: called by the caller when it sees a fresh `inventory` row with
+    /// `from_gift: true` — a flying-gift hue win. Same flash-swatch
+    /// treatment as `show_merge_toast`, distinct wording since there's no
+    /// merge partner to name.
+    pub fn show_gift_toast(&mut self, hue: u16) {
+        self.toast = Some(Toast { text: "gift claimed — new color!".to_string(), hue: Some(hue), shown_at: Instant::now() });
+        self.note_used_hue(hue);
+    }
+
     /// Seeds the name field from the server row exactly once. After that the
     /// field belongs to local editing — the subscription echoing our own
     /// `set_name` call back must not clobber in-progress typing.

@@ -110,6 +110,12 @@ pointing here).
 | `HEXA_SIZE` | 6 | cursors needed to ignite a Hexa event (P2) |
 | `HEXA_RADIUS` | 2.0 | cluster radius for Hexa detection, world units (P2) |
 | `XP_HEXA` | 150 | one-time-per-player Hexa bonus (P2) |
+| `GIFT_SPAWN_PERIOD_SECS` | 45 | flying-gift spawn/expire tick interval, server-only (P2, F11) |
+| `GIFT_LIFETIME_SECS` | 25 | how long an unclaimed gift lasts before the tick sweeps it (P2, F11) |
+| `GIFT_DRIFT_RADIUS` | 1.2 | world-unit radius of the gift's circular drift around its spawn point — shared client/server (P2, F11) |
+| `GIFT_DRIFT_PERIOD_SECS` | 5.0 | seconds per full drift loop — shared client/server (P2, F11) |
+| `GIFT_CLAIM_DIST` | 3.0 | world units, server-enforced claim range from the gift's current drifted position — shared client/server (P2, F11) |
+| `XP_GIFT` | 20 | flat XP on the claim's "XP" branch (and the "hue" branch's own fallback if all 8 rerolls collide) (P2, F11) |
 
 ## Geometry spec (flat-top hexes, axial coordinates)
 
@@ -688,7 +694,33 @@ center bot, customizable island border color.
   step for the author to trigger (same access gap as the border-customization
   feature above).
 - **F11 Flying gift**: scheduled spawn of a drifting pickup (position table row,
-  client-animated), click/tap to claim → random hue or XP.
+  client-animated), click/tap to claim → random hue or XP. Design fleshed out by the
+  executor (plan.md only had the one-liner above) — see status.md's F11 batch note for
+  the full rationale; summary:
+  - *Schema*: `Gift(id, x, y, spawned_at, expires_at)`, public. At most one active at a
+    time (simplest P2 scope call) — a repeating `gift_tick` (every
+    `GIFT_SPAWN_PERIOD_SECS`) sweeps expired rows then spawns a fresh one (uniform-in-
+    disk over the currently-occupied world bound, same `occupied_rings`/`SLOT_SPACING`
+    math `paint_margin_cell` uses) if none remain. `GIFT_LIFETIME_SECS` < the tick
+    period so there's visible down-time between gifts.
+  - *Drift*: `x`/`y` are the spawn center; the actual position drifts in a small circle
+    around it, purely a function of elapsed time since `spawned_at`
+    (`GIFT_DRIFT_RADIUS`/`GIFT_DRIFT_PERIOD_SECS`, shared constants) — both clients
+    render it identically with no continuous position sync, same trick `next_rerank_at`
+    uses for the countdown banner.
+  - *Claim*: `claim_gift(gift_id)` — caller must be within `GIFT_CLAIM_DIST` (shared
+    constant, world units) of the gift's CURRENT drifted position (not just its spawn
+    point), checked server-side against the caller's last-reported `set_pos` cursor —
+    same anti-cheat posture as cursor-merge. Reward is a coin flip: a fresh random hue
+    (retried up to 8 rolls against one already owned, falling back to XP if all 8
+    collide) or a flat `XP_GIFT`. `Inventory` gets a new `from_gift: bool` field
+    (appended at the end, same reason `Island.border_color` was) so a gift-granted hue
+    doesn't get misread as `reset_account`'s reseed by the client's existing
+    `obtained_with.is_none()` check.
+  - *Rendering*: world-space pulsing "box + ribbon" icon (`world::draw_gift_icon`),
+    click/tap resolved on PRESS (not release) and consumes the whole gesture so the
+    same click can't also start a paint stroke or long-press underneath it — mirrors
+    the existing `suppress_map_until_release` latch.
 - **F12 Polish**: sounds (raylib `LoadSound`, CC0 assets only), bots adapted to the new
   schema (they keep the world alive for raters — include the backlog's "Merge with me!"
   center bot here), help overlay explaining merge (extends F9.6's minimal keybindings

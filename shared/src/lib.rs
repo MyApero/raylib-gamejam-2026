@@ -27,7 +27,7 @@ pub mod constants {
     /// so the resulting gap is always exactly `2 * bump`, i.e. always even.
     /// An odd value here is not geometrically reachable with this tiling
     /// and would silently round down via integer division.
-    pub const MARGIN_GAP_TILES: i32 = 6;
+    pub const MARGIN_GAP_TILES: i32 = 8;
 
     /// How far (degrees, either direction) a painted hue may stray from an
     /// unlocked inventory entry. The server is the actual enforcement
@@ -35,6 +35,22 @@ pub mod constants {
     /// inventory with one row per nudge); the client mirrors it so the
     /// slider never offers a value the server would reject.
     pub const HUE_TOLERANCE: i32 = 7;
+
+    /// F11 (flying gift): world-unit radius of the small circular drift
+    /// around the gift's spawn point. Shared because both clients render
+    /// the drift AND the server's `claim_gift` validates distance against
+    /// that same live position — see `gift_drift_pos` in `world.rs`/the
+    /// server's mirrored copy.
+    pub const GIFT_DRIFT_RADIUS: f32 = 1.2;
+    /// F11: seconds per full drift loop. Shared for the same reason as
+    /// `GIFT_DRIFT_RADIUS`.
+    pub const GIFT_DRIFT_PERIOD_SECS: f32 = 5.0;
+    /// F11: max world-unit distance from the gift's CURRENT drifted
+    /// position (not just its spawn point) a claim is accepted from —
+    /// enforced server-side in `claim_gift`, and reused client-side as both
+    /// the click/tap hitbox and the visual affordance radius, so "how close
+    /// counts" always means the same thing on both sides.
+    pub const GIFT_CLAIM_DIST: f32 = 3.0;
 }
 
 /// Circular hue distance in degrees (handles the 359->0 wraparound). Server

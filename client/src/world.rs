@@ -112,6 +112,16 @@ pub mod constants {
     /// instead of the fixed world-unit thickness it had before, which shrank
     /// under a pixel and vanished at low zoom.
     pub const HOVER_BORDER_PX: f32 = 2.0;
+
+    /// F11 (flying gift): single source of truth in the `shared` crate —
+    /// both the server's `claim_gift` distance check and this client's
+    /// drift rendering must derive the identical position/range from it.
+    pub use shared::constants::GIFT_DRIFT_RADIUS;
+    pub use shared::constants::GIFT_DRIFT_PERIOD_SECS;
+    /// F11: reused directly as both the click/tap hitbox (world-space, not
+    /// converted from screen pixels, so "close enough" means the same thing
+    /// here as it does server-side) and the visual affordance radius.
+    pub use shared::constants::GIFT_CLAIM_DIST;
 }
 
 pub fn level_of(xp: u64) -> u64 {
@@ -139,6 +149,16 @@ pub fn ease_in_out_cubic(t: f32) -> f32 {
     } else {
         1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
     }
+}
+
+/// F11: flying-gift world position — a small circular drift around the
+/// spawn point, a pure function of elapsed seconds since `Gift.spawned_at`.
+/// Mirrors the server's own `gift_drift_pos` exactly (must derive the
+/// identical position from the same inputs — no continuous position sync,
+/// and `claim_gift` validates distance against this same live position).
+pub fn gift_drift_pos(spawn: Vector2, elapsed_secs: f32) -> Vector2 {
+    let angle = elapsed_secs / constants::GIFT_DRIFT_PERIOD_SECS * std::f32::consts::TAU;
+    Vector2::new(spawn.x + constants::GIFT_DRIFT_RADIUS * angle.cos(), spawn.y + constants::GIFT_DRIFT_RADIUS * angle.sin())
 }
 
 pub fn hexdist(dq: i32, dr: i32) -> i32 {
@@ -332,6 +352,24 @@ pub fn draw_eraser_badge(d: &mut impl RaylibDraw, m: Vector2) {
     d.draw_circle(cx as i32, cy as i32, 8.0, Color::new(20, 20, 24, 220));
     d.draw_rectangle_lines(cx as i32 - 4, cy as i32 - 3, 8, 6, Color::RAYWHITE);
     d.draw_line_ex(Vector2::new(cx - 5.0, cy + 5.0), Vector2::new(cx + 5.0, cy - 5.0), 1.5, Color::new(230, 90, 90, 255));
+}
+
+/// F11: world-space icon for the flying-gift pickup — a rotated square
+/// ("box") with a light cross ribbon, gently pulsing. Built from the same
+/// primitives as `draw_hex`/`draw_plus_hint` (`draw_poly` + `draw_line_ex`)
+/// rather than raylib's rectangle calls, since nothing else in this file
+/// uses those yet. `elapsed_secs` (since the gift's spawn) drives the pulse,
+/// the same "no continuous sync needed" trick `gift_drift_pos` uses for
+/// position.
+pub fn draw_gift_icon(d: &mut impl RaylibDraw, center: Vector2, elapsed_secs: f32) {
+    let pulse = 1.0 + 0.10 * (elapsed_secs * 2.5).sin();
+    let s = 0.5 * pulse;
+    d.draw_circle_v(center, s * 1.8, Color::new(255, 215, 90, 50));
+    d.draw_poly(center, 4, s, 45.0, Color::new(232, 90, 90, 255));
+    d.draw_poly_lines_ex(center, 4, s, 45.0, s * 0.08, Color::new(60, 25, 25, 255));
+    let ribbon = Color::new(255, 232, 130, 255);
+    d.draw_line_ex(Vector2::new(center.x - s, center.y), Vector2::new(center.x + s, center.y), s * 0.22, ribbon);
+    d.draw_line_ex(Vector2::new(center.x, center.y - s), Vector2::new(center.x, center.y + s), s * 0.22, ribbon);
 }
 
 /// Progress ring around the screen-space cursor while long-pressing toward a

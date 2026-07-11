@@ -66,6 +66,22 @@ mod constants {
     /// the caller's input and compares hex digests.
     pub const ADMIN_PASSWORD_SHA256: &str =
         "f0e4b0d252ed221c13e08c7814be13da5fb34a22d3145a8e6d7d4cc15d9fe1cc";
+    /// F11 (flying gift): SHARED with the client — `claim_gift`'s distance
+    /// check and both clients' drift rendering must derive the identical
+    /// position/range, so these three (unlike the tuning knobs above) live
+    /// in the `shared` crate instead of being server-only.
+    pub use shared::constants::{GIFT_CLAIM_DIST, GIFT_DRIFT_PERIOD_SECS, GIFT_DRIFT_RADIUS};
+    /// F11: how often the spawn/expire tick runs, and how long an unclaimed
+    /// gift lasts before that tick sweeps it away. Server-only — clients
+    /// just observe `gift` rows appear/disappear, no client-side timer.
+    /// `GIFT_LIFETIME_SECS` < `GIFT_SPAWN_PERIOD_SECS` so there's visible
+    /// down-time between gifts rather than one always being up.
+    pub const GIFT_SPAWN_PERIOD_SECS: i64 = 45;
+    pub const GIFT_LIFETIME_SECS: i64 = 25;
+    /// F11: flat XP on the claim coin-flip's "XP" branch — also the "hue"
+    /// branch's own fallback if 8 random rerolls all collide with a hue the
+    /// claimant already owns, so a win is never silently wasted.
+    pub const XP_GIFT: u64 = 20;
 }
 
 /// Axial hex geometry, slot-lattice mapping and cell-id packing — see
@@ -248,6 +264,22 @@ mod merge {
     }
 }
 
+/// F11: flying-gift world position — a small circular drift around the
+/// spawn point, a pure function of elapsed seconds since `Gift.spawned_at`.
+/// Mirrors `client/src/world.rs`'s `gift_drift_pos` exactly — both clients
+/// must render/hit-test the SAME position from the same inputs (no
+/// continuous position sync) — and `claim_gift` uses this, not the static
+/// spawn point, as the "how far is the caller from the gift RIGHT NOW"
+/// anti-cheat check. Needs `libm`, same reason `merge::merge_hue` does
+/// (wasm32-unknown-unknown's `std` doesn't link sin/cos).
+fn gift_drift_pos(spawn_x: f32, spawn_y: f32, elapsed_secs: f32) -> (f32, f32) {
+    let angle = elapsed_secs / constants::GIFT_DRIFT_PERIOD_SECS * std::f32::consts::TAU;
+    (
+        spawn_x + constants::GIFT_DRIFT_RADIUS * libm::cosf(angle),
+        spawn_y + constants::GIFT_DRIFT_RADIUS * libm::sinf(angle),
+    )
+}
+
 #[spacetimedb::table(accessor = config, public)]
 pub struct Config {
     #[primary_key]
@@ -289,6 +321,14 @@ pub struct Inventory {
     hue: u16,
     obtained_at: Timestamp,
     obtained_with: Option<Identity>,
+    /// F11: true only for a flying-gift hue grant. Without this, the
+    /// client's inventory-insert watch can't tell a gift-granted hue
+    /// (`obtained_with: None`, same as a fresh row) apart from
+    /// `reset_account`'s reseed, which it already treats specially (resets
+    /// the last-3 color ring instead of showing a "new color" toast) —
+    /// appended at the end, same reason `Island.border_color` was, so
+    /// `bin/web.rs`'s positional row parsing doesn't shift.
+    from_gift: bool,
 }
 
 #[spacetimedb::table(accessor = island, public)]
@@ -413,6 +453,37 @@ pub struct MarginCell {
     color: u32,
     painted_by: Identity,
     painted_at: Timestamp,
+}
+
+/// F11 (flying gift): one row = the single currently-active pickup in the
+/// world — `gift_tick` only ever spawns a new one once the current row is
+/// gone (at most one at a time, the pragmatic P2 scope call). `x`/`y` are
+/// the world-cartesian SPAWN center; the actual on-screen position drifts
+/// from it over time (`gift_drift_pos`, mirrored client-side) rather than
+/// being pushed continuously. `expires_at` is what `claim_gift` re-checks
+/// at call time too, in case a claim lands the same tick that would have
+/// expired it.
+#[spacetimedb::table(accessor = gift, public)]
+pub struct Gift {
+    #[primary_key]
+    #[auto_inc]
+    id: u64,
+    x: f32,
+    y: f32,
+    spawned_at: Timestamp,
+    expires_at: Timestamp,
+}
+
+/// F11: repeating tick (same lazy-seeding pattern as the schedules above)
+/// that expires stale gifts and spawns a fresh one when none remain.
+/// Server-internal, not `public` — clients only ever observe its effect
+/// through `gift` rows appearing/disappearing.
+#[spacetimedb::table(accessor = gift_schedule, scheduled(gift_tick))]
+pub struct GiftSchedule {
+    #[primary_key]
+    #[auto_inc]
+    scheduled_id: u64,
+    scheduled_at: ScheduleAt,
 }
 
 /// Author decision (F6 follow-up): the merge toast used to fall back to a
@@ -613,6 +684,7 @@ fn apply_merge(ctx: &ReducerContext, a: Identity, b: Identity, merged_hue: u16, 
                 hue: merged_hue,
                 obtained_at: ctx.timestamp,
                 obtained_with: Some(partner),
+                from_gift: false,
             });
             if let Some(u) = ctx.db.user().identity().find(who) {
                 ctx.db.user().identity().update(User {
@@ -860,6 +932,7 @@ pub fn reset_account(ctx: &ReducerContext) -> Result<(), String> {
         hue,
         obtained_at: ctx.timestamp,
         obtained_with: None,
+        from_gift: false,
     });
     ctx.db.user().identity().update(User {
         xp: 0,
@@ -1052,6 +1125,66 @@ pub fn click_link(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// F11: click/tap-to-claim. `gift_id` names the row (both clients read it
+/// off the same `gift` table); the caller must be within `GIFT_CLAIM_DIST`
+/// of the gift's CURRENT drifted position (`gift_drift_pos`, the same
+/// formula both clients render with), checked against the caller's
+/// last-reported `set_pos` cursor — same anti-cheat posture as cursor-merge.
+/// Reward is a coin flip: a fresh hue (retried up to 8 times against a
+/// reroll that collides with one the caller already owns, falling back to
+/// `XP_GIFT` if all 8 do) or straight `XP_GIFT`.
+#[spacetimedb::reducer]
+pub fn claim_gift(ctx: &ReducerContext, gift_id: u64) -> Result<(), String> {
+    check_not_frozen(ctx)?;
+    let gift = ctx.db.gift().id().find(gift_id).ok_or("gift is gone")?;
+    // A reducer returning `Err` rolls back every write it made (same as
+    // every other guard in this file runs its checks before any mutation),
+    // so deleting the row here would be a no-op — leave the cleanup to the
+    // next `gift_tick` sweep instead.
+    if ctx.timestamp >= gift.expires_at {
+        return Err("gift is gone".to_string());
+    }
+    let user = ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
+    let elapsed = ctx.timestamp.duration_since(gift.spawned_at).map(|d| d.as_secs_f32()).unwrap_or(0.0).max(0.0);
+    let (gx, gy) = gift_drift_pos(gift.x, gift.y, elapsed);
+    let d2 = (user.cx - gx).powi(2) + (user.cy - gy).powi(2);
+    if d2 > constants::GIFT_CLAIM_DIST * constants::GIFT_CLAIM_DIST {
+        return Err("too far away".to_string());
+    }
+    ctx.db.gift().id().delete(gift.id);
+
+    let mut rng = ctx.rng();
+    if rng.gen_bool(0.5) {
+        let mut granted = None;
+        for _ in 0..8 {
+            let candidate = rng.gen_range(0..360u16);
+            let owned = ctx
+                .db
+                .inventory()
+                .owner()
+                .filter(&ctx.sender())
+                .any(|inv| hue_dist(inv.hue, candidate) <= constants::HUE_TOLERANCE);
+            if !owned {
+                granted = Some(candidate);
+                break;
+            }
+        }
+        if let Some(hue) = granted {
+            ctx.db.inventory().insert(Inventory {
+                id: 0,
+                owner: ctx.sender(),
+                hue,
+                obtained_at: ctx.timestamp,
+                obtained_with: None,
+                from_gift: true,
+            });
+            return Ok(());
+        }
+    }
+    ctx.db.user().identity().update(User { xp: user.xp + constants::XP_GIFT, ..user });
+    Ok(())
+}
+
 /// F9 time XP: grants `XP_TIME` to every user whose `last_seen` is still
 /// fresh (the same presence window used for cursor visibility/merge
 /// eligibility elsewhere) at each `TIME_XP_PERIOD_SECS` tick. Restricted to
@@ -1131,6 +1264,41 @@ pub fn reap_dead_players(ctx: &ReducerContext, _arg: ReapSchedule) -> Result<(),
         ctx.db.island().id().delete(island.id);
         ctx.db.user().identity().delete(who);
     }
+    Ok(())
+}
+
+/// F11: repeating tick (same lazy-seeding pattern as the other schedules) —
+/// sweeps any `gift` row past its `expires_at`, then spawns a fresh one if
+/// none remain. Spawn point is uniform-in-disk over the currently-occupied
+/// world bound (same `occupied_rings`/`SLOT_SPACING` math
+/// `paint_margin_cell` uses for its canvas bound, generously scaled up from
+/// hex units to cartesian world units). Restricted to the scheduler itself,
+/// same as every other scheduled reducer here.
+#[spacetimedb::reducer]
+pub fn gift_tick(ctx: &ReducerContext, _arg: GiftSchedule) -> Result<(), String> {
+    if ctx.sender() != ctx.database_identity() {
+        return Err("gift_tick may not be invoked by clients".to_string());
+    }
+    for g in ctx.db.gift().iter().filter(|g| g.expires_at <= ctx.timestamp).collect::<Vec<_>>() {
+        ctx.db.gift().id().delete(g.id);
+    }
+    if ctx.db.gift().count() > 0 {
+        return Ok(());
+    }
+    let highest_slot = ctx.db.island().iter().map(|i| i.slot).max().unwrap_or(0);
+    let bound_hex = constants::SLOT_SPACING * (geometry::occupied_rings(highest_slot) + 1);
+    let bound = bound_hex as f32 * 1.8;
+    let mut rng = ctx.rng();
+    let angle = rng.gen_range(0.0..std::f32::consts::TAU);
+    let radius = bound * rng.gen_range(0.0f32..1.0).sqrt();
+    let (x, y) = (radius * libm::cosf(angle), radius * libm::sinf(angle));
+    ctx.db.gift().insert(Gift {
+        id: 0,
+        x,
+        y,
+        spawned_at: ctx.timestamp,
+        expires_at: ctx.timestamp + TimeDuration::from_micros(constants::GIFT_LIFETIME_SECS * 1_000_000),
+    });
     Ok(())
 }
 
@@ -1231,6 +1399,13 @@ pub fn client_connected(ctx: &ReducerContext) {
             scheduled_at: TimeDuration::from_micros(constants::REAP_PERIOD_SECS * 1_000_000).into(),
         });
     }
+    // F11: same lazy-seeding pattern as the schedules above.
+    if ctx.db.gift_schedule().count() == 0 {
+        ctx.db.gift_schedule().insert(GiftSchedule {
+            scheduled_id: 0,
+            scheduled_at: TimeDuration::from_micros(constants::GIFT_SPAWN_PERIOD_SECS * 1_000_000).into(),
+        });
+    }
 
     if let Some(user) = ctx.db.user().identity().find(ctx.sender()) {
         ctx.db.user().identity().update(User { online: true, last_seen: ctx.timestamp, ..user });
@@ -1259,6 +1434,7 @@ pub fn client_connected(ctx: &ReducerContext) {
         hue,
         obtained_at: ctx.timestamp,
         obtained_with: None,
+        from_gift: false,
     });
 
     // Slot 0 is reserved for the (not yet implemented, P2/F10) admin island

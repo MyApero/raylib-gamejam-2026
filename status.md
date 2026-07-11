@@ -7,7 +7,121 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** Author direct edit (own commit, `61adba2 "feat: admin
+**Current batch:** F11 Flying gift (P2). plan.md's original entry was a
+one-liner ("scheduled spawn of a drifting pickup, click/tap to claim ->
+random hue or XP") with no author-provided detail, so the executor fleshed
+out the design below and folded it back into plan.md's F11 bullet + the
+canonical constants table — flag any of these to the author if a different
+call is wanted.
+
+- **Schema**: `Gift(id, x, y, spawned_at, expires_at)`, public. At most one
+  active gift at a time (simplest P2 scope call, ASSUMED acceptable) — a
+  repeating `gift_tick` (every `GIFT_SPAWN_PERIOD_SECS` = 45s) sweeps any row
+  past `expires_at` then spawns a fresh one (uniform-in-disk over the
+  currently-occupied world bound, reusing `occupied_rings`/`SLOT_SPACING`
+  the same way `paint_margin_cell` does) if none remain.
+  `GIFT_LIFETIME_SECS` = 25s (< the tick period, so gifts have visible
+  down-time rather than one always being up — REASONED, tunable). Lazy-
+  seeded in `client_connected`, same pattern as every other schedule table.
+- **Drift**: `x`/`y` are the spawn center; the rendered/hit-tested position
+  drifts in a small circle around it (`GIFT_DRIFT_RADIUS` = 1.2 world units,
+  `GIFT_DRIFT_PERIOD_SECS` = 5s), a pure function of elapsed time since
+  `spawned_at` — no continuous position sync needed. Duplicated in exactly
+  two places (server's own `gift_drift_pos` using `libm`, `world.rs`'s
+  mirror using plain `f32::sin/cos`, shared by both clients via its
+  `#[path]` include), matching this codebase's established convention for
+  geometry helpers that need per-target trig (see `merge::merge_hue`'s
+  comment on why the `shared` crate itself stays libm-free). The three
+  numeric constants (`GIFT_DRIFT_RADIUS`/`_PERIOD_SECS`/`GIFT_CLAIM_DIST`) DO
+  live in `shared`, same as `ISLAND_RADIUS`/`HUE_TOLERANCE`, since both the
+  claim distance check and the render must agree byte-for-byte.
+- **Claim**: `claim_gift(gift_id)` — caller must be within `GIFT_CLAIM_DIST`
+  (3.0 world units) of the gift's CURRENT drifted position (computed
+  server-side from `ctx.timestamp - spawned_at`, not just the static spawn
+  point), checked against the caller's last-reported `set_pos` cursor — same
+  anti-cheat posture `set_pos`'s own cursor-merge check uses. Reward is a
+  coin flip (`rng.gen_bool(0.5)`): a fresh random hue (retried up to 8 rolls
+  against one already owned within `HUE_TOLERANCE`, falling back to
+  `XP_GIFT` = 20 if all 8 collide) or straight `XP_GIFT`. `Inventory` gained
+  a `from_gift: bool` field (appended at the end, same reason
+  `Island.border_color` was — `bin/web.rs`'s positional parsing indexes by
+  schema order) so a gift-hue's `obtained_with: None` row isn't misread by
+  the client's existing inventory-watch as `reset_account`'s reseed.
+- **Bug caught during verification, fixed before shipping**: the expired-gift
+  guard originally did `ctx.db.gift().id().delete(gift.id); return
+  Err(...)`, mirroring nothing else in this file — every other reducer here
+  validates fully before any mutation. Live-probed and confirmed: a
+  reducer's `Err` return rolls back every write it made in that call, so the
+  delete was dead code (the row lingered until the next `gift_tick` sweep
+  regardless). Removed the ineffective delete; left the sweep as the sole
+  cleanup path, consistent with the rest of the file's guards-before-
+  mutation shape.
+- **Rendering/input**: world-space pulsing "box + ribbon" icon
+  (`world::draw_gift_icon`, built from `draw_poly`/`draw_line_ex` primitives
+  already used elsewhere in `world.rs`, not raylib's rectangle calls).
+  Click/tap resolves on PRESS (not release) inside the existing
+  `suppress_map_until_release` latch — landing on the gift claims it and
+  consumes the whole gesture, the same way clicking through a modal's close
+  button already does, so the same press can't also start a paint stroke or
+  long-press underneath it. Gated on `over_map_area` too (this batch landed
+  right after that guard was broadened — see below — so F11's own gesture
+  respects it from the start rather than needing a follow-up fix).
+
+**Verify status:** `cargo build -p server`, `-p client --bin client`, and
+`./build-web.sh` all clean. Package size unaffected (`du -sh client/web/` =
+980K, `web.wasm` 740K — nowhere near the 64 MB cap). **VERIFIED live**
+end-to-end via a throwaway Node WebSocket probe (same technique as prior
+batches) against the local instance: far-away claim rejected ("too far
+away"), an already-expired gift's claim rejected ("gift is gone") with the
+row correctly left for the next tick rather than double-deleted, a close
+claim after `set_pos`-ing onto the gift's position succeeds and the row
+disappears from the table, and BOTH reward branches observed across
+repeated runs — a `from_gift: true` inventory row on one run, `user.xp`
+incremented by exactly `XP_GIFT` (0 -> 20) on others. Client-side rendering/
+click gesture REASONED (read and traced both `main.rs` and `bin/web.rs`,
+which mirror each other) but NOT hand-tested by the executor, per this
+repo's standing convention — left for the author's own pass. NOT committed
+by the executor this batch (the author hand-tests before the next feature
+starts, same as every prior batch).
+
+---
+
+**Previous batch:** Out-of-plan bugfix, author-reported: "Clicking on an UI
+element shouldn't draw on the map." Root cause was already half-diagnosed in
+a standing comment in `main.rs` (the header/footer HUD bands sit ON TOP of
+the map, but their screen coordinates still map to SOME world tile via the
+camera transform) — that guard (`over_map_area`) had only ever been applied
+to the foreign-island hover-reinterpretation check, not to the actual
+mouse-driven world-mutation blocks. So pressing/holding LMB over any footer
+button (Eraser, Center, My Isle, a last-3 swatch, the name field, ...) fell
+straight through into the paint/erase block, since `map_input_allowed` only
+ever checked modal-open state, never cursor position. Same gap existed for
+the middle-click eyedropper (press position not checked) and long-press-merge
+(press over a footer button would still arm a long-press against whatever
+tile lay beneath it). Fix: hoisted `over_map_area` to compute once right
+after `mouse_screen`/`mouse_world` each frame, and added it as a guard to the
+painting block, the middle-click-eyedropper press check, and the long-press
+initiation check, in both `main.rs` and `bin/web.rs` (which mirror each other
+by convention). REASONED (read and traced the logic in both clients) +
+VERIFIED the build: `cargo build -p client --bin client` and `./build-web.sh`
+(wasm32-unknown-emscripten) both succeed; `cargo build --workspace --exclude
+client` (server) unaffected. Runtime click-vs-paint behavior itself not
+independently hand-tested by the executor — left for the author's own
+hand-test per this repo's standing convention.
+
+Same-sitting follow-up (author-reported): "You shouldn't render the white
+hexagon if you're on HUD" — the world-space hover highlight (`hover_paintable`,
+the white hex outline) and the eyedropper "+" hint (`hover_takeable`) had the
+identical gap: both classify `mouse_world` regardless of whether the cursor
+is actually over the map, so hovering a footer button whose underlying world
+tile happened to be paintable/mergeable would flash the white hex or "+"
+hint through the header/footer's semi-transparent (alpha 235) background.
+Added the same `over_map_area` guard to both, in both clients. REASONED +
+VERIFIED build (same two commands as above, rerun clean after this change).
+
+---
+
+**Previous batch:** Author direct edit (own commit, `61adba2 "feat: admin
 account"`, concurrent with the executor's F10 batch below) — a real bug fix
 found while hand-testing: `main.rs`/`bin/web.rs` each hand-rolled the same
 "which modal is open" check in four places, and the web build's copy was
@@ -2034,7 +2148,13 @@ Implementation notes:
       per plan.md's "admin tooling is minimal for now." NOT yet published
       to the production VPS (same access gap as the border feature above).
       COMMITTED.
-- [ ] F11 flying gift — [ ] F12 polish/bots/sounds —
+- [x] F11 flying gift — scheduled spawn/expire tick, drifting world-space
+      pickup, click/tap `claim_gift` (distance-checked against the CURRENT
+      drifted position) grants a fresh hue or flat XP. VERIFIED live via a
+      throwaway WebSocket probe (see the batch notes above); client
+      rendering/gesture REASONED, not hand-tested by the executor. NOT
+      committed — author hand-test pending per this repo's convention.
+- [ ] F12 polish/bots/sounds —
 - [ ] F13 hexa event (6-cursor hexagon: pooled dictionaries, one-time XP, snap rendering) —
 - [x] Customizable island border color/transparency (from backlog, author override
       2026-07-11) — server + both clients VERIFIED via `spacetime call`/`spacetime sql`

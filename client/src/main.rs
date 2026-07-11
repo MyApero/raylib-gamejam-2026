@@ -280,6 +280,7 @@ fn main() {
         "SELECT * FROM island_like",
         "SELECT * FROM island_cell",
         "SELECT * FROM margin_cell",
+        "SELECT * FROM gift",
     ]);
 
     let (mut rl, thread) = raylib::init()
@@ -358,6 +359,32 @@ fn main() {
         let mouse_screen = rl.get_mouse_position();
         let mouse_world = rl.get_screen_to_world2D(mouse_screen, camera);
 
+        // F11 (flying gift): current drifted world position of the single
+        // active gift (if any) and whether the mouse is within claim range
+        // of it right now — computed once here (same "stale by one frame"
+        // convention as `mouse_world` itself: this reads last frame's
+        // settled camera/mouse, same as every other click gesture below) so
+        // both the claim-on-press block and the render call can reuse it.
+        let active_gift: Option<(u64, Vector2, f32)> = ctx.db.gift().iter().next().map(|g| {
+            let elapsed = now.duration_since(g.spawned_at).map(|d| d.as_secs_f32()).unwrap_or(0.0).max(0.0);
+            let pos = world::gift_drift_pos(Vector2::new(g.x, g.y), elapsed);
+            (g.id, pos, elapsed)
+        });
+        let gift_hit = active_gift.is_some_and(|(_, pos, _)| {
+            let dx = mouse_world.x - pos.x;
+            let dy = mouse_world.y - pos.y;
+            (dx * dx + dy * dy).sqrt() <= GIFT_CLAIM_DIST
+        });
+        // The header/footer HUD bands sit ON TOP of the map, but the screen
+        // coordinate underneath still maps to SOME world tile via the camera
+        // transform. Without this guard, clicking a HUD button (Eraser,
+        // Center, My Isle, a swatch, the name field, ...) would also
+        // paint/erase/eyedrop/long-press-merge whatever tile happens to lie
+        // beneath it. Gates every mouse-driven world-mutation block below;
+        // camera pan/zoom are left alone since footer buttons don't handle
+        // right/middle-click anyway.
+        let over_map_area = mouse_screen.y > ui::HEADER_H && mouse_screen.y < (720.0 - ui::FOOTER_H);
+
         // F9.6 item 7: launch intro. First frame the player's own island is
         // known, camera starts framing the whole occupied world (`world_fit`)
         // and eases to the island over `INTRO_DURATION`; any input skips
@@ -418,7 +445,9 @@ fn main() {
                         // `obtained_with: Some(partner)`) — reset the last-3
                         // ring instead of just prepending onto stale
                         // pre-reset entries.
-                        if inv.obtained_with.is_none() {
+                        if inv.from_gift {
+                            ui_state.show_gift_toast(inv.hue);
+                        } else if inv.obtained_with.is_none() {
                             ui_state.note_reset_hue(inv.hue);
                         } else {
                             let label = inv.obtained_with.map_or_else(|| "someone".to_string(), |p| player_label(&ctx, p));
@@ -450,6 +479,16 @@ fn main() {
             // it's up would break double-click-to-like/long-press-merge on
             // the very island it's showing info for.
             suppress_map_until_release = ui_state.any_modal_open();
+            // F11: a press landing on the gift claims it immediately and
+            // consumes the whole gesture (like clicking through a modal's
+            // close button above), so the same press can't also start a
+            // paint stroke or long-press underneath it.
+            if !suppress_map_until_release && over_map_area && gift_hit {
+                if let Some((gift_id, _, _)) = active_gift {
+                    let _ = ctx.reducers.claim_gift(gift_id);
+                }
+                suppress_map_until_release = true;
+            }
         }
         if rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
             suppress_map_until_release = false;
@@ -663,7 +702,8 @@ fn main() {
         // Painting/erasing: left-drag, not while panning (SHIFT/middle/right
         // held). F9.6 item 1: which reducer fires depends on
         // `ui_state.eraser_on` — same target-cell classification either way.
-        if map_input_allowed {
+        // `over_map_area`: not while the cursor is over the header/footer HUD.
+        if map_input_allowed && over_map_area {
             if let Some(me) = me {
                 if rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && !panning {
                     let (wq, wr) = world::world_to_axial(mouse_world);
@@ -710,7 +750,7 @@ fn main() {
         if !map_input_allowed {
             middle_click = None;
         } else {
-            if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE) {
+            if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE) && over_map_area {
                 middle_click = Some(mouse_screen);
             }
             if rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_MIDDLE) {
@@ -747,7 +787,7 @@ fn main() {
         if !map_input_allowed {
             long_press = None;
         } else if let Some(me) = me {
-            if !panning && rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
+            if !panning && over_map_area && rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
                 let (wq, wr) = world::world_to_axial(mouse_world);
                 long_press = Some(LongPress {
                     press_screen: mouse_screen,
@@ -850,15 +890,12 @@ fn main() {
         // block above, which is left untouched for double-click-to-like and
         // touch (tap opens, double-tap likes; raylib-web aliases a single
         // touch to ordinary mouse events, so that path already covers touch).
-        // Author-caught: the header/footer bands sit ON TOP of the map, but
-        // the screen coordinate underneath still maps to SOME world tile via
-        // the camera transform — without this guard, clicking a footer
-        // button (e.g. "My Isle", itself over foreign territory at the
-        // camera's current framing) could immediately have the hover logic
-        // reinterpret that same resting mouse position as hovering a
-        // DIFFERENT foreign island and overwrite the just-opened own-island
-        // popup with that one.
-        let over_map_area = mouse_screen.y > ui::HEADER_H && mouse_screen.y < (720.0 - ui::FOOTER_H);
+        // Author-caught: clicking a footer button (e.g. "My Isle", itself
+        // over foreign territory at the camera's current framing) could
+        // immediately have the hover logic reinterpret that same resting
+        // mouse position as hovering a DIFFERENT foreign island and
+        // overwrite the just-opened own-island popup with that one —
+        // `over_map_area` (computed above) guards against it.
         let currently_hovered_foreign = over_map_area
             .then(|| {
                 me.and_then(|me| {
@@ -1052,13 +1089,23 @@ fn main() {
                 world::draw_hex(&mut d2, p, 1.0, world::hsv_color(h, s, v), show_tile_outline.then_some(Color::new(30, 30, 34, 255)));
             }
 
+            // F11 (flying gift): world-space, so it naturally pans/zooms
+            // with everything else.
+            if let Some((_, pos, elapsed)) = active_gift {
+                world::draw_gift_icon(&mut d2, pos, elapsed);
+            }
+
             // Hover highlight: only on cells the caller could actually paint
             // right now (own island interior or margin) — showing it over
             // someone else's island or the inventory-overlay backdrop would
-            // promise a paint that the server will reject.
+            // promise a paint that the server will reject. `over_map_area`:
+            // the header/footer HUD still overlays SOME world tile per-pixel
+            // (see the painting-block comment above) — without this, hovering
+            // a footer button could flash the white hex through the HUD's
+            // semi-transparent background.
             let (hq, hr) = world::world_to_axial(mouse_world);
             let hover_paintable =
-                map_input_allowed && me.is_some_and(|me| !matches!(classify(&ctx, me, hq, hr), Paintable::None));
+                map_input_allowed && over_map_area && me.is_some_and(|me| !matches!(classify(&ctx, me, hq, hr), Paintable::None));
             if hover_paintable {
                 let hover_center = world::axial_to_world(hq, hr);
                 d2.draw_poly(hover_center, 6, 1.0, 0.0, Color::new(255, 255, 255, 70));
@@ -1074,6 +1121,7 @@ fn main() {
             // else's island — the only real long-press-merge target, see the
             // long-press block below) whose hue isn't already unlocked.
             hover_takeable = map_input_allowed
+                && over_map_area
                 && me.is_some_and(|me| {
                     matches!(classify(&ctx, me, hq, hr), Paintable::None)
                         && merge_target_at(&ctx, hq, hr).is_some_and(|(_, _, hue)| !have_hue(&ctx, me, hue))

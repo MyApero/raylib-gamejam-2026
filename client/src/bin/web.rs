@@ -90,6 +90,20 @@ struct InventoryRow {
     owner_hex: String,
     hue: u16,
     obtained_with_hex: Option<String>,
+    /// F11: mirrors `main.rs`'s `Inventory.from_gift` — a flying-gift hue
+    /// grant, distinct from `reset_account`'s reseed even though both leave
+    /// `obtained_with_hex: None`.
+    from_gift: bool,
+}
+
+/// F11: mirrors `main.rs`'s `Gift` binding — one row = the single currently-
+/// active flying-gift pickup. `expires_at` isn't read client-side (the row
+/// simply disappears once the server's tick expires it), so it's skipped
+/// here, same as `parse_inventory` already skips `obtained_at`.
+struct GiftRow {
+    x: f32,
+    y: f32,
+    spawned_at_micros: i64,
 }
 
 struct IslandRow {
@@ -226,6 +240,7 @@ fn parse_inventory(v: &Value) -> Option<(u64, InventoryRow)> {
             owner_hex: identity_hex(r.field("owner", 1)?)?,
             hue: r.field("hue", 2)?.as_u64()? as u16,
             obtained_with_hex: r.field("obtained_with", 4)?.pipe(opt_value).and_then(identity_hex),
+            from_gift: r.field("from_gift", 5)?.as_bool()?,
         },
     ))
 }
@@ -295,6 +310,19 @@ fn parse_margin_cell(v: &Value) -> Option<(u32, MarginCellRow)> {
     ))
 }
 
+fn parse_gift(v: &Value) -> Option<(u64, GiftRow)> {
+    let r = row_view(v)?;
+    let id = r.field("id", 0)?.as_u64()?;
+    Some((
+        id,
+        GiftRow {
+            x: r.field("x", 1)?.as_f64()? as f32,
+            y: r.field("y", 2)?.as_f64()? as f32,
+            spawned_at_micros: timestamp_micros(r.field("spawned_at", 3)?),
+        },
+    ))
+}
+
 /// Small pipe-forward helper so the `Option<&Value>` chains above (field ->
 /// unwrap tag -> read payload) read left to right instead of nesting.
 trait Pipe: Sized {
@@ -319,6 +347,7 @@ struct Tables {
     margin_cells: HashMap<u32, MarginCellRow>,
     island_likes: HashMap<u64, IslandLikeRow>,
     configs: HashMap<u32, ConfigRow>,
+    gifts: HashMap<u64, GiftRow>,
 }
 
 impl Tables {
@@ -331,6 +360,7 @@ impl Tables {
             margin_cells: HashMap::new(),
             island_likes: HashMap::new(),
             configs: HashMap::new(),
+            gifts: HashMap::new(),
         }
     }
 
@@ -342,6 +372,7 @@ impl Tables {
         self.margin_cells.clear();
         self.island_likes.clear();
         self.configs.clear();
+        self.gifts.clear();
     }
 
     fn apply(&mut self, db_update: &Value) {
@@ -363,6 +394,7 @@ impl Tables {
                 "margin_cell" => apply_updates(&mut self.margin_cells, updates, parse_margin_cell),
                 "island_like" => apply_updates(&mut self.island_likes, updates, parse_island_like),
                 "config" => apply_updates(&mut self.configs, updates, parse_config),
+                "gift" => apply_updates(&mut self.gifts, updates, parse_gift),
                 _ => {}
             }
         }
@@ -725,6 +757,26 @@ fn frame(state: &mut State) {
     let mouse_screen = state.rl.get_mouse_position();
     let mouse_world = state.rl.get_screen_to_world2D(mouse_screen, state.camera);
 
+    // F11 (flying gift): mirrors `main.rs` exactly — current drifted world
+    // position of the single active gift (if any) and whether the mouse is
+    // within claim range of it right now.
+    let active_gift: Option<(u64, Vector2, f32)> = state.tables.gifts.iter().next().map(|(&id, g)| {
+        let elapsed = ((state.now_micros - g.spawned_at_micros).max(0) as f64 / 1_000_000.0) as f32;
+        let pos = world::gift_drift_pos(Vector2::new(g.x, g.y), elapsed);
+        (id, pos, elapsed)
+    });
+    let gift_hit = active_gift.is_some_and(|(_, pos, _)| {
+        let dx = mouse_world.x - pos.x;
+        let dy = mouse_world.y - pos.y;
+        (dx * dx + dy * dy).sqrt() <= GIFT_CLAIM_DIST
+    });
+    // Mirrors `main.rs` exactly: the header/footer HUD bands sit ON TOP of
+    // the map, but the screen coordinate underneath still maps to SOME world
+    // tile via the camera transform. Gates every mouse-driven world-mutation
+    // block below so clicking a HUD button never also paints/erases/eyedrops/
+    // long-press-merges whatever tile happens to lie beneath it.
+    let over_map_area = mouse_screen.y > ui::HEADER_H && mouse_screen.y < (720.0 - ui::FOOTER_H);
+
     // F9.6 item 7: launch intro — mirrors `main.rs` exactly. Camera starts
     // framing the whole occupied world and eases to the player's island over
     // `INTRO_DURATION`; any input skips straight to the final pose.
@@ -777,7 +829,9 @@ fn frame(state: &mut State) {
                     // F9.5 item 4: mirrors `main.rs` — a NEW obtained_with-
                     // less row after the initial seed can only be
                     // `reset_account`'s reseed, never a merge.
-                    if inv.obtained_with_hex.is_none() {
+                    if inv.from_gift {
+                        state.ui_state.show_gift_toast(inv.hue);
+                    } else if inv.obtained_with_hex.is_none() {
                         state.ui_state.note_reset_hue(inv.hue);
                     } else {
                         let label = inv
@@ -809,6 +863,15 @@ fn frame(state: &mut State) {
         // deliberately excludes the foreign-island hover tooltip, which has
         // no interactive chrome and must not block map input.
         state.suppress_map_until_release = state.ui_state.any_modal_open();
+        // F11: mirrors `main.rs` — a press landing on the gift claims it
+        // immediately and consumes the whole gesture so the same press can't
+        // also start a paint stroke or long-press underneath it.
+        if !state.suppress_map_until_release && over_map_area && gift_hit {
+            if let Some((gift_id, _, _)) = active_gift {
+                call_reducer("claim_gift", serde_json::json!([gift_id]));
+            }
+            state.suppress_map_until_release = true;
+        }
     }
     if state.rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
         state.suppress_map_until_release = false;
@@ -1032,8 +1095,9 @@ fn frame(state: &mut State) {
 
     // Painting/erasing: left-drag (or one-finger touch-drag), not while
     // panning or two-finger gesturing. F9.6 item 1: which reducer fires
-    // depends on `ui_state.eraser_on` — mirrors `main.rs` exactly.
-    if map_input_allowed && !gesturing {
+    // depends on `ui_state.eraser_on` — mirrors `main.rs` exactly, including
+    // the `over_map_area` guard against the header/footer HUD.
+    if map_input_allowed && !gesturing && over_map_area {
         if let Some(me) = me {
             if state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && !panning {
                 let (wq, wr) = world::world_to_axial(mouse_world);
@@ -1070,7 +1134,7 @@ fn frame(state: &mut State) {
     if !map_input_allowed {
         state.middle_click = None;
     } else {
-        if state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE) {
+        if state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE) && over_map_area {
             state.middle_click = Some(mouse_screen);
         }
         if state.rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_MIDDLE) {
@@ -1102,7 +1166,7 @@ fn frame(state: &mut State) {
     if !map_input_allowed || gesturing {
         state.long_press = None;
     } else if let Some(me) = me {
-        if !panning && state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
+        if !panning && over_map_area && state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
             let (wq, wr) = world::world_to_axial(mouse_world);
             state.long_press = Some(LongPress {
                 press_screen: mouse_screen,
@@ -1186,10 +1250,9 @@ fn frame(state: &mut State) {
     // touch; raylib-web aliases a single touch to ordinary mouse events, so
     // that path already covers touch taps). Author-caught: excludes the
     // header/footer bands, whose screen coordinates still map to SOME world
-    // tile via the camera transform — see `main.rs`'s comment on
-    // `over_map_area` for why (a footer button click could otherwise have
-    // the hover logic overwrite a just-opened own-island popup).
-    let over_map_area = mouse_screen.y > ui::HEADER_H && mouse_screen.y < (720.0 - ui::FOOTER_H);
+    // tile via the camera transform — see `over_map_area` (computed above)
+    // for why (a footer button click could otherwise have the hover logic
+    // overwrite a just-opened own-island popup).
     let currently_hovered_foreign = over_map_area
         .then(|| {
             me.and_then(|me| {
@@ -1355,9 +1418,18 @@ fn frame(state: &mut State) {
             world::draw_hex(&mut d2, p, 1.0, world::hsv_color(h, s, v), show_tile_outline.then_some(Color::new(30, 30, 34, 255)));
         }
 
+        // F11 (flying gift): world-space, mirrors `main.rs`.
+        if let Some((_, pos, elapsed)) = active_gift {
+            world::draw_gift_icon(&mut d2, pos, elapsed);
+        }
+
         let (hq, hr) = world::world_to_axial(mouse_world);
-        let hover_paintable =
-            map_input_allowed && me.is_some_and(|me| !matches!(classify(&state.tables, me, hq, hr), Paintable::None));
+        // `over_map_area`: mirrors `main.rs` — without it, hovering a footer
+        // button could flash the white hex through the HUD's semi-
+        // transparent background.
+        let hover_paintable = map_input_allowed
+            && over_map_area
+            && me.is_some_and(|me| !matches!(classify(&state.tables, me, hq, hr), Paintable::None));
         if hover_paintable {
             let hover_center = world::axial_to_world(hq, hr);
             d2.draw_poly(hover_center, 6, 1.0, 0.0, Color::new(255, 255, 255, 70));
@@ -1367,6 +1439,7 @@ fn frame(state: &mut State) {
         }
 
         hover_takeable = map_input_allowed
+            && over_map_area
             && me.is_some_and(|me| {
                 matches!(classify(&state.tables, me, hq, hr), Paintable::None)
                     && merge_target_at(&state.tables, hq, hr).is_some_and(|(_, _, hue)| !have_hue(&state.tables, me, hue))

@@ -65,3 +65,13 @@ the fresh post-reset hue, instead of just prepending onto stale pre-reset
 entries — see status.md)
 
 - [ ] Can't enter your name on mobile
+
+- [x] Clicking on an UI element shouldn't draw on the map
+(`over_map_area` guard, previously only applied to the hover-reinterpretation
+check, now also gates the paint/erase, middle-click-eyedropper, and
+long-press-merge blocks in both clients — see status.md)
+
+- [x] You shouldn't render the white hexagon if you're on HUD
+(same `over_map_area` guard extended to the hover-highlight hex and the
+eyedropper "+" hint, both of which were classifying `mouse_world` regardless
+of whether the cursor was actually over the map — see status.md)

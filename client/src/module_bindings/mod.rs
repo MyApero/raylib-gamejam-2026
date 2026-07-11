@@ -7,6 +7,7 @@
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 pub mod claim_admin_reducer;
+pub mod claim_gift_reducer;
 pub mod click_link_reducer;
 pub mod config_table;
 pub mod config_type;
@@ -14,6 +15,9 @@ pub mod delete_island_cells_reducer;
 pub mod disable_island_border_reducer;
 pub mod erase_island_cell_reducer;
 pub mod erase_margin_cell_reducer;
+pub mod gift_schedule_type;
+pub mod gift_table;
+pub mod gift_type;
 pub mod inventory_table;
 pub mod inventory_type;
 pub mod island_cell_table;
@@ -48,6 +52,7 @@ pub mod user_table;
 pub mod user_type;
 
 pub use claim_admin_reducer::claim_admin;
+pub use claim_gift_reducer::claim_gift;
 pub use click_link_reducer::click_link;
 pub use config_table::*;
 pub use config_type::Config;
@@ -55,6 +60,9 @@ pub use delete_island_cells_reducer::delete_island_cells;
 pub use disable_island_border_reducer::disable_island_border;
 pub use erase_island_cell_reducer::erase_island_cell;
 pub use erase_margin_cell_reducer::erase_margin_cell;
+pub use gift_schedule_type::GiftSchedule;
+pub use gift_table::*;
+pub use gift_type::Gift;
 pub use inventory_table::*;
 pub use inventory_type::Inventory;
 pub use island_cell_table::*;
@@ -97,6 +105,7 @@ pub use user_type::User;
 
 pub enum Reducer {
     ClaimAdmin { password: String },
+    ClaimGift { gift_id: u64 },
     ClickLink { island_id: u32 },
     DeleteIslandCells { island_id: u32 },
     DisableIslandBorder,
@@ -126,6 +135,7 @@ impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
             Reducer::ClaimAdmin { .. } => "claim_admin",
+            Reducer::ClaimGift { .. } => "claim_gift",
             Reducer::ClickLink { .. } => "click_link",
             Reducer::DeleteIslandCells { .. } => "delete_island_cells",
             Reducer::DisableIslandBorder => "disable_island_border",
@@ -154,6 +164,11 @@ impl __sdk::Reducer for Reducer {
             Reducer::ClaimAdmin { password } => {
                 __sats::bsatn::to_vec(&claim_admin_reducer::ClaimAdminArgs {
                     password: password.clone(),
+                })
+            }
+            Reducer::ClaimGift { gift_id } => {
+                __sats::bsatn::to_vec(&claim_gift_reducer::ClaimGiftArgs {
+                    gift_id: gift_id.clone(),
                 })
             }
             Reducer::ClickLink { island_id } => {
@@ -255,6 +270,7 @@ impl __sdk::Reducer for Reducer {
 #[doc(hidden)]
 pub struct DbUpdate {
     config: __sdk::TableUpdate<Config>,
+    gift: __sdk::TableUpdate<Gift>,
     inventory: __sdk::TableUpdate<Inventory>,
     island: __sdk::TableUpdate<Island>,
     island_cell: __sdk::TableUpdate<IslandCell>,
@@ -273,6 +289,9 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "config" => db_update
                     .config
                     .append(config_table::parse_table_update(table_update)?),
+                "gift" => db_update
+                    .gift
+                    .append(gift_table::parse_table_update(table_update)?),
                 "inventory" => db_update
                     .inventory
                     .append(inventory_table::parse_table_update(table_update)?),
@@ -323,6 +342,9 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.config = cache
             .apply_diff_to_table::<Config>("config", &self.config)
             .with_updates_by_pk(|row| &row.id);
+        diff.gift = cache
+            .apply_diff_to_table::<Gift>("gift", &self.gift)
+            .with_updates_by_pk(|row| &row.id);
         diff.inventory = cache
             .apply_diff_to_table::<Inventory>("inventory", &self.inventory)
             .with_updates_by_pk(|row| &row.id);
@@ -353,6 +375,9 @@ impl __sdk::DbUpdate for DbUpdate {
             match &table_rows.table[..] {
                 "config" => db_update
                     .config
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "gift" => db_update
+                    .gift
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "inventory" => db_update
                     .inventory
@@ -391,6 +416,9 @@ impl __sdk::DbUpdate for DbUpdate {
                 "config" => db_update
                     .config
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "gift" => db_update
+                    .gift
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "inventory" => db_update
                     .inventory
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
@@ -428,6 +456,7 @@ impl __sdk::DbUpdate for DbUpdate {
 #[doc(hidden)]
 pub struct AppliedDiff<'r> {
     config: __sdk::TableAppliedDiff<'r, Config>,
+    gift: __sdk::TableAppliedDiff<'r, Gift>,
     inventory: __sdk::TableAppliedDiff<'r, Inventory>,
     island: __sdk::TableAppliedDiff<'r, Island>,
     island_cell: __sdk::TableAppliedDiff<'r, IslandCell>,
@@ -449,6 +478,7 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
         callbacks: &mut __sdk::DbCallbacks<RemoteModule>,
     ) {
         callbacks.invoke_table_row_callbacks::<Config>("config", &self.config, event);
+        callbacks.invoke_table_row_callbacks::<Gift>("gift", &self.gift, event);
         callbacks.invoke_table_row_callbacks::<Inventory>("inventory", &self.inventory, event);
         callbacks.invoke_table_row_callbacks::<Island>("island", &self.island, event);
         callbacks.invoke_table_row_callbacks::<IslandCell>("island_cell", &self.island_cell, event);
@@ -1121,6 +1151,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
 
     fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
         config_table::register_table(client_cache);
+        gift_table::register_table(client_cache);
         inventory_table::register_table(client_cache);
         island_table::register_table(client_cache);
         island_cell_table::register_table(client_cache);
@@ -1131,6 +1162,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
     }
     const ALL_TABLE_NAMES: &'static [&'static str] = &[
         "config",
+        "gift",
         "inventory",
         "island",
         "island_cell",
