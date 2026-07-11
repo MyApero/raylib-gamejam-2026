@@ -233,6 +233,30 @@ impl UiState {
         self.last3.push_front(hue);
         self.last3.truncate(3);
     }
+
+    /// F9.5 item 4 (author-caught, `known_bugs.md`: "the selected color is
+    /// not in the recent color used on launch"): seed the footer's last-3
+    /// ring with the caller's own starting/current hue the first time it's
+    /// known, so a brand-new connection shows something there instead of
+    /// staying empty until the player's first merge or swatch click. A no-op
+    /// once `last3` has any entry, so the caller can just call this every
+    /// frame after `me` becomes known rather than tracking its own
+    /// seed-once flag.
+    pub fn seed_last3_once(&mut self, hue: u16) {
+        if self.last3.is_empty() {
+            self.last3.push_front(hue);
+        }
+    }
+
+    /// F9.5 item 4 (author-caught: "reset account doesn't reset the last 3
+    /// selected colors"): `reset_account` wipes the caller's entire
+    /// inventory down to one fresh hue, but `note_used_hue` alone would just
+    /// prepend that hue onto the EXISTING ring, leaving up to two
+    /// now-meaningless pre-reset colors still showing. Clears first.
+    pub fn note_reset_hue(&mut self, hue: u16) {
+        self.last3.clear();
+        self.last3.push_front(hue);
+    }
 }
 
 /// Snapshot of server-derived state the HUD needs to read this frame.

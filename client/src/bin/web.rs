@@ -683,13 +683,25 @@ fn frame(state: &mut State) {
         } else {
             for (&id, inv) in &state.tables.inventory {
                 if state.known_inventory_ids.insert(id) && inv.owner_hex == me {
-                    let label = inv
-                        .obtained_with_hex
-                        .as_deref()
-                        .map_or_else(|| "someone".to_string(), |p| player_label(&state.tables, p));
-                    state.ui_state.show_merge_toast(inv.hue, &label);
+                    // F9.5 item 4: mirrors `main.rs` — a NEW obtained_with-
+                    // less row after the initial seed can only be
+                    // `reset_account`'s reseed, never a merge.
+                    if inv.obtained_with_hex.is_none() {
+                        state.ui_state.note_reset_hue(inv.hue);
+                    } else {
+                        let label = inv
+                            .obtained_with_hex
+                            .as_deref()
+                            .map_or_else(|| "someone".to_string(), |p| player_label(&state.tables, p));
+                        state.ui_state.show_merge_toast(inv.hue, &label);
+                    }
                 }
             }
+        }
+        // F9.5 item 4: mirrors `main.rs` — seed the last-3 ring with the
+        // caller's current hue the first frame it's known.
+        if let Some(user) = state.tables.users.get(me) {
+            state.ui_state.seed_last3_once(user.hue);
         }
     }
 

@@ -7,7 +7,43 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9.5 item 3 — merge range too short. Single-constant
+**Current batch:** F9.5 item 4 — recent-colors (last-3 footer ring): two
+author-caught bugs bundled together per plan.md ("same code area, do
+together"):
+1. **Not seeded on launch**: `UiState.last3` starts empty and was only ever
+   populated by an explicit swatch click or a merge toast — a fresh
+   connection with no merge yet left the footer's last-3 slots blank even
+   though the player already has a starting color.
+2. **Reset doesn't reset it**: `reset_account` wipes the whole inventory down
+   to one fresh hue server-side, but the client's `last3` `VecDeque` was
+   never told to forget its pre-reset entries — the existing merge-toast path
+   (`note_used_hue`) would just prepend the fresh hue onto the two
+   now-stale/invalid leftovers instead of replacing them.
+
+**Fix**: added two `UiState` methods (`client/src/ui.rs`) — `seed_last3_once`
+(no-op once `last3` has anything, so the caller can call it every frame after
+`me` is known without its own seed-once flag) and `note_reset_hue` (clears
+then reseeds with exactly one hue). Wired both into the existing
+inventory-insert-watch block in `main.rs`/`bin/web.rs`: a newly-seen own
+inventory row with `obtained_with: None` can now ONLY be `reset_account`'s
+reseed (the very first such row, from `client_connected`, is already absorbed
+by the pre-existing seeding pass before this loop ever runs; merges always
+set `obtained_with: Some(partner)`), so that case routes to `note_reset_hue`
+instead of the merge-toast path it used to fall into (which was itself a
+latent, previously-unreported bug: a reset used to show a spurious "new
+color, obtained with someone" toast).
+
+**VERIFIED** live via the same Playwright-against-local-`spacetime start`
+setup as prior items, both clients build clean:
+- Screenshot on first connect: the footer's last-3 ring shows one swatch
+  matching the header/border seed hue immediately, no merge needed.
+- Screenshot after Account overlay -> Reset account (armed + confirmed) ->
+  close: the island border re-rolled to a new hue and the footer shows
+  exactly that ONE new swatch, not a mix of the old and new.
+
+---
+
+**Previous batch:** F9.5 item 3 — merge range too short. Single-constant
 change: `server/src/lib.rs`'s `constants::MERGE_DIST` 1.0 -> 2.0
 (cursor-merge trigger distance, checked entirely server-side in `set_pos` —
 neither client needs a mirrored copy of this one). plan.md's constants table

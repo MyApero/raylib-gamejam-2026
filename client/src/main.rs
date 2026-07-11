@@ -306,10 +306,27 @@ fn main() {
             } else {
                 for inv in ctx.db.inventory().iter() {
                     if known_inventory_ids.insert(inv.id) && inv.owner == me {
-                        let label = inv.obtained_with.map_or_else(|| "someone".to_string(), |p| player_label(&ctx, p));
-                        ui_state.show_merge_toast(inv.hue, &label);
+                        // F9.5 item 4: the only way a NEW `obtained_with:
+                        // None` row can appear after the initial seed above
+                        // is `reset_account`'s reseed (merges always set
+                        // `obtained_with: Some(partner)`) — reset the last-3
+                        // ring instead of just prepending onto stale
+                        // pre-reset entries.
+                        if inv.obtained_with.is_none() {
+                            ui_state.note_reset_hue(inv.hue);
+                        } else {
+                            let label = inv.obtained_with.map_or_else(|| "someone".to_string(), |p| player_label(&ctx, p));
+                            ui_state.show_merge_toast(inv.hue, &label);
+                        }
                     }
                 }
+            }
+            // F9.5 item 4 (author-caught: "selected color not in recent-used
+            // on launch"): seed the last-3 ring with the caller's current hue
+            // the first frame it's known — a no-op once it has anything, so a
+            // connection with no merge yet doesn't leave the footer empty.
+            if let Some(user) = ctx.db.user().identity().find(&me) {
+                ui_state.seed_last3_once(user.hue);
             }
         }
 

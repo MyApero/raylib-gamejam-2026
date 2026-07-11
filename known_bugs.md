@@ -3,7 +3,9 @@ id is very confidential as it can be used to take the account (resolved at F6:
 random names at first connect, `player_label` never falls back to an identity
 hex — see status.md)
 
-- [ ] When launching, the selected color is not in the recent color used
+- [x] When launching, the selected color is not in the recent color used
+(F9.5 item 4: `UiState::seed_last3_once` seeds the footer ring with the
+caller's current hue the first frame it's known — see status.md)
 
 - [x] You can't paste in "Paste an ID" (resolved at F6: Ctrl+V/Cmd+V reads
 `get_clipboard_text()` into the import field — see status.md)
@@ -36,4 +38,7 @@ still isn't right)
 import field's 256-char cap silently truncated real ~386-char reconnect
 tokens into a corrupt JWT, which the server rejected — see status.md)
 
-- [ ] reset account doesn't reset the last 3 selected colors
+- [x] reset account doesn't reset the last 3 selected colors
+(F9.5 item 4: `UiState::note_reset_hue` clears the ring before reseeding with
+the fresh post-reset hue, instead of just prepending onto stale pre-reset
+entries — see status.md)
