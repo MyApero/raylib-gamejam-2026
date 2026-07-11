@@ -2,7 +2,10 @@
 - [ ] It should also be a battlefield
 - [ ] Outsite it should be only margin, if someone wants to draw a biiiiig thing
 - [ ] Having more XP gives more Ilots?
-- [ ] le cursor devrait grossir à un certain niveau de zoom, pour moi il devrait render environ la taille d’une tôle si on zoom assez
+- [x] le cursor devrait grossir à un certain niveau de zoom, pour moi il devrait render environ la taille d'une tôle si on zoom assez
+(F9.5 item 6: other players' cursors now scale with camera zoom relative to
+their size at the default ISLAND_FIT_ZOOM, floored so they stay findable
+zoomed far out — see status.md)
 - [ ] hover to see island information
 - [ ] heart icon for like
 - [ ] hover to see ilot information

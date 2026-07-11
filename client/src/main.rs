@@ -666,6 +666,13 @@ fn main() {
             .map(|inv| (inv.owner, inv.hue))
             .collect();
 
+        // F9.5 item 6: render scale for other players' cursors, relative to
+        // their fixed on-screen size at the default `ISLAND_FIT_ZOOM` —
+        // shrinks with the camera like a world-space object would (instead
+        // of towering over the tiles when zoomed out), floored so it stays
+        // findable even zoomed far out.
+        let other_cursor_scale = (camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
+
         // Screen-space projection for other players' cursors, computed here
         // (not inside the draw call) because `rl` can't be borrowed again
         // once `begin_drawing` hands out its mutable borrow below.
@@ -782,7 +789,7 @@ fn main() {
         // only the caller's own cursor needs to stay visible over the
         // header/footer/overlay, so it's drawn last, after the HUD.
         for &(screen, color) in &other_cursors {
-            world::draw_cursor(&mut d, screen, color);
+            world::draw_cursor_scaled(&mut d, screen, color, other_cursor_scale);
         }
 
         let own_brush = me.map(|me| {

@@ -1023,6 +1023,11 @@ fn frame(state: &mut State) {
         .map(|inv| (inv.owner_hex.as_str(), inv.hue))
         .collect();
 
+    // F9.5 item 6: mirrors `main.rs` — shrinks other players' cursors with
+    // camera zoom (relative to their fixed size at the default
+    // `ISLAND_FIT_ZOOM`), floored so they stay findable when zoomed out.
+    let other_cursor_scale = (state.camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
+
     let other_cursors: Vec<(Vector2, Color)> = state
         .tables
         .users
@@ -1116,7 +1121,7 @@ fn frame(state: &mut State) {
     }
 
     for &(screen, color) in &other_cursors {
-        world::draw_cursor(&mut d, screen, color);
+        world::draw_cursor_scaled(&mut d, screen, color, other_cursor_scale);
     }
 
     let own_brush = me.and_then(|me| state.tables.users.get(me)).map(|u| ((u.hue, u.sat, u.val), u.xp, u.locked));

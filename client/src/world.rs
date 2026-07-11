@@ -20,6 +20,11 @@ pub mod constants {
     /// which is the actual enforcement point; this just keeps the slider
     /// from offering a value the server would reject.
     pub const HUE_TOLERANCE: i32 = 5;
+    /// F9.5 item 6: floor on another player's cursor's zoomed-out render
+    /// scale (relative to its size at the default `ISLAND_FIT_ZOOM`) — lets
+    /// it shrink with the camera like a world-space object would, but never
+    /// past "still findable" small.
+    pub const CURSOR_MIN_SCALE: f32 = 0.4;
 }
 
 pub fn level_of(xp: u64) -> u64 {
@@ -195,13 +200,23 @@ pub fn draw_hex(d: &mut impl RaylibDraw, center: Vector2, radius: f32, fill: Col
     d.draw_poly_lines_ex(center, 6, radius, 0.0, radius * 0.04, line);
 }
 
-/// Filled pointer/arrow at screen-space `m` (apex at the tip), for the
-/// local player's own mouse cursor — drawn in screen space so its size is
-/// constant regardless of camera zoom, unlike the world-space hex tiles.
+/// Filled pointer/arrow at screen-space `m` (apex at the tip), for the local
+/// player's own mouse cursor — always drawn at `scale` 1.0 so its size stays
+/// constant regardless of camera zoom, matching the real mouse pointer.
 pub fn draw_cursor(d: &mut impl RaylibDraw, m: Vector2, color: Color) {
+    draw_cursor_scaled(d, m, color, 1.0);
+}
+
+/// F9.5 item 6: other players' cursors used to always render at the same
+/// fixed screen size as `draw_cursor`'s 1.0 scale, which reads as roughly
+/// tile-sized at the default zoom players connect at but towers over the
+/// tiles once zoomed out far — `scale` lets the caller shrink/grow it with
+/// camera zoom instead (still screen-space geometry, just resized before
+/// drawing), typically clamped to a minimum so it doesn't vanish either.
+pub fn draw_cursor_scaled(d: &mut impl RaylibDraw, m: Vector2, color: Color, scale: f32) {
     let tip = m;
-    let left = Vector2::new(m.x, m.y + 18.0);
-    let right = Vector2::new(m.x + 13.0, m.y + 13.0);
+    let left = Vector2::new(m.x, m.y + 18.0 * scale);
+    let right = Vector2::new(m.x + 13.0 * scale, m.y + 13.0 * scale);
     d.draw_triangle(tip, left, right, color);
     d.draw_triangle_lines(tip, left, right, Color::BLACK);
 }

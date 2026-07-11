@@ -7,7 +7,39 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9.5 item 5 — modal click-through: clicking an overlay's
+**Current batch:** F9.5 item 6 — other players' cursors drawn screen-space
+today, so zooming out leaves them huge relative to the tiles (and zooming in
+leaves them small).
+
+**Fix**: `world.rs` — `draw_cursor` now delegates to a new
+`draw_cursor_scaled(d, m, color, scale)` (own-cursor call sites unaffected,
+pass an implicit 1.0). Both clients compute `other_cursor_scale =
+(camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE)`
+(new constant, 0.4) once per frame and pass it to every OTHER player's
+cursor draw call — at the default connect zoom (13.0) this is exactly 1.0
+(no change from before), scales down toward the 0.4 floor as the camera
+zooms out past that, and scales up past 1.0 zoomed in (roughly tracking a
+tile's own on-screen size either way, per the author's ask), never shrinking
+past "still findable".
+
+**VERIFIED**: both clients build clean. Own-cursor rendering re-screenshotted
+at multiple zoom levels to confirm the `scale=1.0` default path is
+byte-for-byte the same triangle geometry as before (no regression). Did
+**not** get a clean visual capture of an actual OTHER player's cursor at two
+different zoom levels — two independently-connected browser contexts land on
+different, far-apart islands (`SLOT_SPACING`-scaled slot placement), and
+getting one context's camera to simultaneously frame the other's island AND
+have its cursor sit somewhere both zoom-level screenshots share proved too
+fiddly to script reliably in the time available. The scaling math itself
+(`(zoom / 13.0).max(0.4)`, applied through the identical, already-verified
+triangle-draw path) is simple enough that this is REASONED rather than
+VERIFIED for the actual other-cursor case — worth the author spot-checking
+with two real windows during hand-testing, which trivially puts two cursors
+in the same view.
+
+---
+
+**Previous batch:** F9.5 item 5 — modal click-through: clicking an overlay's
 close button (Colors/Account/island-info) also painted or long-pressed the
 map cell behind it, violating F3's "overlay is modal" rule.
 

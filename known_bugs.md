@@ -27,7 +27,8 @@ see status.md)
 
 - [ ] Ilot info should only be hover
 
-- [ ] Dezoom should reduce the size of other's cursor
+- [x] Dezoom should reduce the size of other's cursor
+(F9.5 item 6: `world::draw_cursor_scaled` — see status.md)
 
 - [x] More range to merge (F9.5 item 3: `MERGE_DIST` 1.0 -> 2.0,
 `server/src/lib.rs`; plan.md's constants table already carried the settled
