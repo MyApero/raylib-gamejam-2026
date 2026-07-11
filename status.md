@@ -7,7 +7,59 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9 (island links + XP economy) implemented in one batch —
+**Current batch:** F9.5 item 1 — account import bug (CRITICAL, deployed-build
+report: "pasting a token creates a NEW account instead of recovering the
+existing one", reproduced by the author everywhere: standalone, itch embed,
+cross-origin, local dev).
+
+Root cause, found by scripted reproduction rather than inspection alone: spun
+up a local `spacetime start` + published `hexmerge`, built `./build-web.sh`,
+served `client/web` over `python3 -m http.server`, and drove two real
+Chromium contexts with Playwright (installed into a throwaway venv for this
+session) — one to mint an identity and read its token out of `localStorage`,
+a second (fresh storage) to paste that token into the Account overlay's
+import field and click Import, exactly as a player would. **VERIFIED** live:
+before the fix, the token round-tripped through the import field truncated
+and the post-reload identity matched neither browser's prior identity (a
+THIRD, brand-new one each run) — confirming the server was rejecting the
+imported token outright, not silently ignoring it. Isolated the truncation to
+`ui.rs`'s import field: both the typed-input cap and the paste-room
+calculation capped `import_input` at 256 chars, but a real SpacetimeDB
+reconnect token observed on this instance is 386 chars — every paste silently
+dropped the last ~130 chars into a corrupt JWT, which the server's `?token=`
+auth rejects, so `game.html`'s `ws.onclose` handler (after `failedBeforeOpen
+>= 2`) purged it and reconnected anonymously. This fully explains why it
+reproduced in EVERY context (standalone/itch/cross-origin/local) — it's a
+pure client-side field-length bug, unrelated to the wire protocol, origin
+partitioning, or SpacetimeDB version. Also directly confirmed live (same
+probe) that SpacetimeDB 2.6.1's `v1.json.spacetimedb` DOES honor `?token=` on
+`/subscribe` and returns the SAME identity + token bytes for a valid token —
+so plan.md's suspect (c) (the wire protocol itself) is ruled out; the other
+listed suspects (a: does importToken reload — yes, confirmed; b: the
+`failedBeforeOpen` purge — real, but a downstream symptom of the truncated
+token failing to auth, not the root cause; d: TOKEN_KEY slot namespacing —
+not implicated, both test contexts used the unslotted key and still failed
+before the fix) are addressed by this same root cause.
+
+**Fix**: `client/src/ui.rs` — replaced both hardcoded `256`s with a new
+`IMPORT_TOKEN_MAX_LEN: usize = 2048` constant (generous headroom over the
+~386-char tokens actually observed, not a tightly-fitted bound — SpacetimeDB
+could grow the claim set). Re-ran the exact same Playwright probe after
+rebuilding: the imported token now round-trips byte-for-byte and the
+post-reload identity matches the source browser's original identity exactly.
+`cargo build -p client --bin client --bin bot` and `cargo build -p server`
+both still clean.
+
+Not yet done: the author's own hand-test on the actual DEPLOYED build (itch
+embed + cross-origin, per plan.md's verify checklist) — this batch's
+verification used a local `spacetime start` instance and a scripted browser,
+which nails the root cause and confirms the fix mechanically, but doesn't
+substitute for the real hand-test plan.md asks for before this item is
+checked off for the freeze.
+
+---
+
+**Previous batch:** F9 (island links + XP economy) implemented in one batch —
 schema-additive server change (two reducers, one new table, one new
 repeating scheduled reducer, no data wipe of existing tables) plus client
 work (native and web share `ui.rs`, kept identical as always).

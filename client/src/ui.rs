@@ -15,6 +15,13 @@ const TOAST_DURATION: Duration = Duration::from_millis(2500);
 /// How long the Reset Account button stays armed after a first click, before
 /// a second click is required to actually fire the reducer.
 const RESET_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
+/// Cap on the Account overlay's import field. Author-caught (F9.5): this used
+/// to be 256, which silently truncated every real SpacetimeDB reconnect token
+/// (observed ~386 chars) into a corrupt JWT — the server then rejected it and
+/// minted a fresh anonymous identity instead, which is exactly what "import
+/// creates a new account instead of recovering" looked like. Generous
+/// headroom over any observed token length, not a tightly-fitted bound.
+const IMPORT_TOKEN_MAX_LEN: usize = 2048;
 
 pub const HEADER_H: f32 = 28.0;
 pub const FOOTER_H: f32 = 44.0;
@@ -559,7 +566,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             }
             if state.import_focused {
                 while let Some(c) = rl.get_char_pressed() {
-                    if !c.is_control() && state.import_input.chars().count() < 256 {
+                    if !c.is_control() && state.import_input.chars().count() < IMPORT_TOKEN_MAX_LEN {
                         state.import_input.push(c);
                     }
                 }
@@ -576,7 +583,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                         || rl.is_key_down(KeyboardKey::KEY_RIGHT_SUPER));
                 if pasting {
                     if let Ok(clip) = rl.get_clipboard_text() {
-                        let room = 256usize.saturating_sub(state.import_input.chars().count());
+                        let room = IMPORT_TOKEN_MAX_LEN.saturating_sub(state.import_input.chars().count());
                         state.import_input.extend(clip.trim().chars().take(room));
                     }
                 }
