@@ -805,12 +805,10 @@ fn frame(state: &mut State) {
     // that closes an overlay can't also paint the cell behind it on a later
     // frame where the button is still held but the overlay's already gone.
     if state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
-        // F9.5 item 7 follow-up: mirrors `main.rs` — only the OWN-island
-        // popup is a real modal now; a foreign tooltip has no interactive
-        // chrome and must not block map input.
-        state.suppress_map_until_release = state.ui_state.overlay_open
-            || state.ui_state.account_open
-            || state.ui_state.island_popup.as_ref().is_some_and(|p| p.is_own);
+        // F9.5 item 7 follow-up: mirrors `main.rs` — `any_modal_open`
+        // deliberately excludes the foreign-island hover tooltip, which has
+        // no interactive chrome and must not block map input.
+        state.suppress_map_until_release = state.ui_state.any_modal_open();
     }
     if state.rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
         state.suppress_map_until_release = false;
@@ -818,7 +816,7 @@ fn frame(state: &mut State) {
 
     // HUD: snapshot server state, run widget input, apply resulting reducer
     // calls. Must run before the map-input blocks below so they can see
-    // `ui_state.overlay_open` (the overlay is modal).
+    // `ui_state.any_modal_open()`.
     if let Some(me) = me {
         let user = state.tables.users.get(me);
         let hues: Vec<u16> = state
@@ -943,13 +941,8 @@ fn frame(state: &mut State) {
             }
         }
     }
-    // F9.5 item 7 follow-up: mirrors `main.rs` — only an OWN-island popup
-    // blocks map input.
-    let map_input_allowed = !state.suppress_map_until_release
-        && !state.ui_state.overlay_open
-        && !state.ui_state.account_open
-        && !state.ui_state.help_open
-        && !state.ui_state.island_popup.as_ref().is_some_and(|p| p.is_own);
+    // F9.5 item 7 follow-up: mirrors `main.rs`.
+    let map_input_allowed = !state.suppress_map_until_release && !state.ui_state.any_modal_open();
 
     // Two-finger pinch/pan (touch); single-finger tap/drag is already
     // translated to ordinary mouse events by raylib's web backend, so the
@@ -1217,7 +1210,11 @@ fn frame(state: &mut State) {
             let gesturing_input = state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
                 || state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
                 || gesturing;
-            if !state.ui_state.overlay_open && !state.ui_state.account_open && !gesturing_input {
+            // `any_modal_open` covers My Isle and the Escape/help overlay
+            // too — without it, hovering a foreign island would, after the
+            // delay, silently overwrite/close whichever modal was open
+            // (mirrors main.rs).
+            if !state.ui_state.any_modal_open() && !gesturing_input {
                 if let Some((hid, since)) = state.hover_target {
                     let already_open = state.ui_state.island_popup.as_ref().is_some_and(|p| p.island_id == id);
                     if hid == id && !already_open && since.elapsed() >= HOVER_OPEN_DELAY {

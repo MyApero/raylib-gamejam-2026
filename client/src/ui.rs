@@ -69,7 +69,7 @@ pub struct UiState {
     pub name_input: String,
     name_loaded: bool,
     name_focused: bool,
-    pub overlay_open: bool,
+    overlay_open: bool,
     pub last3: VecDeque<u16>,
     dragging: Drag,
     toast: Option<Toast>,
@@ -90,7 +90,7 @@ pub struct UiState {
     pending_select: Option<u16>,
     /// Account overlay (F6: copy/import ID, reset account) — mutually
     /// exclusive with `overlay_open`, same modal footprint.
-    pub account_open: bool,
+    account_open: bool,
     import_input: String,
     import_focused: bool,
     /// Set on the first click of "Reset account"; a second click within
@@ -120,7 +120,7 @@ pub struct UiState {
     /// F9.6 item 5: minimal keybindings/help overlay, opened by Escape when
     /// nothing else is open (closed by Escape again, matching item 4's rule
     /// for every other overlay). Mutually exclusive with the other three.
-    pub help_open: bool,
+    help_open: bool,
     /// Author-requested: saturation/lightness is tied to each unlocked hue
     /// individually, not shared across the whole Inventory page — dragging
     /// the sliders while swatch A is selected must not visually shift every
@@ -207,12 +207,36 @@ impl UiState {
         self.like_anims.push(LikeAnim { pos, liked, started_at: Instant::now() });
     }
 
-    /// Opens the F8 island-info popup, closing the other two (mutually
-    /// exclusive) overlays if either was open.
-    pub fn open_island_info(&mut self, info: IslandInfo) {
+    /// True while any of the four "real" modals — Colors, Account, Help, or
+    /// the own-island popup — is open, i.e. the map/world should be fully
+    /// gated. Deliberately excludes the foreign-island hover tooltip (no
+    /// interactive chrome of its own, and blocking input while it's up
+    /// would break the very double-click/long-press gestures it's showing
+    /// info for — see `open_island_info`). Single source of truth for
+    /// `main.rs`/`bin/web.rs`, which used to each hand-roll this same
+    /// four-flag check and could drift out of sync — the web build was
+    /// missing two of the four, letting a hovered island silently close
+    /// My Isle or the Escape/help overlay.
+    pub fn any_modal_open(&self) -> bool {
+        self.overlay_open || self.account_open || self.help_open || self.island_popup.as_ref().is_some_and(|p| p.is_own)
+    }
+
+    /// Closes all four modals — the group is mutually exclusive by
+    /// convention, enforced here in the one place that needs to open a
+    /// different one, instead of every call site repeating the same four
+    /// assignments.
+    fn close_all_modals(&mut self) {
         self.overlay_open = false;
         self.account_open = false;
         self.help_open = false;
+        self.island_popup = None;
+        self.dragging = Drag::None;
+    }
+
+    /// Opens the F8 island-info popup, closing the other three (mutually
+    /// exclusive) modals if any was open.
+    pub fn open_island_info(&mut self, info: IslandInfo) {
+        self.close_all_modals();
         // F9: seed the link edit field from the current value every time the
         // popup (re)opens on your own island, so editing starts from what's
         // actually set rather than whatever was last typed.
@@ -467,6 +491,14 @@ fn overlay_close_rect() -> Rectangle {
     Rectangle::new(o.x + o.width - 38.0, o.y + 8.0, 30.0, 30.0)
 }
 
+/// Whether this frame's click should dismiss whichever modal occupies the
+/// shared panel footprint (`overlay_rect()`) — either its close button, or
+/// anywhere outside the panel (F9.6 item 4/5's rule, applied uniformly to
+/// all four modals through this one helper instead of four separate copies).
+fn modal_dismiss_clicked(mouse: Vector2, clicked: bool) -> bool {
+    clicked && (point_in(mouse, overlay_close_rect()) || !point_in(mouse, overlay_rect()))
+}
+
 const SWATCH: f32 = 44.0;
 const SWATCH_GAP: f32 = 8.0;
 const SWATCH_COLS: usize = 10;
@@ -684,21 +716,15 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     let held = rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT);
     let released = rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT);
 
-    // F9.6 item 5: Escape closes whatever single overlay is open (item 4's
-    // rule, applied uniformly to all four); with nothing open, it toggles
-    // the help overlay instead. Checked first and returns immediately so a
-    // frame that opens/closes an overlay doesn't also fall through to the
-    // click handling below.
+    // F9.6 item 5: Escape closes whatever single modal is open (item 4's
+    // rule, applied uniformly to all four — safe to close all of them at
+    // once since the group is mutually exclusive by construction); with
+    // nothing open, it toggles the help overlay instead. Checked first and
+    // returns immediately so a frame that opens/closes a modal doesn't also
+    // fall through to the click handling below.
     if rl.is_key_pressed(KeyboardKey::KEY_ESCAPE) {
-        if state.help_open {
-            state.help_open = false;
-        } else if state.overlay_open {
-            state.overlay_open = false;
-            state.dragging = Drag::None;
-        } else if state.account_open {
-            state.account_open = false;
-        } else if state.island_popup.is_some() {
-            state.island_popup = None;
+        if state.any_modal_open() {
+            state.close_all_modals();
         } else {
             state.help_open = true;
         }
@@ -741,12 +767,9 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         state.eraser_on = false;
     }
     if clicked && point_in(mouse, inventory_btn_rect()) {
-        state.overlay_open = !state.overlay_open;
-        if state.overlay_open {
-            state.account_open = false;
-            state.island_popup = None;
-            state.help_open = false;
-        }
+        let opening = !state.overlay_open;
+        state.close_all_modals();
+        state.overlay_open = opening;
         // Must return here: the footer button sits below `overlay_rect()`,
         // so without this the "click outside the panel closes it" check
         // further down would see this same click, land outside the panel,
@@ -757,18 +780,18 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         actions.set_lock = Some(!info.locked);
     }
     if clicked && point_in(mouse, account_btn_rect()) {
-        state.account_open = !state.account_open;
-        if state.account_open {
-            state.overlay_open = false;
-            state.island_popup = None;
-            state.help_open = false;
-        }
+        let opening = !state.account_open;
+        state.close_all_modals();
+        state.account_open = opening;
+        // Must return here too (mirrors the Colors button above): without
+        // it, this same click — outside `overlay_rect()` — falls through to
+        // the Account block below and immediately closes the overlay via
+        // its own outside-click-close check.
+        return actions;
     }
     if clicked && point_in(mouse, my_island_btn_rect()) {
         actions.open_own_island = true;
-        state.overlay_open = false;
-        state.account_open = false;
-        state.help_open = false;
+        state.close_all_modals();
     }
 
     // Name field: click to focus/blur (blur commits), Enter commits+blurs.
@@ -801,7 +824,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     // outside click (matching item 4's rule for the inventory overlay),
     // besides the Escape toggle handled at the top of this function.
     if state.help_open {
-        if clicked && (point_in(mouse, overlay_close_rect()) || !point_in(mouse, overlay_rect())) {
+        if modal_dismiss_clicked(mouse, clicked) {
             state.help_open = false;
         }
         return actions;
@@ -811,7 +834,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     // inventory overlay (only one can be open, enforced by the toggles
     // above) — handled and returned here before the inventory-overlay gate.
     if state.account_open {
-        if clicked && point_in(mouse, overlay_close_rect()) {
+        if modal_dismiss_clicked(mouse, clicked) {
             state.account_open = false;
             return actions;
         }
@@ -880,7 +903,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     // actually reach.
     if let Some(popup) = &state.island_popup {
         if popup.is_own {
-            if clicked && point_in(mouse, overlay_close_rect()) {
+            if modal_dismiss_clicked(mouse, clicked) {
                 state.island_popup = None;
                 return actions;
             }
@@ -943,16 +966,10 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
 
     // Overlay is modal: swallow all remaining input here so the map behind
     // it never sees clicks/drags while it's open (caller still checks
-    // `state.overlay_open` before touching camera/paint input).
-    if clicked && point_in(mouse, overlay_close_rect()) {
-        state.overlay_open = false;
-        return actions;
-    }
-    // F9.6 item 4: clicking anywhere outside the panel closes it too (not
-    // just the X button) — everything interactive inside the panel (close
-    // button, swatches, sliders) is checked individually below/above, so a
-    // click that matched none of them landed on the dimmed backdrop.
-    if clicked && !point_in(mouse, overlay_rect()) {
+    // `state.overlay_open` before touching camera/paint input). Closes on
+    // its own X button or anywhere outside the panel (F9.6 item 4), via the
+    // same `modal_dismiss_clicked` helper the other three modals use.
+    if modal_dismiss_clicked(mouse, clicked) {
         state.overlay_open = false;
         state.dragging = Drag::None;
         return actions;

@@ -444,15 +444,12 @@ fn main() {
         // held afterward. Cleared on release so ordinary map input resumes
         // for the NEXT press.
         if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
-            // F9.5 item 7 follow-up: only the OWN-island popup is a real
-            // modal now (backdrop, close button, link edit field) — a
-            // foreign island's hover tooltip has no interactive chrome to
-            // click-through onto, and blocking map input while it's up would
-            // break double-click-to-like/long-press-merge on the very
-            // island it's showing info for.
-            suppress_map_until_release = ui_state.overlay_open
-                || ui_state.account_open
-                || ui_state.island_popup.as_ref().is_some_and(|p| p.is_own);
+            // F9.5 item 7 follow-up: `any_modal_open` deliberately excludes
+            // the foreign-island hover tooltip — it has no interactive
+            // chrome to click-through onto, and blocking map input while
+            // it's up would break double-click-to-like/long-press-merge on
+            // the very island it's showing info for.
+            suppress_map_until_release = ui_state.any_modal_open();
         }
         if rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
             suppress_map_until_release = false;
@@ -460,7 +457,7 @@ fn main() {
 
         // HUD: snapshot server state, run widget input, apply resulting
         // reducer calls. Must run before the map-input blocks below so they
-        // can see `ui_state.overlay_open` (the overlay is modal).
+        // can see `ui_state.any_modal_open()`.
         let online = ctx.db.user().iter().filter(|u| u.online).count();
         let total = ctx.db.user().count() as usize;
         if let Some(me) = me {
@@ -596,11 +593,7 @@ fn main() {
         // island popup blocks map input; a foreign tooltip must not, or
         // hovering it would disable the very double-click/long-press
         // gestures it's showing info for.
-        let map_input_allowed = !suppress_map_until_release
-            && !ui_state.overlay_open
-            && !ui_state.account_open
-            && !ui_state.help_open
-            && !ui_state.island_popup.as_ref().is_some_and(|p| p.is_own);
+        let map_input_allowed = !suppress_map_until_release && !ui_state.any_modal_open();
 
         // Zoom toward the cursor (official raylib recipe): re-anchor
         // offset/target at the mouse before changing zoom so the world
@@ -884,13 +877,11 @@ fn main() {
                 // island's border doesn't flicker its popup open.
                 let gesturing = rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
                     || rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE);
-                // Own-island popup (opened via the "My Isle" footer button) is
-                // a modal too — without this, hovering a foreign tile would,
-                // after the delay, silently overwrite it with that island's
-                // info instead of leaving it up (mirrors the `is_own` exemption
-                // in the hover-out close check below).
-                let own_popup_open = ui_state.island_popup.as_ref().is_some_and(|p| p.is_own);
-                if !ui_state.overlay_open && !ui_state.account_open && !own_popup_open && !gesturing {
+                // `any_modal_open` covers My Isle too — without it, hovering
+                // a foreign tile would, after the delay, silently overwrite
+                // or close whichever modal was open (mirrors the `is_own`
+                // exemption in the hover-out close check below).
+                if !ui_state.any_modal_open() && !gesturing {
                     if let Some((hid, since)) = hover_target {
                         let already_open = ui_state.island_popup.as_ref().is_some_and(|p| p.island_id == id);
                         if hid == id && !already_open && since.elapsed() >= HOVER_OPEN_DELAY {
