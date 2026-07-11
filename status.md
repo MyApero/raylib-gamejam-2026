@@ -7,7 +7,46 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** Out-of-plan mobile bugfix, then all of F9.6 (items 1-8,
+**Current batch:** Author hand-test follow-up on F9.6 (own commit,
+`cc6a47b "fix: open colors"` — the author ran the client, found issues, and
+patched them directly rather than routing through the executor; logged here
+for the record, same as previous author-direct-edit batches).
+
+- **Real bug, VERIFIED by the author's own hand-test:** clicking the
+  "Colors" footer button opened the inventory overlay and then immediately
+  closed it again on the very same click. Cause: F9.6 item 4's new
+  "click outside `overlay_rect()` closes it" check ran unconditionally
+  after the footer-button handling above it — the footer sits below
+  `overlay_rect()` (y ~676-720 vs the panel's y 60-620), so the SAME click
+  that had just opened the overlay also matched "click landed outside the
+  panel" and closed it one line later, in the same `handle_input` call.
+  Fixed with an early `return actions;` right after the inventory-overlay
+  toggle, so opening it consumes the click instead of falling through to
+  the outside-click check. This was a real regression introduced by item 4
+  that a live test caught immediately — worth remembering for any future
+  "close on outside click" additions elsewhere in this file (the
+  account-overlay/help-overlay toggles already `return` for the same
+  reason, now consistently).
+- **Footer layout reverted, author-requested:** `FOOTER_H` back to 44 (the
+  single-row footer from before F9.6) now that Eraser and Lock are
+  icon-only buttons (`draw_eraser_icon`/`draw_lock_icon` — a two-tone
+  eraser glyph and a padlock with an open/closed shackle) instead of
+  text-label buttons, so they fit to the left of the name field on the
+  original single row. My item-1 change that grew the footer to 78px for a
+  second row is superseded by this.
+- **Constants re-tuned by hand-testing feel**, same live-tuning pattern as
+  `MERGE_DIST`/`MARGIN_GAP_TILES` earlier: `INTRO_DURATION` 1750ms -> 3000ms
+  (launch intro eases slower), `BORDERLESS_ZOOM_THRESHOLD` 5.0 -> 2.0 (tile
+  outlines now only drop out much further into far-zoom than the executor's
+  original guess).
+
+Not independently re-verified by me beyond a clean `cargo check` — this was
+the author's own hand-test-and-fix cycle on their machine, committed
+directly.
+
+---
+
+**Previous batch:** Out-of-plan mobile bugfix, then all of F9.6 (items 1-8,
 one combined batch at the author's request — normally 1-2 items/batch, but
 this was a coherent UX polish sweep and the author asked for the whole thing).
 
@@ -1606,8 +1645,11 @@ Implementation notes:
       heart icon, color-overlay ergonomics, help overlay, keyboard/right-
       drag camera, launch intro, borderless far zoom) — see the batch notes
       above. Eraser reducers VERIFIED live; everything else REASONED (both
-      targets build clean, web release build succeeds, package size fine)
-      — awaiting the author's hand-test before checking this off —
+      targets build clean, web release build succeeds, package size fine).
+      Author hand-testing IN PROGRESS: one real click-through bug found and
+      fixed (Colors button self-closing, see the batch above), footer
+      layout and two constants (`INTRO_DURATION`, `BORDERLESS_ZOOM_THRESHOLD`)
+      re-tuned — still awaiting the rest of the pass before checking this off —
 
 ## P2 (only if time remains)
 - [ ] F10 admin — [ ] F11 flying gift — [ ] F12 polish/bots/sounds —
