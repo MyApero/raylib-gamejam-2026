@@ -8,7 +8,7 @@ use std::collections::HashMap;
 /// with the client (as opposed to server-only tuning) lives in the
 /// `shared` crate and is re-exported here instead of hand-copied.
 mod constants {
-    pub const ISLAND_RADIUS: i32 = 13;
+    pub const ISLAND_RADIUS: i32 = 15;
     // Author-requested (F9.5): islands sit side by side, flat sides facing
     // flat sides (a perfect hex-of-hexes tiling — see
     // `geometry::SLOT_PLACEMENT_RADIUS`/`SLOT_U`/`SLOT_V`, which do the

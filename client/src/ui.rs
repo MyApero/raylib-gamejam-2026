@@ -6,7 +6,8 @@
 //! heights so the map viewport can size around them.
 
 use raylib::prelude::*;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::world;
@@ -120,6 +121,13 @@ pub struct UiState {
     /// nothing else is open (closed by Escape again, matching item 4's rule
     /// for every other overlay). Mutually exclusive with the other three.
     pub help_open: bool,
+    /// Author-requested: saturation/lightness is tied to each unlocked hue
+    /// individually, not shared across the whole Inventory page — dragging
+    /// the sliders while swatch A is selected must not visually shift every
+    /// other swatch in the grid. Populated lazily as the player tunes a
+    /// color; an absent entry means "still at the canonical default" (see
+    /// `default_sat`/`DEFAULT_VAL`).
+    swatch_hsl: HashMap<u16, (u8, u8)>,
 }
 
 /// One floating like/unlike pop — see `UiState::spawn_like_anim`.
@@ -173,6 +181,7 @@ impl UiState {
             link_edit_focused: false,
             eraser_on: false,
             help_open: false,
+            swatch_hsl: HashMap::new(),
         }
     }
 
@@ -290,6 +299,19 @@ impl UiState {
         self.last3.clear();
         self.last3.push_front(hue);
     }
+
+    /// A hue's own remembered sat/val, or the canonical default if the
+    /// player has never tuned that color.
+    fn tile_hsl(&self, hue: u16) -> (u8, u8) {
+        self.swatch_hsl.get(&hue).copied().unwrap_or((default_sat(), DEFAULT_VAL))
+    }
+
+    /// Called whenever a Saturation/Lightness drag lands while `hue` is the
+    /// selected swatch, so that tuning survives switching to another color
+    /// and back.
+    fn set_tile_hsl(&mut self, hue: u16, sat: u8, val: u8) {
+        self.swatch_hsl.insert(hue, (sat, val));
+    }
 }
 
 /// Snapshot of server-derived state the HUD needs to read this frame.
@@ -355,16 +377,23 @@ fn footer_bg() -> Rectangle {
     Rectangle::new(0.0, SCREEN_H - FOOTER_H, SCREEN_W, FOOTER_H)
 }
 
+/// Author-requested: icon-only (a "recenter"/geolocation glyph, see
+/// `draw_locate_icon`) rather than a text button — narrower than the old
+/// "Center" label, and the width it gave up shifted into `inventory_btn_rect`
+/// below (its right edge at 238 is unchanged; only its left edge moved).
 fn center_btn_rect() -> Rectangle {
-    Rectangle::new(8.0, SCREEN_H - FOOTER_H + 7.0, 54.0, 30.0)
+    Rectangle::new(8.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
 }
 
 fn last3_rect(i: usize) -> Rectangle {
-    Rectangle::new(70.0 + i as f32 * 34.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
+    Rectangle::new(46.0 + i as f32 * 34.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
 }
 
+/// Author-requested: widened using the width `center_btn_rect` gave up when
+/// it went icon-only — right edge (238) unchanged, so nothing to its right
+/// needed to move.
 fn inventory_btn_rect() -> Rectangle {
-    Rectangle::new(174.0, SCREEN_H - FOOTER_H + 7.0, 64.0, 30.0)
+    Rectangle::new(150.0, SCREEN_H - FOOTER_H + 7.0, 88.0, 30.0)
 }
 
 /// Author-requested: icon-only (see `draw_footer`), sitting directly left of
@@ -385,15 +414,18 @@ fn name_field_rect() -> Rectangle {
     Rectangle::new(318.0, SCREEN_H - FOOTER_H + 7.0, 150.0, 30.0)
 }
 
+/// Author-requested: trimmed from 80 to 60 wide (its label fits fine).
 fn account_btn_rect() -> Rectangle {
-    Rectangle::new(478.0, SCREEN_H - FOOTER_H + 7.0, 80.0, 30.0)
+    Rectangle::new(478.0, SCREEN_H - FOOTER_H + 7.0, 60.0, 30.0)
 }
 
 /// Author-requested: a footer button to open the caller's own island-info
 /// popup, replacing the old "click your own island" gesture (which just
 /// painted the cell it was released on, so the popup never actually showed).
+/// Trimmed from 72 to 56 wide and shifted left to sit right after the
+/// now-narrower Account button, alongside `account_btn_rect`'s own trim.
 fn my_island_btn_rect() -> Rectangle {
-    Rectangle::new(566.0, SCREEN_H - FOOTER_H + 7.0, 72.0, 30.0)
+    Rectangle::new(546.0, SCREEN_H - FOOTER_H + 7.0, 56.0, 30.0)
 }
 
 fn overlay_rect() -> Rectangle {
@@ -495,12 +527,41 @@ fn slider_hit(track: Rectangle) -> Rectangle {
     Rectangle::new(track.x, track.y - 10.0, track.width, track.height + 20.0)
 }
 
-/// Every swatch (footer last-3, inventory grid) is rendered at the CURRENT
-/// brush sat/val, not just the selected hue — dragging the sliders previews
-/// what every unlocked hue would look like at that sat/val, which is the
-/// whole point of comparing them side by side before picking one.
-fn swatch_color(hue: u16, info: &HudInfo) -> Color {
-    world::hsv_color(hue, info.brush.1, info.brush.2)
+/// The saturation every player starts with (`world::sat_cap(0)`) — the
+/// canonical reference sat for a tile's border and the "Colors" button
+/// rainbow, so both compare against the jam's baseline theme rather than
+/// whatever the sliders currently sit at. A plain fn (not a const) since
+/// `sat_cap` isn't `const fn`.
+fn default_sat() -> u8 {
+    world::sat_cap(0)
+}
+
+/// Canonical reference lightness paired with `default_sat` — matches the
+/// merge/level-up toast's flash swatch convention elsewhere in this file.
+const DEFAULT_VAL: u8 = 90;
+
+/// A tile's canonical color: the hue at the fixed reference sat/val, never
+/// affected by slider drags. Drawn as the tile's border so the player always
+/// has something fixed to compare the (possibly tuned) fill against.
+fn canonical_color(hue: u16) -> Color {
+    world::hsv_color(hue, default_sat(), DEFAULT_VAL)
+}
+
+/// Every swatch (footer last-3, inventory grid) is rendered at ITS OWN
+/// sat/val — tied per color, not shared across the whole Inventory page —
+/// except the one currently selected, which tracks the live (possibly
+/// mid-drag) brush so dragging the sliders previews that swatch in real
+/// time. See `UiState::tile_hsl`.
+fn swatch_color(hue: u16, state: &UiState, info: &HudInfo) -> Color {
+    if hue == state.base_hue {
+        // The selected tile's fill tracks the LIVE brush, hue included — so
+        // nudging the Hue slider (not just Saturation/Lightness) is visible
+        // on the tile itself, not just the slider's own gradient.
+        world::hsv_color(effective_hue(state, info), info.brush.1, info.brush.2)
+    } else {
+        let (sat, val) = state.tile_hsl(hue);
+        world::hsv_color(hue, sat, val)
+    }
 }
 
 /// The brush hue to treat as "current" for Hue-slider bookkeeping: an
@@ -529,6 +590,10 @@ fn color_hex(c: Color) -> String {
 }
 
 pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) -> Actions {
+    // Warm the "Colors" button's per-letter glyph-width cache — a no-op
+    // after the first call. Must happen here, before `begin_drawing`, since
+    // `measure_text` needs a live `RaylibHandle` (see `colors_letter_offsets`).
+    colors_letter_offsets(rl);
     if state.toast.as_ref().is_some_and(|t| t.shown_at.elapsed() >= TOAST_DURATION) {
         state.toast = None;
     }
@@ -608,11 +673,17 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             last3_clicked = Some(hue);
         }
     }
+    // Re-clicking the ALREADY-selected color is a no-op: forcing the brush
+    // back to that hue's exact value would silently wipe out any live Hue
+    // slider nudge (e.g. dialing in a merge) the player currently has going.
     if let Some(hue) = last3_clicked {
-        actions.set_brush = Some((hue, info.brush.1.min(info.sat_cap), info.brush.2));
-        state.base_hue = hue;
-        state.pending_select = Some(hue);
-        state.note_used_hue(hue);
+        if hue != state.base_hue {
+            let (sat, val) = state.tile_hsl(hue);
+            actions.set_brush = Some((hue, sat.min(info.sat_cap), val));
+            state.base_hue = hue;
+            state.pending_select = Some(hue);
+            state.note_used_hue(hue);
+        }
     }
     if clicked && point_in(mouse, inventory_btn_rect()) {
         state.overlay_open = !state.overlay_open;
@@ -817,8 +888,14 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     // sorted order so swatch indices (and thus `swatch_rect(i)`) line up
     // between the two.
     for (i, &hue) in sorted_hues(info).iter().enumerate() {
-        if clicked && point_in(mouse, swatch_rect(i)) {
-            actions.set_brush = Some((hue, info.brush.1.min(info.sat_cap), info.brush.2));
+        // Re-clicking the ALREADY-selected tile is a no-op — see the last-3
+        // click handler above for why (would wipe out a live Hue nudge).
+        if clicked && point_in(mouse, swatch_rect(i)) && hue != state.base_hue {
+            // Restore THIS color's own remembered sat/val (F-request: tied
+            // per color) rather than carrying over whatever the sliders were
+            // last left at from a different swatch.
+            let (sat, val) = state.tile_hsl(hue);
+            actions.set_brush = Some((hue, sat.min(info.sat_cap), val));
             state.base_hue = hue;
             state.pending_select = Some(hue);
             state.note_used_hue(hue);
@@ -856,12 +933,14 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 let v = slider_value(sat_slider_rect(), mouse.x, 100.0).min(info.sat_cap);
                 if v != info.brush.1 {
                     actions.set_brush = Some((info.brush.0, v, info.brush.2));
+                    state.set_tile_hsl(state.base_hue, v, info.brush.2);
                 }
             }
             Drag::Val => {
                 let v = slider_value(val_slider_rect(), mouse.x, 100.0);
                 if v != info.brush.2 {
                     actions.set_brush = Some((info.brush.0, info.brush.1, v));
+                    state.set_tile_hsl(state.base_hue, info.brush.1, v);
                 }
             }
             Drag::None => {}
@@ -1127,17 +1206,17 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
 
     let cb = center_btn_rect();
     d.draw_rectangle_rec(cb, Color::new(40, 40, 48, 255));
-    d.draw_text("Center", cb.x as i32 + 9, cb.y as i32 + 9, 10, Color::RAYWHITE);
+    draw_locate_icon(d, cb);
 
     for (i, &hue) in state.last3.iter().enumerate() {
         let r = last3_rect(i);
-        d.draw_rectangle_rec(r, swatch_color(hue, info));
+        d.draw_rectangle_rec(r, swatch_color(hue, state, info));
         d.draw_rectangle_lines_ex(r, 1.0, Color::new(200, 200, 200, 180));
     }
 
     let ib = inventory_btn_rect();
     d.draw_rectangle_rec(ib, Color::new(40, 40, 48, 255));
-    d.draw_text("Colors", ib.x as i32 + 6, ib.y as i32 + 7, 14, Color::RAYWHITE);
+    draw_colors_label(d, ib);
 
     // Author-requested: icon-only, left of the name field. The icon itself
     // now shows which TOOL is active (pencil = painting, eraser = erasing)
@@ -1171,6 +1250,66 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     let mb = my_island_btn_rect();
     d.draw_rectangle_rec(mb, Color::new(40, 40, 48, 255));
     d.draw_text("My Isle", mb.x as i32 + 6, mb.y as i32 + 9, 10, Color::RAYWHITE);
+}
+
+/// Author-requested: each letter of the footer's "Colors" button in its own
+/// hue, evenly spread around the wheel at the canonical reference sat/val
+/// (`default_sat`/`DEFAULT_VAL`) — a little rainbow that previews the jam's
+/// theme (unlocked colors) right on the button that opens the Inventory.
+const COLORS_LABEL: &str = "C o l o r s";
+const COLORS_LABEL_SIZE: i32 = 14;
+
+/// Per-letter x offsets for `COLORS_LABEL` (plus the string's total measured
+/// width, for centering), from the default font's actual glyph widths — a
+/// fixed per-letter step looked evenly spaced for most letters but left a
+/// visible gap after the narrow "l" (author-caught: rendered as "Col ors").
+/// Computed once (raylib's `measure_text` needs a live `RaylibHandle`, only
+/// available in `handle_input`, not here) and cached for `draw_colors_label`,
+/// which runs later during `begin_drawing`.
+static COLORS_LETTER_X: OnceLock<(Vec<i32>, i32)> = OnceLock::new();
+
+fn colors_letter_offsets(rl: &RaylibHandle) -> &'static (Vec<i32>, i32) {
+    COLORS_LETTER_X.get_or_init(|| {
+        let mut x = 0;
+        let mut offsets = Vec::with_capacity(COLORS_LABEL.len());
+        for ch in COLORS_LABEL.chars() {
+            offsets.push(x);
+            x += rl.measure_text(&ch.to_string(), COLORS_LABEL_SIZE);
+        }
+        (offsets, x)
+    })
+}
+
+fn draw_colors_label(d: &mut impl RaylibDraw, r: Rectangle) {
+    let n = COLORS_LABEL.len() as u16;
+    let cached = COLORS_LETTER_X.get();
+    let offsets = cached.map(|(o, _)| o.as_slice());
+    let total_w = cached.map_or(n as i32 * 9, |(_, w)| *w);
+    let start_x = r.x + (r.width - total_w as f32) / 2.0;
+    for (i, ch) in COLORS_LABEL.chars().enumerate() {
+        let hue = (i as u16) * 360 / n;
+        let color = canonical_color(hue);
+        let dx = offsets.and_then(|o| o.get(i)).copied().unwrap_or(i as i32 * 9);
+        d.draw_text(&ch.to_string(), (start_x + dx as f32) as i32, r.y as i32 + 7, COLORS_LABEL_SIZE, color);
+    }
+}
+
+/// Author-requested: geolocation-style "recenter" icon for the Center
+/// button — a ring with a filled center dot and four short compass ticks
+/// poking out past the ring, the standard "locate me" glyph from map apps.
+fn draw_locate_icon(d: &mut impl RaylibDraw, r: Rectangle) {
+    let cx = r.x + r.width / 2.0;
+    let cy = r.y + r.height / 2.0;
+    let icon_color = Color::new(235, 235, 240, 255);
+    let ring_r = 6.0;
+    d.draw_ring(Vector2::new(cx, cy), ring_r - 1.5, ring_r, 0.0, 360.0, 24, icon_color);
+    d.draw_circle(cx as i32, cy as i32, 2.0, icon_color);
+    let gap = 1.0;
+    let tick = 3.0;
+    d.draw_line_ex(Vector2::new(cx, cy - ring_r - gap), Vector2::new(cx, cy - ring_r - gap - tick), 2.0, icon_color);
+    d.draw_line_ex(Vector2::new(cx, cy + ring_r + gap), Vector2::new(cx, cy + ring_r + gap + tick), 2.0, icon_color);
+    d.draw_line_ex(Vector2::new(cx - ring_r - gap, cy), Vector2::new(cx - ring_r - gap - tick, cy), 2.0, icon_color);
+    d.draw_line_ex(Vector2::new(cx + ring_r + gap, cy), Vector2::new(cx + ring_r + gap + tick, cy), 2.0, icon_color);
 }
 
 /// Author-requested: default (paint-mode) icon for the paint/erase toggle —
@@ -1285,6 +1424,25 @@ fn draw_help_overlay(d: &mut impl RaylibDraw) {
     }
 }
 
+/// Author-requested: selection marker for an inventory tile — four small
+/// white "L" corner brackets (camera-reticle style) instead of a colored
+/// border, since the border is now spoken for by `canonical_color`. Hover
+/// uses the same shape at reduced alpha (pass a translucent/gray `color`).
+fn draw_crosshair(d: &mut impl RaylibDraw, r: Rectangle, color: Color) {
+    let len = 8.0;
+    let thick = 2.0;
+    let corners = [
+        (Vector2::new(r.x, r.y), Vector2::new(1.0, 1.0)),
+        (Vector2::new(r.x + r.width, r.y), Vector2::new(-1.0, 1.0)),
+        (Vector2::new(r.x, r.y + r.height), Vector2::new(1.0, -1.0)),
+        (Vector2::new(r.x + r.width, r.y + r.height), Vector2::new(-1.0, -1.0)),
+    ];
+    for (corner, dir) in corners {
+        d.draw_line_ex(corner, Vector2::new(corner.x + len * dir.x, corner.y), thick, color);
+        d.draw_line_ex(corner, Vector2::new(corner.x, corner.y + len * dir.y), thick, color);
+    }
+}
+
 fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vector2) {
     // Dim the world behind the modal.
     d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
@@ -1303,19 +1461,25 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse:
     let mut hovered_hex: Option<(Rectangle, String)> = None;
     for (i, &hue) in sorted_hues(info).iter().enumerate() {
         let r = swatch_rect(i);
-        let color = swatch_color(hue, info);
+        // Author-requested: the fill is the tuned "what we'll draw with"
+        // color (per-hue sat/val, live for the selected swatch), while the
+        // border is always the untouched canonical hue — comparing the two
+        // is how the player sees what a tuned swatch actually shifted from.
+        let color = swatch_color(hue, state, info);
         d.draw_rectangle_rec(r, color);
+        d.draw_rectangle_lines_ex(r, 5.0, canonical_color(hue));
         // Compare against the Hue slider's anchor, not the live (possibly
         // nudged) brush hue — otherwise dragging the slider away from 0
         // makes every swatch look unselected even though you're still
         // fine-tuning the same one.
         let selected = hue == state.base_hue;
-        d.draw_rectangle_lines_ex(
-            r,
-            if selected { 3.0 } else { 1.0 },
-            if selected { Color::GOLD } else { Color::new(200, 200, 200, 160) },
-        );
-        if point_in(mouse, r) {
+        let hovered = point_in(mouse, r);
+        if selected {
+            draw_crosshair(d, r, Color::WHITE);
+        } else if hovered {
+            draw_crosshair(d, r, Color::new(255, 255, 255, 110));
+        }
+        if hovered {
             hovered_hex = Some((r, color_hex(color)));
         }
     }
