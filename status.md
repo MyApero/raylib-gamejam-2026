@@ -7,7 +7,45 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F9.5 item 7 — island info on hover (decision 17), plus one
+**Current batch:** F9.5 item 8 — Safari (macOS) trackpad scroll zooms in
+huge, uncontrollable steps. The game's zoom step is `wheel_delta * 0.1`
+(`client/src/main.rs`/`bin/web.rs`, unchanged), fed by whatever raw
+`deltaY` the browser reports — Chrome/Firefox report modest per-tick deltas
+for a trackpad scroll, Safari reports much larger raw magnitudes for the
+same physical gesture (a known cross-browser wheel-event quirk). Emscripten's
+own GLFW3 wheel shim (prebuilt, not part of this repo) only does generic
+`deltaMode` scaling, no magnitude clamp.
+
+**Fix, JS layer only (`client/web/game.html`)**: a capture-phase `wheel`
+listener on the canvas — capture always runs before Emscripten's own
+bubble-phase listener, regardless of script load order — normalizes
+`deltaMode` 1/2 (line/page) to an approximate pixel scale, clamps the
+resulting magnitude to `MAX_WHEEL_DELTA` (120), and re-dispatches a
+synthetic replacement event for Emscripten to consume instead of the raw
+one. Guarded against re-triggering itself on its own re-dispatch via
+`e.isTrusted` (synthetic/script-dispatched events are always untrusted; real
+user input never is). Also added `preventDefault` on Safari's proprietary
+`gesturestart`/`gesturechange`/`gestureend` (a genuine trackpad pinch, as
+opposed to a two-finger scroll) so it doesn't ALSO zoom the whole browser
+page — a no-op on every other browser, which doesn't fire these.
+
+**VERIFIED** mechanically via a scripted Playwright session against the
+served `client/web`: real (CDP-injected, trusted) wheel events —
+`page.mouse.wheel(0, 3000)` and `(0, -3000)`, standing in for a Safari-sized
+trackpad delta — arrive at the canvas re-dispatched at exactly ±120 (the
+clamp), while an ordinary `page.mouse.wheel(0, 100)` passes through
+completely unchanged (same `deltaY`, still the original trusted event, not
+rewritten at all). Screenshotted before/after one huge event: the camera
+zooms by roughly one normal step, not a jarring jump. Could **not** verify
+against actual Safari (no Mac available in this environment) — this is
+REASONED against the documented deltaY-magnitude discrepancy and mechanically
+verified for the clamp logic itself, not confirmed against the real browser
+it targets. The author hand-testing on an actual Mac is the real
+verification here.
+
+---
+
+**Previous batch:** F9.5 item 7 — island info on hover (decision 17), plus one
 author-reported bug caught while working the same area: other players'
 cursors vanished ~3s after they stopped moving.
 

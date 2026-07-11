@@ -48,6 +48,64 @@
       Module.printErr = Module.print;
     </script>
     <script>
+      // F9.5 item 8: Safari (macOS) trackpad scroll zooms in huge,
+      // uncontrollable steps. The game's zoom step is `wheel_delta * 0.1`
+      // (client/src/main.rs / bin/web.rs), fed by whatever raw `deltaY` the
+      // browser reports through Emscripten's GLFW3 wheel handling — Chrome
+      // and Firefox report modest per-tick deltas for a trackpad scroll,
+      // but Safari reports MUCH larger raw deltaY magnitudes for the same
+      // physical gesture (a longstanding cross-browser wheel-event quirk,
+      // not an Emscripten bug), so the same zoom formula produces a huge
+      // jump there. Emscripten's own GLFW3 shim is prebuilt (not part of
+      // this repo) and applies only generic deltaMode scaling, not a
+      // magnitude clamp — so this intercepts the RAW event on the canvas in
+      // the capture phase (which always runs before Emscripten's own
+      // bubble-phase listener, regardless of script load order), normalizes
+      // by `deltaMode`, clamps the per-event magnitude, and re-dispatches a
+      // synthetic replacement for Emscripten to consume instead. The
+      // `isTrusted` check is what stops that re-dispatch from looping back
+      // into this same handler (synthetic events are always untrusted, real
+      // user input never is).
+      (function () {
+        var canvas = document.getElementById('canvas');
+        // Empirically generous for a normal Chrome/Firefox per-tick delta
+        // (~100-120 at deltaMode 0) while still clamping Safari's outsized
+        // trackpad values down to roughly the same effective step.
+        var MAX_WHEEL_DELTA = 120;
+        canvas.addEventListener('wheel', function (e) {
+          if (!e.isTrusted) return; // our own re-dispatch, let it through as-is
+          var dy = e.deltaY;
+          // DOM_DELTA_LINE (1) / DOM_DELTA_PAGE (2) -> approximate pixels,
+          // matching what most browsers already assume at deltaMode 0.
+          if (e.deltaMode === 1) dy *= 16;
+          else if (e.deltaMode === 2) dy *= 100;
+          var sign = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+          var clamped = sign * Math.min(Math.abs(dy), MAX_WHEEL_DELTA);
+          if (clamped === e.deltaY && e.deltaMode === 0) return; // already normalized, nothing to rewrite
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          canvas.dispatchEvent(new WheelEvent('wheel', {
+            deltaY: clamped,
+            deltaMode: 0,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            bubbles: true,
+            cancelable: true,
+          }));
+        }, { capture: true, passive: false });
+
+        // Safari's proprietary two-finger trackpad PINCH (distinct from a
+        // two-finger scroll, which is the 'wheel' path above) fires
+        // gesturestart/gesturechange/gestureend instead, and left
+        // unhandled would zoom the whole browser page/viewport rather than
+        // the game camera. No other browser fires these, so this is a
+        // no-op elsewhere.
+        ['gesturestart', 'gesturechange', 'gestureend'].forEach(function (evt) {
+          canvas.addEventListener(evt, function (e) { e.preventDefault(); }, { passive: false });
+        });
+      })();
+    </script>
+    <script>
       // SpacetimeDB WebSocket client (v1.json.spacetimedb). The socket and
       // its event handlers live here in JS; the wasm game loop pulls
       // everything through stdb.frame() once per frame (a mailbox), because

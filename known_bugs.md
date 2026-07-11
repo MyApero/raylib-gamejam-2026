@@ -24,6 +24,10 @@ point lookups by packed cell id, cost now proportional to in-view cells only;
 see status.md)
 
 - [ ] Scroll on macos (safari) is bugged
+(F9.5 item 8: game.html now intercepts and clamps wheel deltas at the JS
+layer — see status.md. Left unchecked: fixed by reasoning about the known
+Safari deltaY quirk and verified the clamp mechanically in Chromium, but the
+author has no Mac to hand-test the actual browser this targets)
 
 - [x] Ilot info should only be hover
 (F9.5 item 7 / decision 17: popup now opens after a 200ms continuous hover
