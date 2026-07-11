@@ -264,6 +264,10 @@ fn main() {
     // so only rows inserted *after* that point are treated as "new".
     let mut known_inventory_ids: HashSet<u64> = HashSet::new();
     let mut inventory_seeded = false;
+    // F9 level-up toast: `None` until the first frame `me` is known, so
+    // connecting at, say, level 3 doesn't fire a spurious "level up" toast —
+    // mirrors `inventory_seeded`'s seed-then-diff pattern above.
+    let mut last_level: Option<u64> = None;
 
     while !rl.window_should_close() {
         if let Err(e) = ctx.frame_tick() {
@@ -321,6 +325,13 @@ fn main() {
             let xp = user.as_ref().map_or(0, |u| u.xp);
             let locked = user.as_ref().is_some_and(|u| u.locked);
             let level = world::level_of(xp);
+            // F9 level-up feedback: fire once per actual increase, not on
+            // the first frame `me` becomes known (that would just be
+            // reporting whatever level the player already was).
+            if last_level.is_some_and(|prev| level > prev) {
+                ui_state.show_levelup_toast(level, world::sat_cap(level), hue);
+            }
+            last_level = Some(level);
             ui_state.sync_name_once(user.as_ref().and_then(|u| u.name.as_ref()));
             // Author-caught: the Like button looked unresponsive because the
             // popup's `likes`/`already_liked` were a one-time snapshot from
@@ -396,6 +407,13 @@ fn main() {
             }
             if let Some(island_id) = actions.unlike_island {
                 let _ = ctx.reducers.unlike_island(island_id);
+            }
+            if let Some(rate_id) = actions.set_island_link {
+                let _ = ctx.reducers.set_island_link(rate_id);
+            }
+            if let Some((island_id, rate_id)) = actions.click_link {
+                open_url(&format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"));
+                let _ = ctx.reducers.click_link(island_id);
             }
             // Author-requested: footer button replacing the old "click your
             // own island" gesture, which just painted instead of opening

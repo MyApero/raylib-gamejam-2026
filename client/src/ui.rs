@@ -96,6 +96,11 @@ pub struct UiState {
     /// without recomputing a world->screen projection every frame. Pruned in
     /// `handle_input` (same place `toast` expires), drawn in `draw`.
     like_anims: Vec<LikeAnim>,
+    /// F9: digits-only edit buffer for the island-info popup's "set your
+    /// link" field, seeded from the current `itch_rate_id` (if any) each time
+    /// the popup opens on the caller's own island — see `open_island_info`.
+    link_edit_input: String,
+    link_edit_focused: bool,
 }
 
 /// One floating like/unlike pop — see `UiState::spawn_like_anim`.
@@ -141,6 +146,8 @@ impl UiState {
             copy_clicked_at: None,
             island_popup: None,
             like_anims: Vec::new(),
+            link_edit_input: String::new(),
+            link_edit_focused: false,
         }
     }
 
@@ -157,6 +164,11 @@ impl UiState {
     pub fn open_island_info(&mut self, info: IslandInfo) {
         self.overlay_open = false;
         self.account_open = false;
+        // F9: seed the link edit field from the current value every time the
+        // popup (re)opens on your own island, so editing starts from what's
+        // actually set rather than whatever was last typed.
+        self.link_edit_input = if info.is_own { info.link_id.map_or(String::new(), |id| id.to_string()) } else { String::new() };
+        self.link_edit_focused = false;
         self.island_popup = Some(info);
     }
 
@@ -183,6 +195,19 @@ impl UiState {
             shown_at: Instant::now(),
         });
         self.note_used_hue(hue);
+    }
+
+    /// F9 level-up feedback. `current_hue` just drives the toast's flash
+    /// swatch (reusing `Toast`'s existing rendering) — a level-up has no
+    /// color of its own the way a merge does. The Saturation slider's own
+    /// max already grows on its own every frame (`HudInfo::sat_cap`), so this
+    /// toast is the only piece that needs an explicit trigger.
+    pub fn show_levelup_toast(&mut self, level: u64, sat_cap: u8, current_hue: u16) {
+        self.toast = Some(Toast {
+            text: format!("Level up! Lv{level} — saturation cap now {sat_cap}%"),
+            hue: current_hue,
+            shown_at: Instant::now(),
+        });
     }
 
     /// Seeds the name field from the server row exactly once. After that the
@@ -248,6 +273,13 @@ pub struct Actions {
     pub unlike_island: Option<u32>,
     /// Footer button: open the caller's own island-info popup.
     pub open_own_island: bool,
+    /// F9: set/replace the caller's own island's itch.io rate id, from the
+    /// popup's link edit field.
+    pub set_island_link: Option<u32>,
+    /// F9: a foreign island's link row was clicked — `(island_id, rate_id)`.
+    /// The caller opens the URL AND fires `click_link` for XP; both use the
+    /// same click, see the popup's link-row hit test.
+    pub click_link: Option<(u32, u32)>,
 }
 
 fn footer_bg() -> Rectangle {
@@ -351,6 +383,25 @@ fn like_btn_rect() -> Rectangle {
     // row drawn at `o.y + 132` (font height ~16px). Moved below it with a
     // clear gap.
     Rectangle::new(o.x + 20.0, o.y + 170.0, 160.0, 36.0)
+}
+
+/// F9: the "Link: itch.io rate #<id>" row on a FOREIGN island's popup, when
+/// a link is actually set — sized to roughly cover the text drawn at the
+/// same position (`draw_island_popup`) so the whole row reads as clickable.
+fn link_row_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 128.0, 300.0, 22.0)
+}
+
+/// F9: own-island popup only — numeric input for the itch.io rate id.
+fn link_edit_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 180.0, 200.0, 32.0)
+}
+
+fn link_set_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 230.0, o.y + 180.0, 100.0, 32.0)
 }
 
 fn rerank_banner_rect() -> Rectangle {
@@ -566,6 +617,43 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 actions.like_island = Some(popup.island_id);
             }
         }
+        // F9: clicking a set link on a FOREIGN island's popup opens it (the
+        // caller does the actual URL-opening — this module stays free of
+        // that platform-specific call) and fires `click_link` for XP, both
+        // off the same click.
+        if !popup.is_own {
+            if let Some(rate_id) = popup.link_id {
+                if clicked && point_in(mouse, link_row_rect()) {
+                    actions.click_link = Some((popup.island_id, rate_id));
+                }
+            }
+        }
+        // F9: own-island link editing — digits only (it's a numeric itch.io
+        // submission id), same Ctrl+V-friendly typing as the Account
+        // overlay's token import field.
+        if popup.is_own {
+            let field = link_edit_rect();
+            if clicked {
+                state.link_edit_focused = point_in(mouse, field);
+            }
+            if state.link_edit_focused {
+                while let Some(c) = rl.get_char_pressed() {
+                    if c.is_ascii_digit() && state.link_edit_input.len() < 10 {
+                        state.link_edit_input.push(c);
+                    }
+                }
+                if rl.is_key_pressed(KeyboardKey::KEY_BACKSPACE) {
+                    state.link_edit_input.pop();
+                }
+            }
+            let submit = (clicked && point_in(mouse, link_set_btn_rect()))
+                || (state.link_edit_focused && rl.is_key_pressed(KeyboardKey::KEY_ENTER));
+            if submit {
+                if let Ok(id) = state.link_edit_input.trim().parse::<u32>() {
+                    actions.set_island_link = Some(id);
+                }
+            }
+        }
         return actions;
     }
 
@@ -644,7 +732,7 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     } else if state.account_open {
         draw_account_overlay(d, state, info);
     } else if let Some(popup) = &state.island_popup {
-        draw_island_popup(d, popup);
+        draw_island_popup(d, state, popup);
     }
     if let Some(toast) = &state.toast {
         draw_toast(d, toast, info);
@@ -657,7 +745,7 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
 
 /// F8: island-info popup — creator, likes, age, link (if set), and a
 /// Like/Unlike toggle button (hidden for your own island).
-fn draw_island_popup(d: &mut impl RaylibDraw, popup: &IslandInfo) {
+fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInfo) {
     d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
 
     let o = overlay_rect();
@@ -672,15 +760,37 @@ fn draw_island_popup(d: &mut impl RaylibDraw, popup: &IslandInfo) {
     d.draw_text(&format!("Owner: {}", popup.owner_label), o.x as i32 + 20, o.y as i32 + 54, 16, Color::RAYWHITE);
     d.draw_text(&format!("Likes: {}", popup.likes), o.x as i32 + 20, o.y as i32 + 80, 16, Color::RAYWHITE);
     d.draw_text(&format!("Created {}", popup.age_label), o.x as i32 + 20, o.y as i32 + 106, 16, Color::LIGHTGRAY);
-    let link_label = match popup.link_id {
-        Some(id) => format!("Link: itch.io rate #{id}"),
-        None => "Link: not set".to_string(),
-    };
-    d.draw_text(&link_label, o.x as i32 + 20, o.y as i32 + 132, 16, Color::LIGHTGRAY);
 
     if popup.is_own {
-        d.draw_text("(this is your island)", o.x as i32 + 20, o.y as i32 + 170, 14, Color::GRAY);
+        // F9: own island — show the current link plus an edit field/button
+        // instead of the foreign-island Like button.
+        let link_label = match popup.link_id {
+            Some(id) => format!("Your link: itch.io rate #{id}"),
+            None => "Your link: not set".to_string(),
+        };
+        d.draw_text(&link_label, o.x as i32 + 20, o.y as i32 + 132, 16, Color::LIGHTGRAY);
+        d.draw_text("Set your itch.io rate id:", o.x as i32 + 20, o.y as i32 + 162, 14, Color::LIGHTGRAY);
+
+        let field = link_edit_rect();
+        d.draw_rectangle_rec(field, Color::new(28, 28, 34, 255));
+        d.draw_rectangle_lines_ex(field, 1.0, if state.link_edit_focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
+        let shown = if state.link_edit_input.is_empty() && !state.link_edit_focused { "e.g. 123456" } else { &state.link_edit_input };
+        d.draw_text(shown, field.x as i32 + 6, field.y as i32 + 7, 14, Color::RAYWHITE);
+
+        let sb = link_set_btn_rect();
+        d.draw_rectangle_rec(sb, Color::new(40, 40, 48, 255));
+        d.draw_text("Set", sb.x as i32 + 34, sb.y as i32 + 9, 14, Color::RAYWHITE);
     } else {
+        // F9: a set link reads as clickable (distinct color + hint text);
+        // unset stays plain, matching the row's hit test in `handle_input`
+        // only firing when `link_id` is `Some`.
+        let link_label = match popup.link_id {
+            Some(id) => format!("Link: itch.io rate #{id} (click to open)"),
+            None => "Link: not set".to_string(),
+        };
+        let link_color = if popup.link_id.is_some() { Color::new(120, 180, 255, 255) } else { Color::LIGHTGRAY };
+        d.draw_text(&link_label, o.x as i32 + 20, o.y as i32 + 132, 16, link_color);
+
         // Author-requested: clicking again while already liked now undoes
         // it, so the button stays clickable (and its label doubles as the
         // hint) in both states instead of going inert once liked.

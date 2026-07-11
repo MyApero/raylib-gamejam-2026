@@ -86,6 +86,8 @@ pointing here).
 | `XP_MERGE_NEW` | 25 | XP per newly unlocked hue |
 | `XP_LIKE` | 10 | XP to island owner per like (P1) |
 | `XP_LINK_CLICK` | 5 | XP to island owner per link click (P1) |
+| `XP_TIME` | 1 | passive XP per `TIME_XP_PERIOD_SECS` tick, to every present user (P1, F9) |
+| `TIME_XP_PERIOD_SECS` | 60 | time-XP tick interval (P1, F9) |
 | `LEVEL_XP` | 100 | level = xp / LEVEL_XP |
 | `SAT_CAP(level)` | `min(100, 40 + 3*level)` | max brush saturation, percent |
 | `LONG_PRESS_MS` | 400 | tile-merge hold duration |
@@ -364,7 +366,65 @@ Verify:
   private window, import token → same account, `SELECT COUNT(*) FROM user` unchanged.
 - Reset: inventory has exactly 1 new hue after, XP 0, island art intact.
 
+## F6.5 — Pre-submission bug sweep
+
+**Goal**: clear the still-open items in `known_bugs.md` before F7 locks in the
+submitted build. Time-box this hard — per the existing rule ("P1/P2 are cut, never
+F1–F7"), the same applies here: if any item below risks slipping F7 past
+2026-07-11, cut it and note it as a known limitation in `WORK.md` instead of blocking
+submission on it.
+
+Already resolved (code inspected, both present as of the F6 commit) — check these off
+in `known_bugs.md`, no action needed: merge-toast identity leak (`player_label` in
+`client/src/main.rs` never falls back to the identity hex, only a name or "another
+player" — decision 11); token paste via Ctrl+V/Cmd+V in the import field
+(`client/src/ui.rs` around the `import_focused` block); `reset_account` now rolls a
+fresh hue via `ctx.rng().gen_range(0..360)` instead of the deterministic per-identity
+`start_hue` (`server/src/lib.rs`, `reset_account`).
+
+Tasks:
+1. **Recent-colors seeding**: the starting hue (added to `inventory` at
+   `client_connected`, `obtained_with: None`) never enters `last3` — a fresh player's
+   swatch row is empty even though they're actively painting with that hue. `last3` is
+   currently only pushed on an explicit swatch click or a merge-toast nudge
+   (`client/src/ui.rs`). Seed it with the current brush hue on the first frame after
+   connecting, in both clients.
+2. **Island placement**: author-reported "ilots aren't correctly placed in the world."
+   Investigated here: `slot_coords`/`slot_center`/`cube_round`/`axial_to_world` in
+   `client/src/world.rs` are bit-for-bit identical to `server/src/lib.rs`'s `geometry`
+   module today, and `SLOT_SPACING`(29) vs `ISLAND_RADIUS`(13) leaves the intended ~3-tile
+   gap with no overlap — geometry-formula drift is ruled out as of the current code. The
+   report predates the F2/F3/F4/F6 client rewrites, so it may already be stale; re-test
+   fresh with 3+ islands before investigating further. If it still reproduces, look at
+   render-only concerns next (culling pop-in at `main.rs`'s `in_view` padding, or a
+   stale/duplicate subscription row) rather than the shared geometry math.
+3. **FPS at scale** (40 fps @ 10 islands, 30 fps @ 18 — author's ceiling for the jam):
+   root cause found by inspection, not yet fixed. Both clients rebuild a full
+   `HashMap` from *every* `island_cell` row in the world on *every frame*
+   (`client/src/main.rs:593-594`, `client/src/bin/web.rs:958-959`), regardless of view
+   culling — cost scales linearly with total painted cells across all islands (547/island),
+   which matches the reported degradation shape exactly. Fix: only rebuild from cells
+   whose island is `in_view` (view culling already exists and runs first, at
+   `main.rs:634-640` / the web equivalent — the cell-color map just isn't using it yet),
+   or maintain the map incrementally from the subscription's insert/update/delete
+   events instead of a per-frame full collect. Apply the same fix to both clients so web
+   (the judged target) actually benefits, not just native (what the author hand-tests).
+
+Files: `client/src/main.rs`, `client/src/bin/web.rs`, `client/src/ui.rs`. Server:
+read-only unless task 2's re-test finds a genuine server-side placement bug.
+
+Verify: author hand-tests each on the native client per the existing protocol (F2's
+ground rule — don't use the raylib GUI as an automated smoke test, but this is exactly
+the kind of change that needs a human looking at the screen); record
+VERIFIED/REASONED in `status.md`; re-check `du`/build still clean. Check off the
+corresponding line in `known_bugs.md` as each lands.
+
 ## F7 — Deployment + itch.io submission package
+
+> **2026-07-11 status check**: F7 has not started — every item in its `status.md`
+> checklist is still unchecked, even though F8 (P1) already shipped ahead of it. F7 is
+> the single blocking task for tomorrow's deadline (2026-07-12 18:00 UTC); after F6.5,
+> do this next, before any further P1/P2 work.
 
 **Goal**: publicly playable from itch.io before the deadline. DO THIS THE MOMENT F5/F6
 LAND — it de-risks the wss/itch path; everything after is redeploys.
@@ -488,3 +548,40 @@ the game that was submitted. Consequences:
     every participant's inventory becomes the union (`spacetime sql`: identical hue
     sets per participant), XP granted exactly once (re-form the hexagon → no new XP,
     `hexa_reward` row count unchanged).
+
+---
+
+# Backlog — ideas not yet scheduled
+
+Raw notes live in `other_ideas.md` and `known_bugs.md`; triaged here so plan.md stays
+the single source of truth. None of these are P0/P1 — pick up only after F7 is
+submitted, and only if the freeze window rule still allows a redeploy.
+
+- **Dead-player cleanup** (from `known_bugs.md`): a player who connects, gets an
+  island, and disconnects without a single paint/merge action should be reaped after
+  ~5 minutes idle — remove their `user`, `island`, and (empty) `island_cell` rows, so
+  the slot frees up and the visible player count doesn't inflate from drive-bys. Needs
+  a scheduled reducer plus a cheap "no action taken" definition (simplest: that
+  island's `island_cell` row count is 0). Natural fit alongside F9's other scheduled
+  reducer (time-XP), or its own small feature after F9.
+- **Center-island identity** ("bot drawing R and a heart" / "should also be a
+  battlefield"): partially live already — `heart-bot` and `hexagon-bot` (see
+  `WORK.md`) trace curves as always-on players, just not on the admin's own slot-0
+  island specifically. Making the actual center island contested territory conflicts
+  with decision 3 (a player paints only their own island) unless slot 0 is
+  special-cased — needs an explicit author ruling before it's scheduled as a feature.
+- **"Outside is only margin, for big drawings"**: already true by design (the geometry
+  spec's margin definition + decision 3) — no action needed, idea already satisfied by
+  F1.
+- **XP-scaled islands** ("more XP gives more islands?"): would break the fixed
+  decision "one island per player" (#10) — a real feature with real scope (multi-slot
+  assignment per player, per-island brush switching, new UI). Needs an explicit author
+  ruling, not assumed here; do not implement ad hoc.
+- **Cursor scales with zoom**: rendering polish — draw other players' cursors at a
+  minimum on-screen size so they stay legible at high zoom instead of shrinking to a
+  dot. Small P2 rendering task; pairs naturally with F13's snap-to-vertex cursor
+  rendering.
+- **Hover-to-see-island-info**: superseded. F8 shipped click-to-open (on a foreign
+  island) plus double-click-to-like instead of hover, after the author picked that
+  gesture explicitly during F8 hand-testing (see `status.md`'s F8 notes). Not
+  reopening unless the click version turns out to feel wrong in practice.

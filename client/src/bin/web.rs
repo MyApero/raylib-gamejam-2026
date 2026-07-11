@@ -583,6 +583,10 @@ struct State {
     ui_state: ui::UiState,
     known_inventory_ids: HashSet<u64>,
     inventory_seeded: bool,
+    /// F9 level-up toast: mirrors `main.rs`'s `last_level` — `None` until the
+    /// first frame `me` is known, so connecting already at some level
+    /// doesn't fire a spurious toast.
+    last_level: Option<u64>,
     long_press: Option<LongPress>,
     /// Author-requested: mirrors `main.rs`'s `pending_info_click` — a clean
     /// single-click on a foreign island, held pending for
@@ -708,6 +712,11 @@ fn frame(state: &mut State) {
         let xp = user.map_or(0, |u| u.xp);
         let locked = user.is_some_and(|u| u.locked);
         let level = world::level_of(xp);
+        // F9 level-up feedback: mirrors `main.rs` exactly.
+        if state.last_level.is_some_and(|prev| level > prev) {
+            state.ui_state.show_levelup_toast(level, world::sat_cap(level), hue);
+        }
+        state.last_level = Some(level);
         state.ui_state.sync_name_once(user.and_then(|u| u.name.as_ref()));
         // Author-caught: mirrors `main.rs`'s live-refresh so the Like button
         // reflects the reducer's result immediately, not only after a page
@@ -769,6 +778,19 @@ fn frame(state: &mut State) {
         }
         if let Some(island_id) = actions.unlike_island {
             call_reducer("unlike_island", serde_json::json!([island_id]));
+        }
+        if let Some(rate_id) = actions.set_island_link {
+            call_reducer("set_island_link", serde_json::json!([rate_id]));
+        }
+        if let Some((island_id, rate_id)) = actions.click_link {
+            // plan.md F9: web opens the rate page via `window.open`, unlike
+            // native's `OpenURL` — JSON-escaped the same way `call_reducer`
+            // escapes its args, though `rate_id` is server-validated numeric
+            // so this is defense in depth rather than a real injection risk.
+            let url = format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}");
+            let js_url = serde_json::to_string(&url).unwrap();
+            run_js(&format!("window.open({js_url}, '_blank')"));
+            call_reducer("click_link", serde_json::json!([island_id]));
         }
         // Author-requested: footer button replacing the old "click your own
         // island" gesture, which just painted instead of opening the popup.
@@ -1129,6 +1151,7 @@ fn main() {
         ui_state: ui::UiState::new(),
         known_inventory_ids: HashSet::new(),
         inventory_seeded: false,
+        last_level: None,
         long_press: None,
         pending_info_click: None,
         pinch: None,

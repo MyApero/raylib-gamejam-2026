@@ -7,7 +7,91 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** a third round of author feedback on F8 — a schema-additive
+**Current batch:** F9 (island links + XP economy) implemented in one batch —
+schema-additive server change (two reducers, one new table, one new
+repeating scheduled reducer, no data wipe of existing tables) plus client
+work (native and web share `ui.rs`, kept identical as always).
+
+Server (`server/src/lib.rs`):
+1. **`set_island_link(rate_id: u32)`** — caller's own island's
+   `itch_rate_id` is set/replaced (decision 14: just the numeric itch
+   submission id). **VERIFIED** live via `spacetime call hexmerge -s local
+   set_island_link 12345` against the CLI's own auto-provisioned identity,
+   then `spacetime sql`: the owning island's `itch_rate_id` shows `(some =
+   12345)`.
+2. **`click_link(island_id: u32)`** — new `island_link_click` table (exact
+   `IslandLike` dedupe pattern: one row per (island, clicker), checked in
+   the reducer rather than a DB-level compound unique) credits the owner
+   `XP_LINK_CLICK` once per clicker. **VERIFIED** three paths live via
+   `spacetime call`: unknown island → `"unknown island"`; an island with no
+   link set → `"island has no link set"`; the caller's own (linked) island →
+   `"cannot credit your own link click"` (self-click guard, mirrors
+   `like_island`'s). The success + dedupe path (second click from the SAME
+   clicker grants no further XP) is **REASONED** only — it's a straight
+   copy of `like_island`'s already-live dedupe logic, and exercising the
+   success path from the CLI would need a second distinct identity, which
+   isn't practical to script here; two-client hand-testing should upgrade
+   this to VERIFIED.
+3. **Time XP**: new `time_xp_schedule` (repeating, `TIME_XP_PERIOD_SECS` =
+   60s, lazy-seeded in `client_connected` exactly like `rerank_warn_schedule`)
+   drives `time_xp_tick`, which grants `XP_TIME` (1) to every `online` user
+   whose `last_seen` is within the same presence window used everywhere else
+   (cursor visibility, merge eligibility) — plan.md's own wording ("users
+   with fresh last_seen") ties it to that, not just "connected". **REASONED**:
+   the schedule row inserts and the reducer's self-only-caller guard mirrors
+   `rerank_warn`/`rerank_fire` exactly; the actual 60s tick firing wasn't
+   sat through live in this batch (would need a longer-lived local session
+   than this batch's CLI probing). Confirm with `spacetime sql hexmerge -s
+   local "SELECT xp FROM user"` climbing by 1/minute for an idle-but-online
+   connected client during hand-testing.
+
+Client (`client/src/ui.rs`, shared by native + web):
+4. **Island-info popup**: own-island view now shows the current link plus a
+   digits-only edit field + "Set" button (seeded from the current
+   `itch_rate_id` each time the popup opens, Enter or the button submits);
+   foreign-island view renders a set link in a distinct color with a
+   "(click to open)" hint, wired to a new `link_row_rect()` hit test that
+   only fires when a link is actually set. **REASONED** (code-reviewed,
+   builds clean on both `cargo build -p client --bin client` and
+   `./build-web.sh`) — not run through the actual GUI this batch, per the
+   standing rule that the author drives native hand-testing themselves.
+5. **Link click → open URL**: native fires `raylib::open_url` (from
+   `raylib::prelude`) with the itch rate URL directly; web runs
+   `window.open(url, '_blank')` via the existing `run_js`/JSON-escaping
+   pattern (mirrors `call_reducer`'s escaping, even though `rate_id` is
+   server-typed numeric so injection isn't really reachable here). Both
+   fire `click_link` alongside the URL open. **REASONED**, same caveat as
+   above — an itch-iframe popup-blocker risk on the web path specifically is
+   worth watching for in hand-testing (see plan.md's F6 precedent on iframe
+   restrictions), no fallback was built preemptively since plan.md's F9 spec
+   states `window.open` directly.
+6. **Level-up toast**: both `main.rs` and `bin/web.rs` now track
+   `last_level` (seeded on the first frame `me` is known, exactly like the
+   existing `inventory_seeded` pattern) and call the new
+   `UiState::show_levelup_toast` when `level_of(xp)` increases, reusing the
+   existing merge-toast rendering. The Saturation slider's max already grows
+   live every frame from `HudInfo::sat_cap` with no code change needed — the
+   toast is the only piece plan.md's "level-up feedback" item required.
+   **REASONED**, not hand-tested (would need enough merge/like/link-click XP
+   in one sitting to cross a level boundary).
+
+Builds: `cargo build -p server`, `cargo build -p client --bin client`,
+`cargo build -p client --bin bot`, and `./build-web.sh` all clean
+(`du -sh client/web` = 932K, well under the 64 MB jam cap). Bindings
+regenerated (`set_island_link_reducer.rs`, `click_link_reducer.rs`,
+`island_link_click_table.rs`, `time_xp_schedule_type.rs` added).
+plan.md's canonical constants table gained `XP_TIME`/`TIME_XP_PERIOD_SECS`
+(F9 already specified the 1 XP / 60 s values inline; this just adds them to
+the single-source-of-truth table alongside the existing `XP_LINK_CLICK` row).
+
+Not yet done, left for the author's hand-test session before checking F9 off
+below: the two-client success/dedupe path for `click_link`, the 60s time-XP
+tick actually firing, the popup's new edit field/link row end-to-end (typing,
+Set, click-to-open on both native and a browser), and the level-up toast.
+
+---
+
+**Previous batch:** a third round of author feedback on F8 — a schema-additive
 server change (new reducer, no data wipe) plus client work (native and web
 kept identical as always):
 1. **"We should see Owner, Likes, Created and Link"** — checked: the popup
@@ -778,6 +862,9 @@ Implementation notes:
       hand-tested across three feedback rounds and confirmed it feels good.
       Builds all clean, package size fine. COMMITTED.
 - [ ] F9 — island links (jam rate id only), link-click XP, time XP —
+      implemented (see the batch notes above); server-side dedupe/guards
+      VERIFIED via CLI, client wiring + the 60s time-XP tick REASONED only
+      — awaiting the author's hand-test before checking this off —
 
 ## P2 (only if time remains)
 - [ ] F10 admin — [ ] F11 flying gift — [ ] F12 polish/bots/sounds —

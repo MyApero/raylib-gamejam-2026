@@ -6,6 +6,7 @@
 #![allow(unused, clippy::all)]
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
+pub mod click_link_reducer;
 pub mod config_table;
 pub mod config_type;
 pub mod inventory_table;
@@ -14,6 +15,8 @@ pub mod island_cell_table;
 pub mod island_cell_type;
 pub mod island_like_table;
 pub mod island_like_type;
+pub mod island_link_click_table;
+pub mod island_link_click_type;
 pub mod island_table;
 pub mod island_type;
 pub mod like_island_reducer;
@@ -26,13 +29,16 @@ pub mod rerank_fire_schedule_type;
 pub mod rerank_warn_schedule_type;
 pub mod reset_account_reducer;
 pub mod set_brush_reducer;
+pub mod set_island_link_reducer;
 pub mod set_lock_reducer;
 pub mod set_name_reducer;
 pub mod set_pos_reducer;
+pub mod time_xp_schedule_type;
 pub mod unlike_island_reducer;
 pub mod user_table;
 pub mod user_type;
 
+pub use click_link_reducer::click_link;
 pub use config_table::*;
 pub use config_type::Config;
 pub use inventory_table::*;
@@ -41,6 +47,8 @@ pub use island_cell_table::*;
 pub use island_cell_type::IslandCell;
 pub use island_like_table::*;
 pub use island_like_type::IslandLike;
+pub use island_link_click_table::*;
+pub use island_link_click_type::IslandLinkClick;
 pub use island_table::*;
 pub use island_type::Island;
 pub use like_island_reducer::like_island;
@@ -53,9 +61,11 @@ pub use rerank_fire_schedule_type::RerankFireSchedule;
 pub use rerank_warn_schedule_type::RerankWarnSchedule;
 pub use reset_account_reducer::reset_account;
 pub use set_brush_reducer::set_brush;
+pub use set_island_link_reducer::set_island_link;
 pub use set_lock_reducer::set_lock;
 pub use set_name_reducer::set_name;
 pub use set_pos_reducer::set_pos;
+pub use time_xp_schedule_type::TimeXpSchedule;
 pub use unlike_island_reducer::unlike_island;
 pub use user_table::*;
 pub use user_type::User;
@@ -68,12 +78,14 @@ pub use user_type::User;
 /// to indicate which reducer caused the event.
 
 pub enum Reducer {
+    ClickLink { island_id: u32 },
     LikeIsland { island_id: u32 },
     MergeWithCell { cell_kind: u8, cell_id: u32 },
     PaintIslandCell { q_local: i32, r_local: i32 },
     PaintMarginCell { q: i32, r: i32 },
     ResetAccount,
     SetBrush { hue: u16, sat: u8, val: u8 },
+    SetIslandLink { rate_id: u32 },
     SetLock { locked: bool },
     SetName { name: String },
     SetPos { cx: f32, cy: f32 },
@@ -87,12 +99,14 @@ impl __sdk::InModule for Reducer {
 impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
+            Reducer::ClickLink { .. } => "click_link",
             Reducer::LikeIsland { .. } => "like_island",
             Reducer::MergeWithCell { .. } => "merge_with_cell",
             Reducer::PaintIslandCell { .. } => "paint_island_cell",
             Reducer::PaintMarginCell { .. } => "paint_margin_cell",
             Reducer::ResetAccount => "reset_account",
             Reducer::SetBrush { .. } => "set_brush",
+            Reducer::SetIslandLink { .. } => "set_island_link",
             Reducer::SetLock { .. } => "set_lock",
             Reducer::SetName { .. } => "set_name",
             Reducer::SetPos { .. } => "set_pos",
@@ -103,6 +117,11 @@ impl __sdk::Reducer for Reducer {
     #[allow(clippy::clone_on_copy)]
     fn args_bsatn(&self) -> Result<Vec<u8>, __sats::bsatn::EncodeError> {
         match self {
+            Reducer::ClickLink { island_id } => {
+                __sats::bsatn::to_vec(&click_link_reducer::ClickLinkArgs {
+                    island_id: island_id.clone(),
+                })
+            }
             Reducer::LikeIsland { island_id } => {
                 __sats::bsatn::to_vec(&like_island_reducer::LikeIslandArgs {
                     island_id: island_id.clone(),
@@ -136,6 +155,11 @@ impl __sdk::Reducer for Reducer {
                     val: val.clone(),
                 })
             }
+            Reducer::SetIslandLink { rate_id } => {
+                __sats::bsatn::to_vec(&set_island_link_reducer::SetIslandLinkArgs {
+                    rate_id: rate_id.clone(),
+                })
+            }
             Reducer::SetLock { locked } => __sats::bsatn::to_vec(&set_lock_reducer::SetLockArgs {
                 locked: locked.clone(),
             }),
@@ -165,6 +189,7 @@ pub struct DbUpdate {
     island: __sdk::TableUpdate<Island>,
     island_cell: __sdk::TableUpdate<IslandCell>,
     island_like: __sdk::TableUpdate<IslandLike>,
+    island_link_click: __sdk::TableUpdate<IslandLinkClick>,
     margin_cell: __sdk::TableUpdate<MarginCell>,
     user: __sdk::TableUpdate<User>,
 }
@@ -190,6 +215,9 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "island_like" => db_update
                     .island_like
                     .append(island_like_table::parse_table_update(table_update)?),
+                "island_link_click" => db_update
+                    .island_link_click
+                    .append(island_link_click_table::parse_table_update(table_update)?),
                 "margin_cell" => db_update
                     .margin_cell
                     .append(margin_cell_table::parse_table_update(table_update)?),
@@ -237,6 +265,9 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.island_like = cache
             .apply_diff_to_table::<IslandLike>("island_like", &self.island_like)
             .with_updates_by_pk(|row| &row.id);
+        diff.island_link_click = cache
+            .apply_diff_to_table::<IslandLinkClick>("island_link_click", &self.island_link_click)
+            .with_updates_by_pk(|row| &row.id);
         diff.margin_cell = cache
             .apply_diff_to_table::<MarginCell>("margin_cell", &self.margin_cell)
             .with_updates_by_pk(|row| &row.id);
@@ -264,6 +295,9 @@ impl __sdk::DbUpdate for DbUpdate {
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "island_like" => db_update
                     .island_like
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "island_link_click" => db_update
+                    .island_link_click
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "margin_cell" => db_update
                     .margin_cell
@@ -299,6 +333,9 @@ impl __sdk::DbUpdate for DbUpdate {
                 "island_like" => db_update
                     .island_like
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "island_link_click" => db_update
+                    .island_link_click
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "margin_cell" => db_update
                     .margin_cell
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
@@ -325,6 +362,7 @@ pub struct AppliedDiff<'r> {
     island: __sdk::TableAppliedDiff<'r, Island>,
     island_cell: __sdk::TableAppliedDiff<'r, IslandCell>,
     island_like: __sdk::TableAppliedDiff<'r, IslandLike>,
+    island_link_click: __sdk::TableAppliedDiff<'r, IslandLinkClick>,
     margin_cell: __sdk::TableAppliedDiff<'r, MarginCell>,
     user: __sdk::TableAppliedDiff<'r, User>,
     __unused: std::marker::PhantomData<&'r ()>,
@@ -345,6 +383,11 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
         callbacks.invoke_table_row_callbacks::<Island>("island", &self.island, event);
         callbacks.invoke_table_row_callbacks::<IslandCell>("island_cell", &self.island_cell, event);
         callbacks.invoke_table_row_callbacks::<IslandLike>("island_like", &self.island_like, event);
+        callbacks.invoke_table_row_callbacks::<IslandLinkClick>(
+            "island_link_click",
+            &self.island_link_click,
+            event,
+        );
         callbacks.invoke_table_row_callbacks::<MarginCell>("margin_cell", &self.margin_cell, event);
         callbacks.invoke_table_row_callbacks::<User>("user", &self.user, event);
     }
@@ -1012,6 +1055,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         island_table::register_table(client_cache);
         island_cell_table::register_table(client_cache);
         island_like_table::register_table(client_cache);
+        island_link_click_table::register_table(client_cache);
         margin_cell_table::register_table(client_cache);
         user_table::register_table(client_cache);
     }
@@ -1021,6 +1065,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         "island",
         "island_cell",
         "island_like",
+        "island_link_click",
         "margin_cell",
         "user",
     ];

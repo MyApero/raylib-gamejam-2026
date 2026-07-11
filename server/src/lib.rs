@@ -14,6 +14,11 @@ mod constants {
     pub const PRESENCE_TIMEOUT_SECS: i64 = 3;
     pub const XP_MERGE_NEW: u64 = 25;
     pub const XP_LIKE: u64 = 10;
+    pub const XP_LINK_CLICK: u64 = 5;
+    /// F9: passive XP for staying present (fresh `last_seen`), granted by
+    /// `time_xp_tick` every `TIME_XP_PERIOD_SECS`.
+    pub const XP_TIME: u64 = 1;
+    pub const TIME_XP_PERIOD_SECS: i64 = 60;
     pub const LEVEL_XP: u64 = 100;
     pub const START_SAT: u8 = 40;
     /// F8: how often islands re-rank, and how long the client-facing
@@ -233,6 +238,20 @@ pub struct IslandLike {
     liker: Identity,
 }
 
+/// F9: one row per (island, clicker) — same dedupe pattern as `IslandLike`,
+/// enforced in `click_link` rather than a DB-level compound unique
+/// constraint. No "unclick": a link click's XP credit is permanent, unlike a
+/// like.
+#[spacetimedb::table(accessor = island_link_click, public)]
+pub struct IslandLinkClick {
+    #[primary_key]
+    #[auto_inc]
+    id: u64,
+    #[index(btree)]
+    island_id: u32,
+    clicker: Identity,
+}
+
 /// F8 re-rank timer chain: a repeating loop schedules the "warning" step
 /// every `RERANK_PERIOD_SECS`; the warning step sets `config.next_rerank_at`
 /// (for the client countdown) and schedules a ONE-SHOT fire step
@@ -249,6 +268,18 @@ pub struct RerankWarnSchedule {
 
 #[spacetimedb::table(accessor = rerank_fire_schedule, scheduled(rerank_fire))]
 pub struct RerankFireSchedule {
+    #[primary_key]
+    #[auto_inc]
+    scheduled_id: u64,
+    scheduled_at: ScheduleAt,
+}
+
+/// F9: repeating tick (see `client_connected`'s lazy seeding, same pattern as
+/// `rerank_warn_schedule`) that grants `XP_TIME` to every present user every
+/// `TIME_XP_PERIOD_SECS`. Server-internal, not `public` — clients only ever
+/// observe its effect through `user.xp`.
+#[spacetimedb::table(accessor = time_xp_schedule, scheduled(time_xp_tick))]
+pub struct TimeXpSchedule {
     #[primary_key]
     #[auto_inc]
     scheduled_id: u64,
@@ -679,6 +710,66 @@ pub fn unlike_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String>
     Ok(())
 }
 
+/// F9: set/replace the caller's own island's itch.io link — stored as just
+/// the numeric submission id (decision 14); clients render the full rate URL
+/// from it. Always allowed to overwrite (no confirm step needed server-side).
+#[spacetimedb::reducer]
+pub fn set_island_link(ctx: &ReducerContext, rate_id: u32) -> Result<(), String> {
+    let island = ctx.db.island().owner().find(ctx.sender()).ok_or("you do not own an island")?;
+    ctx.db.island().id().update(Island { itch_rate_id: Some(rate_id), ..island });
+    Ok(())
+}
+
+/// F9: credit an island's owner with `XP_LINK_CLICK` the first time a given
+/// clicker opens its itch.io rate link; later re-opens by the same clicker
+/// are free (no repeat XP) via the `island_link_click` dedupe row. Self-clicks
+/// are rejected — the popup never renders a clickable link for the owner's
+/// own island either, this is the server-side backstop for a raw call.
+#[spacetimedb::reducer]
+pub fn click_link(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
+    let island = ctx.db.island().id().find(island_id).ok_or("unknown island")?;
+    if island.owner == ctx.sender() {
+        return Err("cannot credit your own link click".to_string());
+    }
+    if island.itch_rate_id.is_none() {
+        return Err("island has no link set".to_string());
+    }
+    if ctx.db.island_link_click().island_id().filter(&island_id).any(|c| c.clicker == ctx.sender()) {
+        return Err("already credited".to_string());
+    }
+    ctx.db.island_link_click().insert(IslandLinkClick { id: 0, island_id, clicker: ctx.sender() });
+    if let Some(owner) = ctx.db.user().identity().find(island.owner) {
+        ctx.db.user().identity().update(User { xp: owner.xp + constants::XP_LINK_CLICK, ..owner });
+    }
+    Ok(())
+}
+
+/// F9 time XP: grants `XP_TIME` to every user whose `last_seen` is still
+/// fresh (the same presence window used for cursor visibility/merge
+/// eligibility elsewhere) at each `TIME_XP_PERIOD_SECS` tick. Restricted to
+/// the scheduler itself, same as the F8 re-rank reducers.
+#[spacetimedb::reducer]
+pub fn time_xp_tick(ctx: &ReducerContext, _arg: TimeXpSchedule) -> Result<(), String> {
+    if ctx.sender() != ctx.database_identity() {
+        return Err("time_xp_tick may not be invoked by clients".to_string());
+    }
+    for user in ctx.db.user().iter().collect::<Vec<_>>() {
+        if !user.online {
+            continue;
+        }
+        let fresh = ctx
+            .timestamp
+            .duration_since(user.last_seen)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(i64::MAX)
+            < constants::PRESENCE_TIMEOUT_SECS;
+        if fresh {
+            ctx.db.user().identity().update(User { xp: user.xp + constants::XP_TIME, ..user });
+        }
+    }
+    Ok(())
+}
+
 /// F8 re-rank, step 1/2 (repeating, `RERANK_PERIOD_SECS`): only sets the
 /// countdown clients render, then schedules the actual sort
 /// `RERANK_WARNING_SECS` later. Restricted to the scheduler itself — see the
@@ -740,6 +831,13 @@ pub fn client_connected(ctx: &ReducerContext) {
         ctx.db.rerank_warn_schedule().insert(RerankWarnSchedule {
             scheduled_id: 0,
             scheduled_at: TimeDuration::from_micros(constants::RERANK_PERIOD_SECS * 1_000_000).into(),
+        });
+    }
+    // F9: same lazy-seeding pattern as the re-rank timer above.
+    if ctx.db.time_xp_schedule().count() == 0 {
+        ctx.db.time_xp_schedule().insert(TimeXpSchedule {
+            scheduled_id: 0,
+            scheduled_at: TimeDuration::from_micros(constants::TIME_XP_PERIOD_SECS * 1_000_000).into(),
         });
     }
 
