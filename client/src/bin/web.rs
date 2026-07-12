@@ -837,6 +837,12 @@ struct State {
     /// first frame `me` is known, so connecting already at some level
     /// doesn't fire a spurious toast.
     last_level: Option<u64>,
+    /// Sound rework: mirrors `main.rs`'s `last_xp`/`pending_gift_claim`/
+    /// `music_started` — see that file's comment for the delta-gating and
+    /// gift-attribution logic.
+    last_xp: Option<u64>,
+    pending_gift_claim: Option<Instant>,
+    music_started: bool,
     long_press: Option<LongPress>,
     /// Author-requested: mirrors `main.rs`'s `pending_info_click` — a clean
     /// single-click on a foreign island, held pending for
@@ -916,6 +922,11 @@ extern "C" fn on_frame(arg: *mut c_void) {
     frame(state);
 }
 
+/// Sound rework: mirrors `main.rs`'s `GIFT_CLAIM_WINDOW` — how long after a
+/// `claim_gift` reducer call the resulting XP bump is attributed to the
+/// gift reward roll instead of a plain xp.mp3 blip.
+const GIFT_CLAIM_WINDOW: Duration = Duration::from_secs(5);
+
 fn frame(state: &mut State) {
     // One JS call pulls in everything the socket received since last frame.
     let raw = run_js("window.stdb ? window.stdb.frame() : '{}'");
@@ -930,6 +941,21 @@ fn frame(state: &mut State) {
 
     let me = state.my_identity.clone();
     let me = me.as_deref();
+    // Theme music: mirrors `main.rs` exactly. Gating on `!title_active`
+    // (title dismissed via a real click) also satisfies the web autoplay
+    // policy — the browser's AudioContext is created suspended and only
+    // resumes on a user gesture, so by the time this fires it's already
+    // resumed and the stream is heard from 0:00 (see `main`'s comment on
+    // `RaylibAudio::init_audio_device` above).
+    if let Some(s) = &state.sfx {
+        if !state.music_started && !state.ui_state.title_active {
+            s.theme.play_stream();
+            state.music_started = true;
+        }
+        if state.music_started {
+            s.theme.update_stream();
+        }
+    }
     let hexa_zoom_locked = me.is_some_and(|id| state.tables.hexa_clusters.contains_key(id));
     if hexa_zoom_locked {
         let rate = (1.0 - (-state.rl.get_frame_time() / world::constants::HEXA_ZOOM_LERP_SECS).exp()).clamp(0.0, 1.0);
@@ -1017,6 +1043,10 @@ fn frame(state: &mut State) {
         }
     }
 
+    // Sound rework: mirrors `main.rs`'s `reward_sound_this_frame` — a
+    // new_color/hexa-grant sound already fired this frame, so the xp/level
+    // block below shouldn't also blip xp.mp3 for the same XP bump.
+    let mut reward_sound_this_frame = false;
     // Inventory-insert watch (merge toast): toast + last3 nudge when a new
     // row for `me` appears. Mirrors `main.rs` exactly.
     if let Some(me) = me {
@@ -1043,8 +1073,9 @@ fn frame(state: &mut State) {
                 {
                     state.ui_state.show_hexa_success_popup();
                     if let Some(s) = &state.sfx {
-                        s.merge.play();
+                        s.new_color.play();
                     }
+                    reward_sound_this_frame = true;
                 }
             }
         }
@@ -1061,8 +1092,10 @@ fn frame(state: &mut State) {
                     // `reset_account`'s reseed, never a merge.
                     if inv.from_gift {
                         state.ui_state.show_gift_toast(inv.hue);
+                        state.pending_gift_claim = None;
+                        reward_sound_this_frame = true;
                         if let Some(s) = &state.sfx {
-                            s.gift.play();
+                            s.play_gift_reward(&s.new_color, state.rl.get_random_value(0..=2), state.rl.get_random_value(0..=5));
                         }
                     } else if inv.obtained_with_hex.is_none() {
                         // F13: mirrors `main.rs` — a Hexa-pooled grant also
@@ -1074,8 +1107,9 @@ fn frame(state: &mut State) {
                         if state.tables.hexa_events.values().any(|e| e.at_micros == inv.obtained_at_micros) {
                             state.ui_state.show_hexa_toast(inv.hue);
                             if let Some(s) = &state.sfx {
-                                s.merge.play();
+                                s.new_color.play();
                             }
+                            reward_sound_this_frame = true;
                         } else {
                             state.ui_state.note_reset_hue(inv.hue);
                         }
@@ -1137,6 +1171,7 @@ fn frame(state: &mut State) {
         if !state.suppress_map_until_release && over_map_area && gift_hit {
             if let Some((gift_id, _, _)) = active_gift {
                 call_reducer("claim_gift", serde_json::json!([gift_id]));
+                state.pending_gift_claim = Some(Instant::now());
             }
             state.suppress_map_until_release = true;
         }
@@ -1166,18 +1201,35 @@ fn frame(state: &mut State) {
         let locked = user.is_some_and(|u| u.locked);
         let level = world::level_of(xp);
         // F9 level-up feedback: mirrors `main.rs` exactly.
+        let leveled = state.last_level.is_some_and(|prev| level > prev);
         if state.last_level.is_some_and(|prev| prev < shared::constants::HEXA_UNLOCK_LEVEL && level >= shared::constants::HEXA_UNLOCK_LEVEL) {
             state.ui_state.show_hexa_unlocked_toast();
             if let Some(s) = &state.sfx {
                 s.levelup.play();
             }
-        } else if state.last_level.is_some_and(|prev| level > prev) {
+        } else if leveled {
             state.ui_state.show_levelup_toast(level, world::sat_cap(level), hue);
             if let Some(s) = &state.sfx {
                 s.levelup.play();
             }
         }
         state.last_level = Some(level);
+        // Sound rework: mirrors `main.rs`'s xp-delta gating exactly — see
+        // that file's comment for the reasoning.
+        let xp_delta = state.last_xp.map_or(0, |prev| xp.saturating_sub(prev));
+        if xp_delta >= 2 {
+            if !leveled && !reward_sound_this_frame {
+                if let Some(s) = &state.sfx {
+                    if state.pending_gift_claim.is_some_and(|t| t.elapsed() <= GIFT_CLAIM_WINDOW) {
+                        s.play_gift_reward(&s.xp, state.rl.get_random_value(0..=2), state.rl.get_random_value(0..=5));
+                    } else {
+                        s.xp.play();
+                    }
+                }
+            }
+            state.pending_gift_claim = None;
+        }
+        state.last_xp = Some(xp);
         state.ui_state.sync_name_once(user.and_then(|u| u.name.as_ref()));
         // Author-caught: mirrors `main.rs`'s live-refresh so the Like button
         // reflects the reducer's result immediately, not only after a page
@@ -2006,6 +2058,9 @@ fn main() {
         hexa_events_seeded: false,
         hexa_display: HashMap::new(),
         last_level: None,
+        last_xp: None,
+        pending_gift_claim: None,
+        music_started: false,
         long_press: None,
         pending_info_click: None,
         hover_target: None,

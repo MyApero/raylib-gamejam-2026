@@ -5,6 +5,4 @@ bundled examples (`raylib/examples/audio/resources/`, same license there).
 | file        | source (raylib examples) |
 | :---------- | :------------------------ |
 | merge.wav   | coin.wav   |
-| gift.wav    | spring.wav |
-| levelup.wav | sound.wav  |
 | error.wav   | weird.wav  |

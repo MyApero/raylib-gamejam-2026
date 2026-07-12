@@ -409,6 +409,14 @@ fn main() {
     // connecting at, say, level 3 doesn't fire a spurious "level up" toast —
     // mirrors `inventory_seeded`'s seed-then-diff pattern above.
     let mut last_level: Option<u64> = None;
+    // Sound rework: last-seen XP (for delta-based xp.mp3 gating, see the
+    // xp/level block below), and a short window after a gift claim reducer
+    // call during which the XP bump it causes is attributed to the gift
+    // (so it plays the gift reward sound/meme instead of a plain xp blip).
+    let mut last_xp: Option<u64> = None;
+    let mut pending_gift_claim: Option<Instant> = None;
+    const GIFT_CLAIM_WINDOW: Duration = Duration::from_secs(5);
+    let mut music_started = false;
     // F9.5 item 5 (modal click-through): a real click's press and release
     // land on DIFFERENT frames (a mouse held for even a fraction of a second
     // spans several frames at 60fps), so gating `map_input_allowed` on only
@@ -436,6 +444,19 @@ fn main() {
 
         let me = ctx.try_identity();
         let now = Timestamp::now();
+        // Theme music: starts once gameplay begins (title dismissed via a
+        // real click), never restarted — a suspended browser AudioContext
+        // only resumes on a user gesture, so gating on `!title_active`
+        // guarantees autoplay works on web too (see web.rs's mirror).
+        if let Some(s) = &sfx {
+            if !music_started && !ui_state.title_active {
+                s.theme.play_stream();
+                music_started = true;
+            }
+            if music_started {
+                s.theme.update_stream();
+            }
+        }
         let hexa_zoom_locked = me.is_some_and(|id| ctx.db.hexa_cluster().iter().any(|row| row.identity == id));
         if hexa_zoom_locked {
             let rate = (1.0 - (-rl.get_frame_time() / world::constants::HEXA_ZOOM_LERP_SECS).exp()).clamp(0.0, 1.0);
@@ -536,6 +557,10 @@ fn main() {
             }
         }
 
+        // Sound rework: a new_color/hexa-grant sound already fired this
+        // frame, so the xp/level block below shouldn't also blip xp.mp3 for
+        // the same underlying XP bump (a color grant carries XP too).
+        let mut reward_sound_this_frame = false;
         // Inventory-insert watch (F4 merge feedback): toast + last3 nudge
         // when a new row for `me` appears. Runs before the HUD snapshot below
         // so a toast fired this frame is visible in this same frame's draw.
@@ -563,8 +588,9 @@ fn main() {
                     {
                         ui_state.show_hexa_success_popup();
                         if let Some(s) = &sfx {
-                            s.merge.play();
+                            s.new_color.play();
                         }
+                        reward_sound_this_frame = true;
                     }
                 }
             }
@@ -584,8 +610,10 @@ fn main() {
                         // pre-reset entries.
                         if inv.from_gift {
                             ui_state.show_gift_toast(inv.hue);
+                            pending_gift_claim = None;
+                            reward_sound_this_frame = true;
                             if let Some(s) = &sfx {
-                                s.gift.play();
+                                s.play_gift_reward(&s.new_color, rl.get_random_value(0..=2), rl.get_random_value(0..=5));
                             }
                         } else if inv.obtained_with.is_none() {
                             // F13: a Hexa-pooled grant ALSO leaves
@@ -599,8 +627,9 @@ fn main() {
                             if ctx.db.hexa_event().iter().any(|e| e.at == inv.obtained_at) {
                                 ui_state.show_hexa_toast(inv.hue);
                                 if let Some(s) = &sfx {
-                                    s.merge.play();
+                                    s.new_color.play();
                                 }
+                                reward_sound_this_frame = true;
                             } else {
                                 ui_state.note_reset_hue(inv.hue);
                             }
@@ -667,6 +696,7 @@ fn main() {
             if !suppress_map_until_release && over_map_area && gift_hit {
                 if let Some((gift_id, _, _)) = active_gift {
                     let _ = ctx.reducers.claim_gift(gift_id);
+                    pending_gift_claim = Some(Instant::now());
                 }
                 suppress_map_until_release = true;
             }
@@ -694,18 +724,42 @@ fn main() {
             // F9 level-up feedback: fire once per actual increase, not on
             // the first frame `me` becomes known (that would just be
             // reporting whatever level the player already was).
+            let leveled = last_level.is_some_and(|prev| level > prev);
             if last_level.is_some_and(|prev| prev < shared::constants::HEXA_UNLOCK_LEVEL && level >= shared::constants::HEXA_UNLOCK_LEVEL) {
                 ui_state.show_hexa_unlocked_toast();
                 if let Some(s) = &sfx {
                     s.levelup.play();
                 }
-            } else if last_level.is_some_and(|prev| level > prev) {
+            } else if leveled {
                 ui_state.show_levelup_toast(level, world::sat_cap(level), hue);
                 if let Some(s) = &sfx {
                     s.levelup.play();
                 }
             }
             last_level = Some(level);
+            // Sound rework: xp.mp3 on meaningful XP gains only — the +1
+            // idle time-tick (delta 1) stays silent, every real gain
+            // (like=10, link=5, merge-new=25, gift=20, hexa=150) clears the
+            // >=2 threshold. `leveled`/`reward_sound_this_frame` avoid a
+            // double-blip when levelup.mp3 or new_color already played for
+            // the same bump; a claim within `GIFT_CLAIM_WINDOW` of the
+            // reducer call routes the XP into the gift-reward roll instead
+            // of a plain xp blip (covers the server-side edge where a color
+            // roll finds no free hue and falls through to +20 XP).
+            let xp_delta = last_xp.map_or(0, |prev| xp.saturating_sub(prev));
+            if xp_delta >= 2 {
+                if !leveled && !reward_sound_this_frame {
+                    if let Some(s) = &sfx {
+                        if pending_gift_claim.is_some_and(|t| t.elapsed() <= GIFT_CLAIM_WINDOW) {
+                            s.play_gift_reward(&s.xp, rl.get_random_value(0..=2), rl.get_random_value(0..=5));
+                        } else {
+                            s.xp.play();
+                        }
+                    }
+                }
+                pending_gift_claim = None;
+            }
+            last_xp = Some(xp);
             ui_state.sync_name_once(user.as_ref().and_then(|u| u.name.as_ref()));
             // Author-caught: the Like button looked unresponsive because the
             // popup's `likes`/`already_liked` were a one-time snapshot from
