@@ -2797,3 +2797,44 @@ bug-fix writeups; this is the evidence log.
   like on it in either client, erase still whitens it, hover/like still work
   on ordinary foreign islands. `HANDOFF-web-native-sharing.md` deleted now
   that this entry supersedes it.
+
+---
+
+**Batch (2026-07-12, submission day, chat session): F15 title screen —
+"hexel" hexagon wordmark + animated Draw button.** Author chat request
+("Create a nice hexagon typography for hexel", lowercase `h` explicit; then
+a title screen "with the title in big, an animated button 'Draw' and a semi
+transparent background, showing a hint of the whole map behind"). Full
+design rationale in plan.md's F15 entry; client-only, no republish.
+
+- **Wordmark** (`ui.rs` `TITLE_GLYPH_*`/`TITLE_WORD`/`draw_hexel_logo`):
+  glyphs as const `(q, 2*v)` cell tables on the game's own flat-top axial
+  grid, rendered with `world::draw_hex` + `world::hsv_color` (hue sweeps
+  0->330 across the word, sat 70 / val ~88 with a traveling shimmer; own
+  drop-shadow pass). Glyph shapes iterated visually offline (PIL renders
+  of the exact cell tables + a 720x720 layout mock with the shipped
+  constants) before porting — VERIFIED visually against those renders,
+  which use the same flat-top vertex math as raylib's `draw_poly`.
+- **Title state/input** (`ui.rs`): `UiState.title_active` starts true;
+  `handle_input` swallows HUD input and clears the flag on a Draw-button
+  click or Enter; `draw` renders backdrop `(8,9,14,205)` + wordmark +
+  pulsing button instead of the HUD. `any_modal_open()` now includes the
+  title (gates painting/panning/gift claims/hover popups/`set_pos`
+  heartbeat through the existing chokepoints in both clients, REASONED by
+  tracing every `any_modal_open`/`map_input_allowed` call site);
+  `over_map_area` in both clients gains `!title_active` (computed before
+  `handle_input` flips the flag, so the dismissing click can't paint the
+  tile under the button — REASONED).
+- **Camera** (`main.rs` + `bin/web.rs`, mirrored like the intro itself):
+  while the title is up, hold the `world_fit` whole-world pose each frame;
+  dismissing starts the existing F9.6 intro whose `intro_from` calls the
+  same `world_fit`, so the ease into the own island continues from the held
+  pose (REASONED).
+- **Builds**: `cargo check -p server`, `cargo build -p client --bin client
+  --bin bot`, `cargo test -p client --bin client` (8 passed), `cargo test
+  -p server` (5 passed), `./build-web.sh` all clean, zero warnings
+  (VERIFIED).
+- NOT hand-tested in a GUI/browser (author drives runtime testing): needs
+  an eyeball on backdrop alpha over a real painted map, shimmer/pulse feel,
+  and that Draw -> intro ease reads as one continuous motion in both
+  clients.

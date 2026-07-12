@@ -93,6 +93,16 @@ struct Toast {
 }
 
 pub struct UiState {
+    /// Title screen (author-requested): shown from launch until the Draw
+    /// button (or Enter) dismisses it. While set, `handle_input` swallows
+    /// all HUD input and `draw` renders the title overlay instead of the
+    /// HUD; the map itself stays visible behind the semi-transparent
+    /// backdrop (the clients hold the camera on the whole-world pose, see
+    /// `main.rs`/`bin/web.rs`). Folded into `any_modal_open` so every
+    /// map-input gate treats it like a modal.
+    pub title_active: bool,
+    /// Animation clock for the title screen (logo shimmer, button pulse).
+    title_started: Instant,
     pub name_input: String,
     name_loaded: bool,
     name_focused: bool,
@@ -200,6 +210,8 @@ pub struct IslandInfo {
 impl UiState {
     pub fn new() -> Self {
         Self {
+            title_active: true,
+            title_started: Instant::now(),
             name_input: String::new(),
             name_loaded: false,
             name_focused: false,
@@ -263,9 +275,16 @@ impl UiState {
     /// `main.rs`/`bin/web.rs`, which used to each hand-roll this same
     /// four-flag check and could drift out of sync — the web build was
     /// missing two of the four, letting a hovered island silently close
-    /// My Isle or the Escape/help overlay.
+    /// My Isle or the Escape/help overlay. The title screen counts too —
+    /// it covers the whole screen, so the map must be fully gated (no
+    /// painting, panning, gift claims, hover popups, or `set_pos`
+    /// heartbeat) until Draw dismisses it.
     pub fn any_modal_open(&self) -> bool {
-        self.overlay_open || self.account_open || self.help_open || self.island_popup.as_ref().is_some_and(|p| p.is_own)
+        self.title_active
+            || self.overlay_open
+            || self.account_open
+            || self.help_open
+            || self.island_popup.as_ref().is_some_and(|p| p.is_own)
     }
 
     /// Closes all four modals — the group is mutually exclusive by
@@ -449,6 +468,9 @@ pub struct Actions {
     pub set_name: Option<String>,
     pub set_lock: Option<bool>,
     pub center_camera: bool,
+    /// Header's export control: the caller temporarily frames the player's
+    /// island, renders the clean share card, then captures that frame.
+    pub export_screenshot: bool,
     /// Copy the full reconnection token (not just the header's short hex) to
     /// the clipboard.
     pub copy_token: bool,
@@ -488,6 +510,13 @@ pub struct Actions {
 
 fn footer_bg() -> Rectangle {
     Rectangle::new(0.0, SCREEN_H - FOOTER_H, SCREEN_W, FOOTER_H)
+}
+
+/// A compact, icon-only share/export control. It is deliberately in the
+/// header (rather than the already busy footer) so taking a screenshot is a
+/// global action that remains easy to find on touch devices.
+fn export_btn_rect() -> Rectangle {
+    Rectangle::new(SCREEN_W - 34.0, 3.0, 28.0, 22.0)
 }
 
 /// Padding from the screen's left/right edges for the two buttons now
@@ -774,6 +803,20 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     if state.copy_clicked_at.is_some_and(|t| t.elapsed() >= TOAST_DURATION) {
         state.copy_clicked_at = None;
     }
+    // Title screen: the Draw button (or Enter) is the only interactive
+    // element — swallow everything else. Map-world input is gated separately
+    // via `any_modal_open`, and this frame's `over_map_area` was computed
+    // while the flag was still set, so the dismissing click can't paint.
+    if state.title_active {
+        title_label_width(rl); // warm the cache while we still have `rl`
+        let mouse = rl.get_mouse_position();
+        if (rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) && point_in(mouse, title_btn_rect()))
+            || rl.is_key_pressed(KeyboardKey::KEY_ENTER)
+        {
+            state.title_active = false;
+        }
+        return Actions::default();
+    }
     // Re-anchor the Hue slider whenever the actual brush hue has drifted
     // outside its window (a merge changed it server-side, the live hue was
     // left nudged away from any exact swatch by a previous session, or this
@@ -846,6 +889,12 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
 
     if clicked && point_in(mouse, center_btn_rect()) {
         actions.center_camera = true;
+    }
+    if clicked && point_in(mouse, export_btn_rect()) {
+        actions.export_screenshot = true;
+        // The header button is a complete gesture of its own. In particular,
+        // do not let this same click blur/commit the name field below.
+        return actions;
     }
     // Collected first, applied after: `note_used_hue` below needs `&mut
     // state.last3`, which can't happen while this loop still holds `.iter()`
@@ -1157,6 +1206,10 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
 }
 
 pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vector2) {
+    if state.title_active {
+        draw_title_screen(d, state, mouse);
+        return;
+    }
     draw_header(d, info);
     draw_footer(d, state, info);
     if state.overlay_open {
@@ -1462,11 +1515,35 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo) {
     // `RaylibHandle`, unavailable once `begin_drawing` hands out its borrow).
     d.draw_text(
         &format!("{} / {} online", info.online, info.total),
-        560,
+        548,
         6,
-        16,
+        14,
         Color::LIGHTGRAY,
     );
+    let export = export_btn_rect();
+    d.draw_rectangle_rec(export, Color::new(40, 40, 48, 255));
+    draw_export_icon(d, export);
+}
+
+/// Clean, HUD-free branding added over the centred island for the exported
+/// image. The map itself is rendered by the caller with the camera snapped to
+/// the player's island; keeping the card here makes native and web exports
+/// visually identical.
+pub fn draw_export_frame(d: &mut impl RaylibDraw, name: &str) {
+    let display_name = if name.trim().is_empty() { "My" } else { name.trim() };
+
+    d.draw_rectangle_gradient_v(0, 0, SCREEN_W as i32, 88, Color::new(8, 10, 16, 245), Color::new(8, 10, 16, 0));
+    d.draw_rectangle_gradient_v(
+        0,
+        (SCREEN_H - 72.0) as i32,
+        SCREEN_W as i32,
+        72,
+        Color::new(8, 10, 16, 0),
+        Color::new(8, 10, 16, 245),
+    );
+    d.draw_text("hexel", 24, 18, 24, Color::RAYWHITE);
+    d.draw_text(&format!("{}'s island", display_name), 24, 47, 22, Color::new(210, 214, 224, 255));
+    d.draw_text("https://raylib.mister-esman.uk", 168, 680, 16, Color::RAYWHITE);
 }
 
 fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
@@ -1593,6 +1670,22 @@ fn draw_locate_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     d.draw_line_ex(Vector2::new(cx, cy + ring_r + gap), Vector2::new(cx, cy + ring_r + gap + tick), 2.0, icon_color);
     d.draw_line_ex(Vector2::new(cx - ring_r - gap, cy), Vector2::new(cx - ring_r - gap - tick, cy), 2.0, icon_color);
     d.draw_line_ex(Vector2::new(cx + ring_r + gap, cy), Vector2::new(cx + ring_r + gap + tick, cy), 2.0, icon_color);
+}
+
+/// Export/share glyph: an upward arrow leaving a small tray. This avoids a
+/// text label in the narrow top-right header while still reading clearly as
+/// "save this image".
+fn draw_export_icon(d: &mut impl RaylibDraw, r: Rectangle) {
+    let color = Color::new(235, 235, 240, 255);
+    let cx = r.x + r.width / 2.0;
+    d.draw_line_ex(Vector2::new(cx, r.y + 14.0), Vector2::new(cx, r.y + 5.0), 2.0, color);
+    d.draw_triangle(
+        Vector2::new(cx, r.y + 3.0),
+        Vector2::new(cx - 4.0, r.y + 8.0),
+        Vector2::new(cx + 4.0, r.y + 8.0),
+        color,
+    );
+    d.draw_rectangle_lines((r.x + 6.0) as i32, (r.y + 14.0) as i32, 16, 5, color);
 }
 
 /// Default paint-mode icon for the paint/erase/move
@@ -2077,6 +2170,136 @@ fn draw_slider_capped(
             Color::new(220, 180, 80, 255),
         );
     }
+}
+
+// --- Title screen: "hexel" hexagon logotype + animated Draw button --------
+//
+// The logotype spells the word out of hexagon cells on the game's own
+// flat-top axial grid (`world::axial_to_world` geometry: x advances 1.5
+// radii per column, odd columns sit half a row lower — which is what gives
+// the `h`/`e` their rounded shoulders for free). Each glyph is a cell list
+// of `(q, 2*v)` where `v = r + q/2` is the *visual* row; doubling keeps the
+// odd columns' half-row offset integral in the const tables. Baseline sits
+// at v=6, x-height letters top out around v=2.5–3, ascenders at v=0.
+
+const TITLE_GLYPH_H: &[(i32, i32)] = &[
+    (0, 0), (0, 2), (0, 4), (0, 6), (0, 8), (0, 10), (0, 12), // left stem (ascender)
+    (1, 5),                                                   // shoulder
+    (2, 6), (2, 8), (2, 10), (2, 12),                         // right stem
+];
+const TITLE_GLYPH_E: &[(i32, i32)] = &[
+    (1, 5),                    // top cap
+    (0, 6), (0, 8), (0, 10),   // left side
+    (2, 6), (2, 8),            // right side, upper half
+    (1, 9),                    // crossbar (counter above, mouth below-right)
+    (1, 11), (2, 12),          // bottom sweep + tail
+];
+const TITLE_GLYPH_X: &[(i32, i32)] = &[
+    (0, 6), (2, 6),   // top arms
+    (1, 9),           // crossing
+    (0, 12), (2, 12), // bottom arms
+];
+const TITLE_GLYPH_L: &[(i32, i32)] = &[(0, 0), (0, 2), (0, 4), (0, 6), (0, 8), (0, 10), (0, 12)];
+
+/// The word: each glyph with its column offset (3-wide letters, 1-column
+/// gaps, the final `l` is a single column — 17 columns total).
+const TITLE_WORD: [(&[(i32, i32)], i32); 5] =
+    [(TITLE_GLYPH_H, 0), (TITLE_GLYPH_E, 4), (TITLE_GLYPH_X, 8), (TITLE_GLYPH_E, 12), (TITLE_GLYPH_L, 16)];
+const TITLE_COLS: i32 = 17;
+
+/// Logo cell outer radius: 17 columns span `16*1.5 + 2` = 26 radii, so 23
+/// keeps the wordmark just under 600 px wide inside the 720 px screen.
+const TITLE_CELL_R: f32 = 23.0;
+const TITLE_LOGO_CY: f32 = 250.0;
+const TITLE_LABEL_SIZE: i32 = 30;
+
+fn title_btn_rect() -> Rectangle {
+    Rectangle::new((SCREEN_W - 190.0) / 2.0, 486.0, 190.0, 58.0)
+}
+
+/// Pixel width of the "Draw" label — same `OnceLock` warm-from-`handle_input`
+/// trick as `colors_letter_offsets` (`measure_text` needs a live
+/// `RaylibHandle`, which `draw`'s `impl RaylibDraw` doesn't provide).
+static TITLE_LABEL_W: OnceLock<i32> = OnceLock::new();
+
+fn title_label_width(rl: &RaylibHandle) -> i32 {
+    *TITLE_LABEL_W.get_or_init(|| rl.measure_text("Draw", TITLE_LABEL_SIZE))
+}
+
+/// The "hexel" wordmark, centered on `center`. Cell hue sweeps the color
+/// wheel across the word (the game *is* hue-merging) at the canonical
+/// HSV rendering; `t` drives a gentle brightness shimmer that travels
+/// along the word.
+fn draw_hexel_logo(d: &mut impl RaylibDraw, center: Vector2, cell_r: f32, t: f32) {
+    let sqrt3 = 3f32.sqrt();
+    let cell_center = |gq: i32, v2: i32| {
+        Vector2::new(
+            center.x + 1.5 * cell_r * (gq as f32 - (TITLE_COLS - 1) as f32 / 2.0),
+            center.y + sqrt3 * cell_r * (v2 as f32 / 2.0 - 3.0), // v=3 is the wordmark's vertical middle
+        )
+    };
+    // Drop shadow as its own full pass so a cell's shadow never lands on a
+    // neighboring cell's fill.
+    for (glyph, off) in TITLE_WORD {
+        for &(q, v2) in glyph {
+            let mut c = cell_center(q + off, v2);
+            c.x += cell_r * 0.10;
+            c.y += cell_r * 0.28;
+            world::draw_hex(d, c, cell_r * 0.94, Color::new(0, 0, 0, 110), None);
+        }
+    }
+    for (glyph, off) in TITLE_WORD {
+        for &(q, v2) in glyph {
+            let gq = q + off;
+            let hue = (330.0 * gq as f32 / (TITLE_COLS - 1) as f32) as u16;
+            let val = 88.0 + 5.0 * (t * 2.2 - gq as f32 * 0.45).sin();
+            let fill = world::hsv_color(hue, 70, val as u8);
+            let line = world::hsv_color(hue, 70, (val * 0.55) as u8);
+            world::draw_hex(d, cell_center(gq, v2), cell_r * 0.94, fill, Some(line));
+        }
+    }
+}
+
+/// Full title screen: a semi-transparent backdrop (the whole map stays
+/// hinted behind — the clients hold the camera on the whole-world pose while
+/// `title_active`), the wordmark, and the pulsing Draw button.
+fn draw_title_screen(d: &mut impl RaylibDraw, state: &UiState, mouse: Vector2) {
+    let t = state.title_started.elapsed().as_secs_f32();
+    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(8, 9, 14, 205));
+    draw_hexel_logo(d, Vector2::new(SCREEN_W / 2.0, TITLE_LOGO_CY), TITLE_CELL_R, t);
+
+    let base = title_btn_rect();
+    let hovered = point_in(mouse, base);
+    // Idle: soft breathing pulse to invite the click; hovered: settled,
+    // slightly enlarged (a pulse under the cursor reads as jitter).
+    let scale = if hovered { 1.07 } else { 1.0 + 0.03 * (t * 3.2).sin() };
+    let r = Rectangle::new(
+        base.x + base.width * (1.0 - scale) / 2.0,
+        base.y + base.height * (1.0 - scale) / 2.0,
+        base.width * scale,
+        base.height * scale,
+    );
+    let fill = if hovered { Color::RAYWHITE } else { Color::new(228, 229, 235, 255) };
+    d.draw_rectangle_rounded(r, 0.45, 8, fill);
+    d.draw_rectangle_rounded_lines(r, 0.45, 8, Color::new(40, 40, 48, 255));
+
+    // Pencil icon + label, centered as one group.
+    let icon = 24.0;
+    let gap = 10.0;
+    // Warmed by `handle_input` every title frame; the fallback only covers
+    // a draw happening before any input pass ever ran.
+    let label_w = TITLE_LABEL_W.get().copied().unwrap_or(66);
+    let group_w = icon + gap + label_w as f32;
+    let x = r.x + (r.width - group_w) / 2.0;
+    let cy = r.y + r.height / 2.0;
+    draw_pencil_icon(d, Rectangle::new(x, cy - icon / 2.0, icon, icon));
+    d.draw_text(
+        "Draw",
+        (x + icon + gap) as i32,
+        (cy - TITLE_LABEL_SIZE as f32 / 2.0) as i32,
+        TITLE_LABEL_SIZE,
+        Color::new(20, 20, 26, 255),
+    );
 }
 
 #[cfg(test)]

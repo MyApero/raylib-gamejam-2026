@@ -266,6 +266,21 @@
             localStorage.setItem(TOKEN_KEY, token);
             window.location.reload();
           },
+          // The Rust frame has already rendered the clean share card when
+          // this runs. Turning the game canvas into a Blob keeps the web
+          // export a real PNG download rather than an OS-specific screenshot.
+          downloadIslandImage: function () {
+            var canvas = document.getElementById('canvas');
+            if (!canvas || !canvas.toBlob) return;
+            canvas.toBlob(function (blob) {
+              if (!blob) return;
+              var link = document.createElement('a');
+              link.href = URL.createObjectURL(blob);
+              link.download = 'hexel-island.png';
+              link.click();
+              setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
+            }, 'image/png');
+          },
         };
       })();
     </script>

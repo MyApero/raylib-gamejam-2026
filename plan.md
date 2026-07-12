@@ -944,6 +944,53 @@ center bot, customizable island border color.
     `unlike_island` reducer call on it is rejected server-side; `./build-web.sh` and
     `cargo build` (server, both clients, bot) stay clean.
 
+- **F15 Title screen ("hexel" wordmark + Draw button)** — author chat request,
+  2026-07-12 (submission day): "Create a nice hexagon typography for hexel"
+  (lowercase `h` explicitly requested), then "a title screen with the title in big,
+  an animated button 'Draw' and a semi transparent background, showing a hint of
+  the whole map behind." Client-only, no schema/server change, no republish needed.
+  - *Wordmark*: the word is spelled out of hexagon cells on the game's own flat-top
+    axial grid (same `1.5q / sqrt3*(r + q/2)` geometry and `world::draw_hex`
+    renderer as the map itself — odd columns sit half a row lower, which gives the
+    `h`'s shoulder and the `e`'s caps their rounding for free). Glyphs are const
+    cell tables in `ui.rs` (`TITLE_GLYPH_*`: cells as `(q, 2*v)` with `v = r + q/2`
+    the visual row; doubling keeps the half-row offsets integral). The `x` is a
+    quincunx (two arms top/bottom + the crossing cell), the `e` a ring with its
+    mouth open bottom-right, ascenders 7 cells tall. Cell hue sweeps 0->330 across
+    the word's 17 columns at sat 70 / val ~88 via `world::hsv_color` (the game's
+    canonical HSV path) with a slow brightness shimmer traveling along the word —
+    the wordmark IS the hue-merge continuum. Cell radius 23 px -> just under 600 px
+    wide on the 720 px screen, plus a soft per-cell drop shadow (own pass, so
+    shadows never land on neighboring fills). Glyph shapes were iterated visually
+    offline (PIL renders) before porting the final cell tables to Rust.
+  - *Title screen*: new `UiState.title_active`, starts `true` every launch. While
+    set, `ui::draw` renders — INSTEAD of the HUD — a full-screen `(8,9,14,205)`
+    backdrop (the map stays hinted behind), the wordmark centered at y=250, and a
+    rounded "Draw" button (pencil icon + label, `measure_text` width cached via the
+    same `OnceLock` warm-from-`handle_input` trick as the Colors label) that
+    breathes (±3% scale sine) when idle and settles slightly enlarged on hover.
+    `ui::handle_input` swallows all HUD input while the title is up; clicking the
+    button (or Enter) clears the flag. `UiState::any_modal_open()` now includes
+    `title_active`, which gates — through the existing chokepoints in BOTH clients
+    (`map_input_allowed`, `suppress_map_until_release`, the hover filters) —
+    painting, panning, gift claims, hover popups, and the `set_pos` cursor
+    heartbeat (no ghost cursor broadcast while sitting on the title). Both clients'
+    `over_map_area` also gains a `!title_active` term: the title covers the whole
+    screen, and the term is computed before `handle_input` flips the flag, so the
+    dismissing click can never paint the tile under the button.
+  - *Camera*: while the title is up, both clients hold the camera each frame on the
+    `world_fit` whole-occupied-world pose (recomputed as islands stream in) — the
+    "hint of the whole map" behind the backdrop. Dismissing the title starts the
+    existing F9.6 launch intro unchanged; its `intro_from` calls the same
+    `world_fit`, so the ease into the player's own island continues seamlessly
+    from the exact pose the title was holding.
+  - *Verify*: `cargo check -p server`, `cargo build -p client --bin client --bin
+    bot`, `cargo test -p client --bin client`, `cargo test -p server`, and
+    `./build-web.sh` all clean. Wordmark + full-screen layout previewed offline
+    with the exact layout constants (PIL mock); the live GUI look (shimmer, pulse,
+    backdrop alpha over a real map) NOT hand-tested — author drives runtime
+    testing, per this repo's protocol.
+
 ---
 
 # Backlog — ideas not yet scheduled

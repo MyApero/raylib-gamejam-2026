@@ -945,12 +945,30 @@ fn frame(state: &mut State) {
     // tile via the camera transform. Gates every mouse-driven world-mutation
     // block below so clicking a HUD button never also paints/erases/eyedrops/
     // long-press-merges whatever tile happens to lie beneath it.
-    let over_map_area = mouse_screen.y > ui::HEADER_H && mouse_screen.y < (720.0 - ui::FOOTER_H);
+    // `!title_active`: mirrors `main.rs` — the title screen covers the whole
+    // screen, so nothing is "over the map" until Draw dismisses it.
+    let over_map_area =
+        !state.ui_state.title_active && mouse_screen.y > ui::HEADER_H && mouse_screen.y < (720.0 - ui::FOOTER_H);
 
     // F9.6 item 7: launch intro — mirrors `main.rs` exactly. Camera starts
     // framing the whole occupied world and eases to the player's island over
     // `INTRO_DURATION`; any input skips straight to the final pose.
-    if let Some(me) = me {
+    //
+    // Title screen (author-requested): mirrors `main.rs` — while it's up,
+    // hold the camera on the whole-occupied-world pose so the
+    // semi-transparent backdrop shows a hint of the full map; the intro
+    // only starts once the Draw button dismisses the title, easing from
+    // this exact pose (`intro_from` calls the same `world_fit`).
+    if state.ui_state.title_active {
+        if let Some(me) = me {
+            if let Some((island, _)) = my_island(&state.tables, me) {
+                let (target, zoom) = world_fit(&state.tables, island_world_center(island), ISLAND_FIT_ZOOM);
+                state.camera.target = target;
+                state.camera.zoom = zoom;
+                state.camera.offset = Vector2::new(360.0, 360.0);
+            }
+        }
+    } else if let Some(me) = me {
         if !state.centered_on_island {
             if let Some((island, _)) = my_island(&state.tables, me) {
                 let to_target = island_world_center(island);
@@ -1078,6 +1096,10 @@ fn frame(state: &mut State) {
     // HUD: snapshot server state, run widget input, apply resulting reducer
     // calls. Must run before the map-input blocks below so they can see
     // `ui_state.any_modal_open()`.
+    // `Some(name)` marks this frame as the clean, camera-centred export
+    // card. It is intentionally ephemeral: after the canvas is captured at
+    // the end of this frame, the normal game returns immediately.
+    let mut export_name: Option<String> = None;
     if let Some(me) = me {
         let user = state.tables.users.get(me);
         let hues: Vec<u16> = state
@@ -1202,6 +1224,14 @@ fn frame(state: &mut State) {
         if actions.center_camera {
             if let Some((island, _)) = my_island(&state.tables, me) {
                 recenter(&mut state.camera, island);
+            }
+        }
+        if actions.export_screenshot {
+            if let Some((island, _)) = my_island(&state.tables, me) {
+                // A share image always shows the caller's island, not their
+                // potentially zoomed-out/panned current map view.
+                recenter(&mut state.camera, island);
+                export_name = Some(state.ui_state.name_input.clone());
             }
         }
     }
@@ -1770,15 +1800,17 @@ fn frame(state: &mut State) {
     }
 
     let hexa_cursor_scale = camera.zoom / ISLAND_FIT_ZOOM;
-    for (screen, color, locked, name, snap_centre) in &other_cursors {
-        match snap_centre {
-            // F13 follow-up #2: mirrors `main.rs` — a hexagon-snapped
-            // cursor aims its tip at the cluster centre.
-            Some(centre) => world::draw_cursor_snapped(&mut d, *screen, *centre, *color, hexa_cursor_scale, *locked),
-            None => world::draw_cursor_scaled(&mut d, *screen, *color, other_cursor_scale, *locked),
-        }
-        if snap_centre.is_none() && other_cursor_scale >= 0.5 {
-            world::draw_cursor_label(&mut d, *screen, name, other_cursor_scale);
+    if export_name.is_none() {
+        for (screen, color, locked, name, snap_centre) in &other_cursors {
+            match snap_centre {
+                // F13 follow-up #2: mirrors `main.rs` — a hexagon-snapped
+                // cursor aims its tip at the cluster centre.
+                Some(centre) => world::draw_cursor_snapped(&mut d, *screen, *centre, *color, hexa_cursor_scale, *locked),
+                None => world::draw_cursor_scaled(&mut d, *screen, *color, other_cursor_scale, *locked),
+            }
+            if snap_centre.is_none() && other_cursor_scale >= 0.5 {
+                world::draw_cursor_label(&mut d, *screen, name, other_cursor_scale);
+            }
         }
     }
 
@@ -1808,51 +1840,63 @@ fn frame(state: &mut State) {
             show_token_import: true,
             rerank_secs,
         };
-        ui::draw(&mut d, &state.ui_state, &info, mouse_screen);
+        if let Some(name) = export_name.as_deref() {
+            ui::draw_export_frame(&mut d, name);
+        } else {
+            ui::draw(&mut d, &state.ui_state, &info, mouse_screen);
 
-        // F9.6 item 1: mirrors `main.rs` — eraser mode draws the cursor in a
-        // neutral gray plus a small eraser badge instead of the brush hue.
-        let (hue, sat, val) = brush;
-        let cursor_color = if state.ui_state.tool == ui::Tool::Erase {
-            Color::new(210, 210, 216, 255)
-        } else {
-            world::hsv_color(hue, sat, val)
-        };
-        // F13 (author follow-up): mirrors `main.rs` — visually snaps to the
-        // hexagon slot while merging; painting/hover logic still uses the
-        // real `mouse_world`/`mouse_screen`, only this draw call moves
-        // (and, follow-up #2, rotates to aim at the cluster centre).
-        if state.ui_state.tool == ui::Tool::Eyedropper {
-            ui::draw_eyedropper_cursor(&mut d, mouse_screen, eyedropper_preview);
-        } else {
-            match my_hexa_screen {
-                Some((tip, centre)) => world::draw_cursor_snapped(&mut d, tip, centre, cursor_color, hexa_cursor_scale, locked),
-                None => world::draw_cursor(&mut d, mouse_screen, cursor_color, locked),
+            // F9.6 item 1: mirrors `main.rs` — eraser mode draws the cursor in a
+            // neutral gray plus a small eraser badge instead of the brush hue.
+            let (hue, sat, val) = brush;
+            let cursor_color = if state.ui_state.tool == ui::Tool::Erase {
+                Color::new(210, 210, 216, 255)
+            } else {
+                world::hsv_color(hue, sat, val)
+            };
+            // F13 (author follow-up): mirrors `main.rs` — visually snaps to the
+            // hexagon slot while merging; painting/hover logic still uses the
+            // real `mouse_world`/`mouse_screen`, only this draw call moves
+            // (and, follow-up #2, rotates to aim at the cluster centre).
+            if state.ui_state.tool == ui::Tool::Eyedropper {
+                ui::draw_eyedropper_cursor(&mut d, mouse_screen, eyedropper_preview);
+            } else {
+                match my_hexa_screen {
+                    Some((tip, centre)) => world::draw_cursor_snapped(&mut d, tip, centre, cursor_color, hexa_cursor_scale, locked),
+                    None => world::draw_cursor(&mut d, mouse_screen, cursor_color, locked),
+                }
             }
         }
     }
-    if state.ui_state.tool == ui::Tool::Erase {
-        world::draw_eraser_badge(&mut d, mouse_screen);
-    } else if hover_takeable && matches!(state.ui_state.tool, ui::Tool::Paint | ui::Tool::Erase) {
-        // Move tool: left-drag pans instead of merging, so the "+"
-        // take-hint (which promises a long-press merge) would mislead.
-        world::draw_plus_hint(&mut d, mouse_screen);
+    if export_name.is_none() {
+        if state.ui_state.tool == ui::Tool::Erase {
+            world::draw_eraser_badge(&mut d, mouse_screen);
+        } else if hover_takeable && matches!(state.ui_state.tool, ui::Tool::Paint | ui::Tool::Erase) {
+            // Move tool: left-drag pans instead of merging, so the "+"
+            // take-hint (which promises a long-press merge) would mislead.
+            world::draw_plus_hint(&mut d, mouse_screen);
+        }
+        if let Some(frac) = state
+            .long_press
+            .as_ref()
+            .filter(|lp| !lp.fired && lp.target.is_some())
+            .map(|lp| (lp.press_at.elapsed().as_secs_f32() / LONG_PRESS_HOLD.as_secs_f32()).clamp(0.0, 1.0))
+        {
+            world::draw_hold_ring(&mut d, mouse_screen, frac);
+        }
+        // Author-requested: moved into the header band (top of screen, between
+        // the level/xp readout and the online count) instead of the footer's
+        // bottom-right corner — drawn here rather than inside `ui::draw_header`
+        // so both stay visible even before `me`/the HUD itself exists (e.g.
+        // while the socket is still connecting).
+        d.draw_text(&format!("ws: {}", state.ws_status), 220, 8, 13, Color::new(140, 140, 148, 220));
+        d.draw_fps(440, 4);
     }
-    if let Some(frac) = state
-        .long_press
-        .as_ref()
-        .filter(|lp| !lp.fired && lp.target.is_some())
-        .map(|lp| (lp.press_at.elapsed().as_secs_f32() / LONG_PRESS_HOLD.as_secs_f32()).clamp(0.0, 1.0))
-    {
-        world::draw_hold_ring(&mut d, mouse_screen, frac);
+    // EndDrawing must complete before the browser reads the finished canvas.
+    drop(d);
+    if export_name.is_some() {
+        run_js("window.stdb && window.stdb.downloadIslandImage()");
+        state.ui_state.show_info_toast("island image downloaded".to_string());
     }
-    // Author-requested: moved into the header band (top of screen, between
-    // the level/xp readout and the online count) instead of the footer's
-    // bottom-right corner — drawn here rather than inside `ui::draw_header`
-    // so both stay visible even before `me`/the HUD itself exists (e.g.
-    // while the socket is still connecting).
-    d.draw_text(&format!("ws: {}", state.ws_status), 220, 8, 13, Color::new(140, 140, 148, 220));
-    d.draw_fps(440, 4);
 }
 
 fn main() {

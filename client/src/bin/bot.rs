@@ -37,6 +37,10 @@ const CENTER: (f32, f32) = (0.0, 0.0);
 /// `ISLAND_EDGE_REACH` so the path traces the margin ring around the admin
 /// island rather than crossing its painted tiles.
 const PATH_RADIUS: f32 = world_geometry::ISLAND_EDGE_REACH + 10.0;
+/// The heart is painted on the central community island, so keep it compact
+/// and shift it toward the island's upper-right (screen) quadrant.
+const HEART_RADIUS: f32 = 9.0;
+const HEART_CENTER: (f32, f32) = (6.0, -6.0);
 /// The "Merge with me!" center bot instead idles in a small loop close to
 /// the world origin, inside the admin island's own territory — the
 /// backlog's literal ask ("centre ilot should have a bot"), and easy for a
@@ -54,6 +58,8 @@ const ASSIST_CORNER_HOLD_SECS: f32 = 3.0;
 const ASSIST_PERIOD_SECS: f32 = ASSIST_TRAVEL_SECS * 2.0 + ASSIST_CENTER_HOLD_SECS + ASSIST_CORNER_HOLD_SECS;
 /// Position update rate — matches roughly what a human mouse-drag produces.
 const TICK: Duration = Duration::from_millis(50);
+/// The heart bot periodically starts over with only its fresh seed color.
+const HEART_INVENTORY_RESET: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Copy)]
 enum Shape {
@@ -112,15 +118,35 @@ impl Shape {
 }
 
 /// Classic parametric heart curve (x = 16sin^3, y = 13cos-5cos2-2cos3-cos4),
-/// scaled so its 32-unit-wide bounding box fits PATH_RADIUS, and flipped on
-/// y since world-cartesian y still grows the same direction screen space did
-/// (see `world::axial_to_world`) but the formula assumes math-up.
+/// scaled to fit the central community island, and flipped on y since
+/// world-cartesian y still grows the same direction screen space did (see
+/// `world::axial_to_world`) but the formula assumes math-up.
 fn heart_position(t: f32) -> (f32, f32) {
     let a = t * 2.0 * PI;
     let x = 16.0 * a.sin().powi(3);
     let y = 13.0 * a.cos() - 5.0 * (2.0 * a).cos() - 2.0 * (3.0 * a).cos() - (4.0 * a).cos();
-    let scale = PATH_RADIUS / 16.0;
-    (CENTER.0 + x * scale, CENTER.1 - y * scale)
+    let scale = HEART_RADIUS / 16.0;
+    (HEART_CENTER.0 + x * scale, HEART_CENTER.1 - y * scale)
+}
+
+/// Same flat-top axial projection used by the clients. Heart coordinates are
+/// local to the slot-0 community island.
+fn world_to_axial(x: f32, y: f32) -> (i32, i32) {
+    let qf = x / 1.5;
+    let rf = y / 3f32.sqrt() - qf / 2.0;
+    let sf = -qf - rf;
+    let mut q = qf.round();
+    let mut r = rf.round();
+    let s = sf.round();
+    let q_diff = (q - qf).abs();
+    let r_diff = (r - rf).abs();
+    let s_diff = (s - sf).abs();
+    if q_diff > r_diff && q_diff > s_diff {
+        q = -r - s;
+    } else if r_diff > s_diff {
+        r = -q - s;
+    }
+    (q as i32, r as i32)
 }
 
 /// Traces the outline of a regular hexagon at constant speed, one straight
@@ -271,6 +297,7 @@ fn main() {
     let _ = ctx.reducers.set_name(shape.display_name());
 
     let start = Instant::now();
+    let mut last_heart_reset = Instant::now();
     let mut was_assist_corner_hold = false;
     loop {
         let t = (start.elapsed().as_secs_f32() / PERIOD_SECS).fract();
@@ -284,6 +311,17 @@ fn main() {
         was_assist_corner_hold = is_assist_corner_hold;
         let (x, y) = shape.position(t);
         let _ = ctx.reducers.set_pos(x, y);
+        if matches!(shape, Shape::Heart) {
+            if last_heart_reset.elapsed() >= HEART_INVENTORY_RESET {
+                // reset_account clears all discovered colors and gives the
+                // bot one fresh seed color. Do not set the brush here: a
+                // successful merge is deliberately allowed to control it.
+                reset_demo_account(&ctx);
+                last_heart_reset = Instant::now();
+            }
+            let (q, r) = world_to_axial(x, y);
+            let _ = ctx.reducers.paint_community_cell(q, r);
+        }
         std::thread::sleep(TICK);
     }
 }
