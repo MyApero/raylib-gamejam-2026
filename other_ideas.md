@@ -100,6 +100,6 @@ cursor for free, no bot-specific client code. See plan.md's F12 entry.)
 - [x] State to just move (third state with pencil and eraser)
 - [ ] Admin account with which you can connect and draw anywhere
 
-- [ ] Export My Island button at the top right. Island, Name, Link to their project, raylib.mister-esman.uk
+- [ ] Export My Island button at the top right. Island, Name, Link to their project, hexel.mister-esman.uk
 - [ ] Keys for HUD (C for Colors, L for Lock, I for My Isle, O for Account, R for Eraser, M for Move, P for Paint, H for Help)
 - [ ] Header: "HELP: PRESS ESC"

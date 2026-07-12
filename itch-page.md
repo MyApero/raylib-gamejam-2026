@@ -45,7 +45,7 @@ Full controls are one Escape-press away in-game.
 
 ### Also playable at
 
-**https://raylib.mister-esman.uk** — same live world either way, so it
+**https://hexel.mister-esman.uk** — same live world either way, so it
 doesn't matter which entry point you (or your friends) use.
 
 ### Built with

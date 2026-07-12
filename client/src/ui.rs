@@ -1799,7 +1799,7 @@ pub fn draw_export_frame(d: &mut impl RaylibDraw, name: &str) {
     );
     d.draw_text("hexel", 24, 18, 24, Color::RAYWHITE);
     d.draw_text(&format!("{}'s island", display_name), 24, 47, 22, Color::new(210, 214, 224, 255));
-    d.draw_text("https://raylib.mister-esman.uk", 168, 680, 16, Color::RAYWHITE);
+    d.draw_text("https://hexel.mister-esman.uk", 168, 680, 16, Color::RAYWHITE);
 }
 
 fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {

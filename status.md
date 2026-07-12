@@ -311,7 +311,7 @@ environment has none). Drafted the actual page copy as `itch-page.md`
 (new, repo root): pitch, "the idea" (explains merge in player-facing
 language, reusing the same framing as F12 part 2's in-game help overlay so
 the two stay consistent), a trimmed controls list, the "also playable at
-raylib.mister-esman.uk" link plan.md's F7 already calls for, and a
+hexel.mister-esman.uk" link plan.md's F7 already calls for, and a
 tech/credits line. Also left author-facing notes at the bottom of that file
 (screenshots/GIF of an actual merge, itch cover-image sizing, upload
 settings per F7) since a page with copy but no images still undersells the

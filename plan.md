@@ -487,7 +487,7 @@ Tasks:
 2. VPS: `git pull`, publish the module (the VPS runs SpacetimeDB 2.7 — module is
    compiled by the local pinned 2.6.1 CLI and published remotely, same as before;
    verify server-side version acceptance), `./build-web.sh` on the VPS, sanity-check
-   `https://raylib.mister-esman.uk`. Stop the old bots
+   `https://hexel.mister-esman.uk`. Stop the old bots
    (`hexmerge-bot@*.service`) — they speak the old schema; adapting them is P2.
 3. itch.io package: a zip whose root has `index.html` = the SINGLE-game page (adapt
    from `game.html`; the dual-iframe wrapper is NOT the submission page) + wasm/js/data
@@ -496,7 +496,7 @@ Tasks:
    from itch.io itself (wss through Cloudflare, touch on a phone via the itch page).
    The itch "Run game" button cannot be redirected (and the jam requires the embedded
    wasm to be evaluated on itch anyway) — instead add an "also playable at
-   https://raylib.mister-esman.uk" link in the project page description; both entry
+   https://hexel.mister-esman.uk" link in the project page description; both entry
    points hit the same server, so it's one shared world either way.
 4. Keep the module + Caddy + VPS up through the voting window (ends 2026-07-18); note
    the ops commands in `WORK.md`.
