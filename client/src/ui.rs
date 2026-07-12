@@ -222,6 +222,11 @@ pub struct UiState {
     /// first click of "Delete isle & account", fired on a second click within
     /// `RESET_CONFIRM_WINDOW`.
     admin_delete_armed_at: Option<Instant>,
+    /// Header sound on/off toggle. Pure local UI state — the caller
+    /// (`main.rs`/`bin/web.rs`) reads it every frame and drives
+    /// `RaylibAudio::set_master_volume` accordingly, since the audio device
+    /// handle lives with the caller, not here.
+    pub sound_on: bool,
 }
 
 /// Which of the admin edit modal's three text fields currently owns keyboard
@@ -317,6 +322,7 @@ impl UiState {
             admin_edit_focus: AdminEditField::None,
             admin_delete_armed_at: None,
             swatch_hsl: HashMap::new(),
+            sound_on: true,
         }
     }
 
@@ -783,6 +789,15 @@ fn my_island_btn_rect() -> Rectangle {
 fn account_btn_rect() -> Rectangle {
     let export = export_btn_rect();
     Rectangle::new(export.x - 8.0 - 60.0, 3.0, 60.0, 22.0)
+}
+
+/// Author-requested: sound on/off toggle, sitting directly left of the
+/// Account button — chained off it the same way `account_btn_rect` chains
+/// off `export_btn_rect`, so adding this button doesn't shift Account/
+/// Export/anything else in the header.
+fn sound_btn_rect() -> Rectangle {
+    let account = account_btn_rect();
+    Rectangle::new(account.x - 8.0 - 28.0, 3.0, 28.0, 22.0)
 }
 
 fn overlay_rect() -> Rectangle {
@@ -1275,6 +1290,9 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     if clicked && point_in(mouse, lock_btn_rect()) && state.tool != Tool::Eyedropper {
         actions.set_lock = Some(!info.locked);
     }
+    if clicked && point_in(mouse, sound_btn_rect()) {
+        state.sound_on = !state.sound_on;
+    }
     if clicked && point_in(mouse, account_btn_rect()) {
         let opening = !state.account_open;
         state.close_all_modals();
@@ -1652,7 +1670,7 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         draw_title_screen(d, state, mouse);
         return;
     }
-    draw_header(d, info);
+    draw_header(d, info, state.sound_on);
     draw_footer(d, state, info);
     if state.overlay_open {
         draw_overlay(d, state, info, mouse);
@@ -1872,6 +1890,7 @@ const BUTTON_TOOLTIPS: &[(fn() -> Rectangle, &str, &[&str])] = &[
     (recent_btn_rect, "Recent colors", &["Open your raw HSL", "color history"]),
     (lock_btn_rect, "Lock", &["Blocks cursor merging", "and central HEXA"]),
     (brush_btn_rect, "Eyedropper", &["Click or tap, then select", "a painted tile", "Merging is disabled while active"]),
+    (sound_btn_rect, "Sound", &["Toggle sound effects", "and background music"]),
     (account_btn_rect, "Account", &["Copy or import your ID,", "start a new or delete your account"]),
     (
         footer_link_edit_rect,
@@ -2050,7 +2069,7 @@ fn draw_toast(d: &mut impl RaylibDraw, toast: &Toast, info: &HudInfo) {
     d.draw_text(&toast.text, text_x, bar.y as i32 + 9, 14, Color::new(255, 255, 255, alpha));
 }
 
-fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo) {
+fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo, sound_on: bool) {
     d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, HEADER_H), Color::new(10, 10, 14, 235));
     // Author-requested: the short identity hex used to lead this line, but
     // it's already reachable via the Account overlay ("Signed in as ..."),
@@ -2082,6 +2101,12 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo) {
     let ab = account_btn_rect();
     d.draw_rectangle_rec(ab, Color::new(40, 40, 48, 255));
     d.draw_text("Account", ab.x as i32 + 8, ab.y as i32 + 6, 10, Color::RAYWHITE);
+
+    // Author-requested: sound on/off, directly left of Account. Same
+    // muted-red-when-off convention as `lock_btn_rect`'s locked state.
+    let sb = sound_btn_rect();
+    d.draw_rectangle_rec(sb, if sound_on { Color::new(40, 40, 48, 255) } else { Color::new(120, 60, 60, 255) });
+    draw_sound_icon(d, sb, sound_on);
 
     let export = export_btn_rect();
     d.draw_rectangle_rec(export, Color::new(40, 40, 48, 255));
@@ -2295,6 +2320,25 @@ fn draw_export_icon(d: &mut impl RaylibDraw, r: Rectangle) {
         color,
     );
     d.draw_rectangle_lines((r.x + 6.0) as i32, (r.y + 14.0) as i32, 16, 5, color);
+}
+
+/// Sound on/off glyph: a speaker body (square + cone, two triangles sharing
+/// the cone's diagonal) with either two small radiating arcs (on) or a
+/// diagonal mute slash (off) — the button background already carries the
+/// on/off color (see `draw_header`), this just makes it legible at a glance.
+fn draw_sound_icon(d: &mut impl RaylibDraw, r: Rectangle, on: bool) {
+    let color = Color::new(235, 235, 240, 255);
+    let cx = r.x + r.width / 2.0 - 3.0;
+    let cy = r.y + r.height / 2.0;
+    d.draw_rectangle_rec(Rectangle::new(cx - 6.0, cy - 3.0, 4.0, 6.0), color);
+    d.draw_triangle(Vector2::new(cx - 2.0, cy - 3.0), Vector2::new(cx - 2.0, cy + 3.0), Vector2::new(cx + 4.0, cy + 7.0), color);
+    d.draw_triangle(Vector2::new(cx - 2.0, cy - 3.0), Vector2::new(cx + 4.0, cy - 7.0), Vector2::new(cx + 4.0, cy + 7.0), color);
+    if on {
+        d.draw_ring(Vector2::new(cx + 6.0, cy), 3.0, 4.0, -50.0, 50.0, 8, color);
+        d.draw_ring(Vector2::new(cx + 6.0, cy), 6.0, 7.0, -50.0, 50.0, 8, color);
+    } else {
+        d.draw_line_ex(Vector2::new(cx + 1.0, cy - 8.0), Vector2::new(cx + 11.0, cy + 8.0), 2.0, Color::new(255, 230, 230, 255));
+    }
 }
 
 /// Default paint-mode icon for the paint/erase/move

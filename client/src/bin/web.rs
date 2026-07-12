@@ -908,6 +908,10 @@ struct State {
     /// alongside it for the process's whole lifetime is the same tradeoff,
     /// not a new one.
     sfx: Option<sfx::Sfx<'static>>,
+    /// Same leaked handle `sfx` was loaded from, kept here too so the header
+    /// sound toggle can call `set_master_volume` without re-deriving it from
+    /// `sfx` (which only exposes individual `Sound`/`Music` handles).
+    audio: Option<&'static RaylibAudio>,
 }
 
 fn handle_message(state: &mut State, raw: &str) {
@@ -1323,6 +1327,11 @@ fn frame(state: &mut State) {
             is_admin: is_admin(&state.tables, me),
         };
         let actions = ui::handle_input(&mut state.rl, &mut state.ui_state, &info);
+        // Header sound toggle: master volume covers sfx and the theme music
+        // in one call, so no per-call-site gating is needed (matches main.rs).
+        if let Some(audio) = state.audio {
+            audio.set_master_volume(if state.ui_state.sound_on { 1.0 } else { 0.0 });
+        }
         if let Some((h, s, v)) = actions.set_brush {
             call_reducer("set_brush", serde_json::json!([h, s, v]));
         }
@@ -2180,6 +2189,7 @@ fn main() {
         was_focused: true,
         mouse_state_stale: false,
         sfx,
+        audio,
     });
     let arg = Box::into_raw(state) as *mut c_void;
     unsafe {

@@ -834,6 +834,11 @@ fn main() {
                 is_admin: is_admin(&ctx, me),
             };
             let actions = ui::handle_input(&mut rl, &mut ui_state, &info);
+            // Header sound toggle: master volume covers sfx and the theme
+            // music in one call, so no per-call-site gating is needed.
+            if let Some(audio) = &audio {
+                audio.set_master_volume(if ui_state.sound_on { 1.0 } else { 0.0 });
+            }
             // Note: last-3 tracking happens inside `ui::handle_input` itself
             // (only on an explicit swatch/last-3 click), NOT here — every
             // `set_brush` action also fires continuously while dragging the
