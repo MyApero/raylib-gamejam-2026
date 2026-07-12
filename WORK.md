@@ -59,28 +59,7 @@ spacetime publish -s <vps-host>:3000 --module-path server hexel
 spacetime generate --lang rust --out-dir client/src/module_bindings --module-path server
 ```
 
-And update `HOST` in `client/src/main.rs` to `http://<vps-host>:3000` (or
-`https://...` behind TLS, required once this is served from itch.io).
-`client/src/bin/web.rs` needs no change — it resolves SpacetimeDB's host
-from the page's own hostname at runtime — but if the VPS's SpacetimeDB
-port ever differs from 3000, update `SPACETIMEDB_PORT` there.
-
-## Frontend deployment (`raylib.mister-esman.uk`)
-
-This repo is cloned on the VPS at `~/raylib-gamejam-2026`, and Caddy's site
-root for `raylib.mister-esman.uk` points directly at
-`~/raylib-gamejam-2026/client/web` — no separate deploy/copy step. To ship
-a frontend update:
-
-```bash
-# on the VPS
-cd ~/raylib-gamejam-2026
-git pull
-./build-web.sh   # rebuilds web.wasm/web.js and copies them into client/web/ in place
-```
-
-Caddy serves the updated static files immediately — no reload needed (that
-hot-reload gotcha only applies to editing the Caddyfile itself, see above).
+And update `HOST` in `client/src/main.rs` to `http://<vps-host>:3000`
 
 ## Admin (F10)
 
@@ -107,13 +86,7 @@ spacetime call hexel delete_island_cells <island_id> -s local
 spacetime call hexel admin_set_xp_by_name "<display name>" 300 -s local
 ```
 
-The admin password is never committed in plaintext — only its SHA-256 digest
-lives in `server/src/lib.rs` (`constants::ADMIN_PASSWORD_SHA256`). To change
-it, generate a new digest and swap the constant:
 
-```bash
-python3 -c "import hashlib; print(hashlib.sha256(b'<new password>').hexdigest())"
-```
 
 ### Backups
 

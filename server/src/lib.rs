@@ -744,20 +744,16 @@ pub fn set_pos(ctx: &ReducerContext, cx: f32, cy: f32) -> Result<(), String> {
         ..user
     });
 
-    // Cursor-merge detection: nearest fresh, unlocked, differently-hued
-    // online user within MERGE_DIST.
+    // Cursor-merge detection: nearest unlocked, differently-hued online user
+    // within MERGE_DIST. Deliberately NOT gated on `last_seen` freshness
+    // (unlike HEXA eligibility/time-XP below) — the client only sends
+    // `set_pos` when the mouse moves, so a player standing still for more
+    // than PRESENCE_TIMEOUT_SECS would otherwise become un-mergeable despite
+    // being visibly online and in place. `online` (reliably cleared on
+    // disconnect) is enough to know they're really there.
     let mut nearest: Option<(Identity, u16, f32)> = None;
     for other in ctx.db.user().iter() {
         if other.identity == caller || !other.online || other.locked {
-            continue;
-        }
-        if ctx
-            .timestamp
-            .duration_since(other.last_seen)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(i64::MAX)
-            >= constants::PRESENCE_TIMEOUT_SECS
-        {
             continue;
         }
         let d2 = (other.cx - cx).powi(2) + (other.cy - cy).powi(2);
@@ -1506,6 +1502,106 @@ pub fn delete_island_cells(ctx: &ReducerContext, island_id: u32) -> Result<(), S
     for cell in ctx.db.island_cell().island_id().filter(&island_id).collect::<Vec<_>>() {
         ctx.db.island_cell().id().delete(cell.id);
     }
+    Ok(())
+}
+
+/// Mirrors the client's `island_at` (`client/src/main.rs`): which island (if
+/// any) owns global cell `(q, r)`, plus its local offset. Unlike
+/// `in_any_island_territory` (bool only, used by the margin reducers), the
+/// admin "draw anywhere" tool needs the actual island + local coords to
+/// write into `IslandCell`.
+fn island_containing(ctx: &ReducerContext, q: i32, r: i32) -> Option<(Island, i32, i32)> {
+    for island in ctx.db.island().iter() {
+        let (sq, sr) = geometry::slot_coords(island.slot);
+        let (ccx, ccy) = geometry::slot_center(sq, sr);
+        let (lq, lr) = (q - ccx, r - ccy);
+        if geometry::hexdist(lq, lr) <= constants::ISLAND_RADIUS {
+            return Some((island, lq, lr));
+        }
+    }
+    None
+}
+
+/// Admin-only "draw anywhere" (author request): paints whichever cell —
+/// someone else's island, the community island, or the margin — contains
+/// global axial `(q, r)`, bypassing the normal per-island ownership check
+/// (`paint_island_cell`) and territory check (`paint_margin_cell`). Still
+/// spends a paint token via `take_paint_token`, same anti-cheat/rate-limit
+/// path every other paint reducer uses. Not gated by `check_not_frozen`,
+/// same rationale as `delete_island_cells`: moderation/admin action, not
+/// ordinary play.
+#[spacetimedb::reducer]
+pub fn admin_paint_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), String> {
+    require_admin(ctx)?;
+    if let Some((island, lq, lr)) = island_containing(ctx, q, r) {
+        let (_, color) = take_paint_token(ctx)?;
+        let id = geometry::island_cell_id(island.id, lq, lr);
+        if let Some(cell) = ctx.db.island_cell().id().find(id) {
+            ctx.db.island_cell().id().update(IslandCell {
+                color,
+                painted_by: ctx.sender(),
+                painted_at: ctx.timestamp,
+                ..cell
+            });
+        } else {
+            ctx.db.island_cell().insert(IslandCell {
+                id,
+                island_id: island.id,
+                q: lq,
+                r: lr,
+                color,
+                painted_by: ctx.sender(),
+                painted_at: ctx.timestamp,
+            });
+        }
+        return Ok(());
+    }
+    let highest_slot = ctx.db.island().iter().map(|i| i.slot).max().unwrap_or(0);
+    let bound = constants::SLOT_SPACING * (geometry::occupied_rings(highest_slot) + 1);
+    if geometry::hexdist(q, r) > bound {
+        return Err("cell is outside the current canvas bounds".to_string());
+    }
+    let (_, color) = take_paint_token(ctx)?;
+    let id = geometry::margin_cell_id(q, r);
+    if let Some(cell) = ctx.db.margin_cell().id().find(id) {
+        ctx.db.margin_cell().id().update(MarginCell {
+            color,
+            painted_by: ctx.sender(),
+            painted_at: ctx.timestamp,
+            ..cell
+        });
+    } else {
+        ctx.db.margin_cell().insert(MarginCell {
+            id,
+            q,
+            r,
+            color,
+            painted_by: ctx.sender(),
+            painted_at: ctx.timestamp,
+        });
+    }
+    Ok(())
+}
+
+/// Erase counterpart to `admin_paint_cell` — same relationship
+/// `erase_island_cell`/`erase_margin_cell` have to their paint counterparts.
+#[spacetimedb::reducer]
+pub fn admin_erase_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), String> {
+    require_admin(ctx)?;
+    if let Some((island, lq, lr)) = island_containing(ctx, q, r) {
+        take_paint_token(ctx)?;
+        let id = geometry::island_cell_id(island.id, lq, lr);
+        ctx.db.island_cell().id().delete(id);
+        return Ok(());
+    }
+    let highest_slot = ctx.db.island().iter().map(|i| i.slot).max().unwrap_or(0);
+    let bound = constants::SLOT_SPACING * (geometry::occupied_rings(highest_slot) + 1);
+    if geometry::hexdist(q, r) > bound {
+        return Err("cell is outside the current canvas bounds".to_string());
+    }
+    take_paint_token(ctx)?;
+    let id = geometry::margin_cell_id(q, r);
+    ctx.db.margin_cell().id().delete(id);
     Ok(())
 }
 

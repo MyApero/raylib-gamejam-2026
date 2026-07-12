@@ -33,6 +33,13 @@ fn my_island(ctx: &DbConnection, me: Identity) -> Option<Island> {
     ctx.db.island().owner().find(&me)
 }
 
+/// Author request (admin "draw anywhere"): true once `me` has claimed the
+/// admin role via `claim_admin` — `Config.admin` is a public field, so every
+/// client already sees it.
+fn is_admin(ctx: &DbConnection, me: Identity) -> bool {
+    ctx.db.config().id().find(&0).is_some_and(|c| c.admin == Some(me))
+}
+
 fn island_world_center(island: &Island) -> Vector2 {
     let (q, r) = world::slot_coords(island.slot);
     let (cx, cy) = world::slot_center(q, r);
@@ -77,6 +84,9 @@ enum Paintable {
     /// F14 (decision 20): local offset into the slot-0 community island —
     /// paintable by anyone, not just its (sentinel) "owner".
     Community(i32, i32),
+    /// Author request (admin "draw anywhere"): absolute world coords on
+    /// someone else's island, paintable only because `me` is admin.
+    Anywhere(i32, i32),
     /// Someone else's island, or no island yet — not paintable.
     None,
 }
@@ -100,6 +110,9 @@ fn classify(ctx: &DbConnection, me: Identity, world_q: i32, world_r: i32) -> Pai
     }
     if !world::in_any_island_territory(world_q, world_r) {
         return Paintable::Margin(world_q, world_r);
+    }
+    if is_admin(ctx, me) {
+        return Paintable::Anywhere(world_q, world_r);
     }
     Paintable::None
 }
@@ -864,6 +877,16 @@ fn main() {
             camera.target.y -= delta.y / camera.zoom;
         }
 
+        // Suppressing normal title-screen updates is not sufficient: the
+        // server may still have a stale cursor at the world centre and let
+        // it participate in HEXA. Park it well outside the formation.
+        if ui_state.title_active && me.is_some() && last_sent_pos.is_none() {
+            let parked = Vector2::new(1_000_000.0, 1_000_000.0);
+            let _ = ctx.reducers.set_pos(parked.x, parked.y);
+            last_sent_pos = Some(parked);
+            last_sent_at = Instant::now();
+        }
+
         // Cursor heartbeat: throttled to CURSOR_SEND_HZ and only when moved.
         if map_input_allowed && me.is_some() {
             let moved = last_sent_pos.is_none_or(|p| (p.x - mouse_world.x).abs() > 1e-4 || (p.y - mouse_world.y).abs() > 1e-4);
@@ -887,6 +910,7 @@ fn main() {
                         Paintable::OwnIsland(lq, lr) => Some((0u8, lq, lr)),
                         Paintable::Margin(q, r) => Some((1u8, q, r)),
                         Paintable::Community(lq, lr) => Some((2u8, lq, lr)),
+                        Paintable::Anywhere(q, r) => Some((3u8, q, r)),
                         Paintable::None => None,
                     };
                     if let Some(key) = target {
@@ -911,6 +935,12 @@ fn main() {
                                 }
                                 ((2, lq, lr), true) => {
                                     let _ = ctx.reducers.erase_community_cell(lq, lr);
+                                }
+                                ((3, q, r), false) => {
+                                    let _ = ctx.reducers.admin_paint_cell(q, r);
+                                }
+                                ((3, q, r), true) => {
+                                    let _ = ctx.reducers.admin_erase_cell(q, r);
                                 }
                                 _ => unreachable!(),
                             }

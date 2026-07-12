@@ -173,10 +173,12 @@ struct IslandLikeRow {
     liker_hex: String,
 }
 
-/// F8: only `next_rerank_at` is consumed client-side (the countdown banner);
-/// `frozen`/`admin` have no client behavior yet.
+/// F8: `next_rerank_at` drives the countdown banner. `admin_hex` (author
+/// request, admin "draw anywhere") is consumed by `is_admin` below; `frozen`
+/// still has no client behavior.
 struct ConfigRow {
     next_rerank_at_micros: Option<i64>,
+    admin_hex: Option<String>,
 }
 
 /// Delegates to shared `world::normalize_identity_hex` (also left-pads to the
@@ -319,7 +321,10 @@ fn parse_config(v: &Value) -> Option<(u32, ConfigRow)> {
     let id = r.field("id", 0)?.as_u64()? as u32;
     Some((
         id,
-        ConfigRow { next_rerank_at_micros: r.field("next_rerank_at", 3)?.pipe(opt_value).map(timestamp_micros) },
+        ConfigRow {
+            next_rerank_at_micros: r.field("next_rerank_at", 3)?.pipe(opt_value).map(timestamp_micros),
+            admin_hex: r.field("admin", 2)?.pipe(opt_value).and_then(identity_hex),
+        },
     ))
 }
 
@@ -555,11 +560,21 @@ enum Paintable {
     Margin(i32, i32),
     /// F14 (decision 20): the slot-0 community island — paintable by anyone.
     Community(i32, i32),
+    /// Author request (admin "draw anywhere"): absolute world coords on
+    /// someone else's island, paintable only because `me` is admin.
+    Anywhere(i32, i32),
     None,
 }
 
 fn my_island<'a>(tables: &'a Tables, me: &str) -> Option<(&'a IslandRow, u32)> {
     tables.islands.iter().find(|(_, isl)| isl.owner_hex == me).map(|(&id, isl)| (isl, id))
+}
+
+/// Author request (admin "draw anywhere"): true once `me` has claimed the
+/// admin role via `claim_admin` — mirrors `main.rs`'s `is_admin` against this
+/// file's plain `Tables` instead of `ctx.db`.
+fn is_admin(tables: &Tables, me: &str) -> bool {
+    tables.configs.get(&0).is_some_and(|c| c.admin_hex.as_deref() == Some(me))
 }
 
 fn island_world_center(island: &IslandRow) -> Vector2 {
@@ -587,6 +602,9 @@ fn classify(tables: &Tables, me: &str, world_q: i32, world_r: i32) -> Paintable 
     }
     if !world::in_any_island_territory(world_q, world_r) {
         return Paintable::Margin(world_q, world_r);
+    }
+    if is_admin(tables, me) {
+        return Paintable::Anywhere(world_q, world_r);
     }
     Paintable::None
 }
@@ -1333,6 +1351,15 @@ fn frame(state: &mut State) {
         state.camera.target.y -= delta.y / state.camera.zoom;
     }
 
+    // Park the authoritative cursor outside the HEXA radius while the title
+    // is active; otherwise a stale world-centre position can participate.
+    if state.ui_state.title_active && me.is_some() && state.last_sent_pos.is_none() {
+        let parked = Vector2::new(1_000_000.0, 1_000_000.0);
+        call_reducer("set_pos", serde_json::json!([parked.x, parked.y]));
+        state.last_sent_pos = Some(parked);
+        state.last_sent_at = Instant::now();
+    }
+
     // Cursor heartbeat: throttled to CURSOR_SEND_HZ and only when moved.
     if map_input_allowed && me.is_some() {
         let moved = state
@@ -1362,6 +1389,7 @@ fn frame(state: &mut State) {
                     Paintable::OwnIsland(lq, lr) => Some((0u8, lq, lr)),
                     Paintable::Margin(q, r) => Some((1u8, q, r)),
                     Paintable::Community(lq, lr) => Some((2u8, lq, lr)),
+                    Paintable::Anywhere(q, r) => Some((3u8, q, r)),
                     Paintable::None => None,
                 };
                 if let Some(key) = target {
@@ -1375,6 +1403,8 @@ fn frame(state: &mut State) {
                             ((1, q, r), true) => call_reducer("erase_margin_cell", serde_json::json!([q, r])),
                             ((2, lq, lr), false) => call_reducer("paint_community_cell", serde_json::json!([lq, lr])),
                             ((2, lq, lr), true) => call_reducer("erase_community_cell", serde_json::json!([lq, lr])),
+                            ((3, q, r), false) => call_reducer("admin_paint_cell", serde_json::json!([q, r])),
+                            ((3, q, r), true) => call_reducer("admin_erase_cell", serde_json::json!([q, r])),
                             _ => unreachable!(),
                         }
                         state.stroke_last = Some(key);

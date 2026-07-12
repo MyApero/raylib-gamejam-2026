@@ -78,4 +78,5 @@ of whether the cursor was actually over the map — see status.md)
 
 - [ ] Wrong color in color modal for tile border
 - [ ] Pseudo is not showing the first refresh
-- [ ] staying, not moving, makes the merge mechanic fail
+- [x] staying, not moving, makes the merge mechanic fail
+- [ ] Leaving for a long time and coming back, the game can freeze. It can also bug on the sound system, making a screamer

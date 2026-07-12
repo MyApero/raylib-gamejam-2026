@@ -112,6 +112,9 @@ pub struct UiState {
     toast: Option<Toast>,
     /// A confirmed local Hexa reward opens this acknowledgement modal.
     hexa_success_open: bool,
+    /// HEXA stays visible in the world briefly before its acknowledgement
+    /// modal covers it. Pending success is deliberately not modal yet.
+    hexa_success_pending_at: Option<Instant>,
     /// Anchor hue for the Hue slider's ±`HUE_TOLERANCE` window. Set exactly
     /// on a swatch click; otherwise auto-recentered (see `handle_input`)
     /// whenever the server's actual brush hue drifts outside that window —
@@ -222,6 +225,7 @@ impl UiState {
             dragging: Drag::None,
             toast: None,
             hexa_success_open: false,
+            hexa_success_pending_at: None,
             base_hue: 0,
             pending_select: None,
             account_open: false,
@@ -400,8 +404,7 @@ impl UiState {
     /// Kept separate from `Toast`: several pooled inventory rows can arrive
     /// together, but they should all refer to one shared modal.
     pub fn show_hexa_success_popup(&mut self) {
-        self.close_all_modals();
-        self.hexa_success_open = true;
+        self.hexa_success_pending_at = Some(Instant::now());
     }
 
     /// Seeds the name field from the server row exactly once. After that the
@@ -641,7 +644,7 @@ fn overlay_close_rect() -> Rectangle {
 /// The acknowledgement control in the HEXA completion modal. Kept as a
 /// shared layout helper so its hitbox and drawn button cannot drift apart.
 fn hexa_success_ok_rect() -> Rectangle {
-    Rectangle::new(SCREEN_W / 2.0 - 78.0, 472.0, 156.0, 42.0)
+    Rectangle::new(SCREEN_W / 2.0 - 78.0, 540.0, 156.0, 42.0)
 }
 
 /// Whether this frame's click should dismiss whichever modal occupies the
@@ -828,6 +831,12 @@ fn color_hex(c: Color) -> String {
 }
 
 pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) -> Actions {
+    if state.hexa_success_pending_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(2)) {
+        state.hexa_success_pending_at = None;
+        state.close_all_modals();
+        state.hexa_success_open = true;
+    }
+
     // Warm the "Colors" button's per-letter glyph-width cache — a no-op
     // after the first call. Must happen here, before `begin_drawing`, since
     // `measure_text` needs a live `RaylibHandle` (see `colors_letter_offsets`).
@@ -1311,12 +1320,12 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
 fn draw_hexa_success_popup(d: &mut impl RaylibDraw) {
     d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(5, 7, 13, 185));
 
-    let panel = Rectangle::new(94.0, 185.0, 532.0, 350.0);
+    let panel = Rectangle::new(90.0, 90.0, 550.0, 550.0);
     d.draw_rectangle_rec(panel, Color::new(22, 25, 38, 250));
     d.draw_rectangle_lines_ex(panel, 3.0, Color::new(255, 220, 92, 255));
     d.draw_rectangle_lines_ex(Rectangle::new(panel.x + 8.0, panel.y + 8.0, panel.width - 16.0, panel.height - 16.0), 1.0, Color::new(255, 245, 190, 180));
 
-    let centre = Vector2::new(SCREEN_W / 2.0, panel.y + 62.0);
+    let centre = Vector2::new(SCREEN_W / 2.0, panel.y + 125.0);
     for i in 0..6 {
         let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::FRAC_PI_3;
         let p = Vector2::new(centre.x + 78.0 * angle.cos(), centre.y + 78.0 * angle.sin());
@@ -1325,10 +1334,10 @@ fn draw_hexa_success_popup(d: &mut impl RaylibDraw) {
     d.draw_poly(centre, 6, 29.0, 0.0, Color::new(255, 240, 170, 255));
     d.draw_poly_lines_ex(centre, 6, 29.0, 0.0, 2.0, Color::new(70, 48, 20, 255));
 
-    d.draw_text("HEXA!", 230, 300, 62, Color::new(255, 232, 125, 255));
-    d.draw_text("FORMATION COMPLETE", 236, 365, 24, Color::RAYWHITE);
-    d.draw_text("Thank you for playing HEXEL.", 228, 407, 20, Color::new(255, 245, 205, 255));
-    d.draw_text("You and your friends made the HEXA and pooled your colors.", 139, 438, 16, Color::new(220, 224, 236, 255));
+    d.draw_text("HEXA!", 270, 340, 62, Color::new(255, 232, 125, 255));
+    d.draw_text("FORMATION COMPLETE", 216, 405, 24, Color::RAYWHITE);
+    d.draw_text("Thank you for playing HEXEL.", 218, 457, 20, Color::new(255, 245, 205, 255));
+    d.draw_text("You and your friends made the HEXA and pooled your colors.", 129, 488, 16, Color::new(220, 224, 236, 255));
 
     let ok = hexa_success_ok_rect();
     d.draw_rectangle_rounded(ok, 0.3, 8, Color::new(255, 220, 92, 255));
@@ -1607,12 +1616,12 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo) {
     // Author-requested: sits in the gap right after the level/xp readout
     // (freed up by removing the web-only "ws: ..." debug line that used to
     // live here).
-    d.draw_text("PRESS ESC for help", 150, 8, 12, Color::GRAY);
+    d.draw_text("PRESS ESC for help", 110, 8, 12, Color::GRAY);
     d.draw_text("hexel", 338, 6, 16, Color::RAYWHITE);
     // Author-requested: camera world position, two stacked lines in the gap
     // between the wordmark and the online count.
-    d.draw_text(&format!("X: {}", info.camera_target.x.round() as i32), 400, 2, 11, Color::LIGHTGRAY);
-    d.draw_text(&format!("Y: {}", info.camera_target.y.round() as i32), 400, 14, 11, Color::LIGHTGRAY);
+    d.draw_text(&format!("X: {}", info.camera_target.x.round() as i32), 260, 2, 11, Color::LIGHTGRAY);
+    d.draw_text(&format!("Y: {}", info.camera_target.y.round() as i32), 260, 14, 11, Color::LIGHTGRAY);
     // Fixed-position right-side label rather than measuring text width —
     // the draw handle has no default-font `measure_text` (that's only on
     // `RaylibHandle`, unavailable once `begin_drawing` hands out its borrow).
