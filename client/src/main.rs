@@ -613,7 +613,7 @@ fn main() {
                             pending_gift_claim = None;
                             reward_sound_this_frame = true;
                             if let Some(s) = &sfx {
-                                s.play_gift_reward(&s.new_color, rl.get_random_value(0..=2), rl.get_random_value(0..=5));
+                                s.play_gift_reward(&s.new_color, rl.get_random_value(0..=2), rl.get_random_value(0..=99));
                             }
                         } else if inv.obtained_with.is_none() {
                             // F13: a Hexa-pooled grant ALSO leaves
@@ -751,7 +751,7 @@ fn main() {
                 if !leveled && !reward_sound_this_frame {
                     if let Some(s) = &sfx {
                         if pending_gift_claim.is_some_and(|t| t.elapsed() <= GIFT_CLAIM_WINDOW) {
-                            s.play_gift_reward(&s.xp, rl.get_random_value(0..=2), rl.get_random_value(0..=5));
+                            s.play_gift_reward(&s.xp, rl.get_random_value(0..=2), rl.get_random_value(0..=99));
                         } else {
                             s.xp.play();
                         }

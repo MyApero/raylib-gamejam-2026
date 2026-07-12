@@ -1095,7 +1095,7 @@ fn frame(state: &mut State) {
                         state.pending_gift_claim = None;
                         reward_sound_this_frame = true;
                         if let Some(s) = &state.sfx {
-                            s.play_gift_reward(&s.new_color, state.rl.get_random_value(0..=2), state.rl.get_random_value(0..=5));
+                            s.play_gift_reward(&s.new_color, state.rl.get_random_value(0..=2), state.rl.get_random_value(0..=99));
                         }
                     } else if inv.obtained_with_hex.is_none() {
                         // F13: mirrors `main.rs` — a Hexa-pooled grant also
@@ -1221,7 +1221,7 @@ fn frame(state: &mut State) {
             if !leveled && !reward_sound_this_frame {
                 if let Some(s) = &state.sfx {
                     if state.pending_gift_claim.is_some_and(|t| t.elapsed() <= GIFT_CLAIM_WINDOW) {
-                        s.play_gift_reward(&s.xp, state.rl.get_random_value(0..=2), state.rl.get_random_value(0..=5));
+                        s.play_gift_reward(&s.xp, state.rl.get_random_value(0..=2), state.rl.get_random_value(0..=99));
                     } else {
                         s.xp.play();
                     }
