@@ -654,6 +654,10 @@ pub struct Actions {
     /// slots by the leaderboard (likes, then tiles painted) right now
     /// instead of waiting for the periodic re-rank.
     pub admin_force_rerank: bool,
+    /// Author-requested: clicking the "hexel" wordmark in the header opens
+    /// the project's own itch.io page (distinct from `click_link`/
+    /// `open_own_link`, which open a per-island rate id).
+    pub open_project_page: bool,
 }
 
 fn footer_bg() -> Rectangle {
@@ -665,6 +669,15 @@ fn footer_bg() -> Rectangle {
 /// global action that remains easy to find on touch devices.
 fn export_btn_rect() -> Rectangle {
     Rectangle::new(SCREEN_W - 34.0, 3.0, 28.0, 22.0)
+}
+
+/// Author-requested: the "hexel" wordmark in the header is clickable — opens
+/// the project's itch.io page. Matches `draw_header`'s `draw_text("hexel",
+/// 338, 6, 16, ...)` position with generous padding rather than a measured
+/// text width (the draw handle's `measure_text` isn't available here, see
+/// `draw_header`'s own comment on `account_btn_rect` positioning).
+fn hexel_logo_rect() -> Rectangle {
+    Rectangle::new(336.0, 4.0, 50.0, 20.0)
 }
 
 /// Padding from the screen's left/right edges for the two buttons now
@@ -1211,6 +1224,10 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         actions.export_screenshot = true;
         // The header button is a complete gesture of its own. In particular,
         // do not let this same click blur/commit the name field below.
+        return actions;
+    }
+    if clicked && point_in(mouse, hexel_logo_rect()) {
+        actions.open_project_page = true;
         return actions;
     }
     // Collected first, applied after: `note_used_hue` below needs `&mut
@@ -2075,21 +2092,31 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo) {
 /// image. The map itself is rendered by the caller with the camera snapped to
 /// the player's island; keeping the card here makes native and web exports
 /// visually identical.
-pub fn draw_export_frame(d: &mut impl RaylibDraw, name: &str) {
+pub fn draw_export_frame(d: &mut impl RaylibDraw, name: &str, link_id: Option<u32>) {
     let display_name = if name.trim().is_empty() { "My" } else { name.trim() };
 
+    let footer_h = if link_id.is_some() { 92.0 } else { 72.0 };
     d.draw_rectangle_gradient_v(0, 0, SCREEN_W as i32, 88, Color::new(8, 10, 16, 245), Color::new(8, 10, 16, 0));
     d.draw_rectangle_gradient_v(
         0,
-        (SCREEN_H - 72.0) as i32,
+        (SCREEN_H - footer_h) as i32,
         SCREEN_W as i32,
-        72,
+        footer_h as i32,
         Color::new(8, 10, 16, 0),
         Color::new(8, 10, 16, 245),
     );
     d.draw_text("hexel", 24, 18, 24, Color::RAYWHITE);
     d.draw_text(&format!("{}'s island", display_name), 24, 47, 22, Color::new(210, 214, 224, 255));
     d.draw_text("https://hexel.mister-esman.uk", 168, 680, 16, Color::RAYWHITE);
+    // Author-requested: the shared image should carry the island's itch.io
+    // rate link (if the player set one) so a rater can jump straight to it
+    // from a screenshot, not just the app's landing page above. Left-aligned
+    // (not centred) like the rest of this card's text — the draw handle has
+    // no default-font `measure_text` here, see the header's own note above.
+    if let Some(id) = link_id {
+        let url = format!("https://itch.io/jam/raylib-6x-gamejam/rate/{id}");
+        d.draw_text(&url, 24, 700, 16, Color::new(120, 180, 255, 255));
+    }
 }
 
 fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {

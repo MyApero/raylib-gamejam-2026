@@ -438,7 +438,30 @@ fn main() {
     // see `world::hexa_advance_display`'s doc comment), lerped frame to
     // frame from the server's authoritative `hexa_cluster` rows.
     let mut hexa_display: HashMap<Identity, Vector2> = HashMap::new();
+    // Bug fix: clicking the header's "hexel" link (`open_url`, spawns an
+    // external browser) sends focus away from the game window. GLFW can
+    // miss the mouse-up that happens while unfocused, so `is_mouse_button_
+    // down` reads stuck-"pressed" the moment focus returns — and painting/
+    // panning are level-triggered off exactly that call, so the brush kept
+    // drawing every frame with no button actually held. Latch "stale" on
+    // the unfocused->focused edge and hold every level-triggered mouse
+    // action off until the buttons genuinely read up again (either the
+    // delayed release event arrives, or they were never really down).
+    let mut was_focused = true;
+    let mut mouse_state_stale = false;
     while !rl.window_should_close() {
+        let focused_now = rl.is_window_focused();
+        if focused_now && !was_focused {
+            mouse_state_stale = true;
+        }
+        was_focused = focused_now;
+        if mouse_state_stale
+            && !rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
+            && !rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
+            && !rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT)
+        {
+            mouse_state_stale = false;
+        }
         if let Err(e) = ctx.frame_tick() {
             eprintln!("frame_tick: {e}");
             break;
@@ -827,6 +850,9 @@ fn main() {
             if let Some(rate_id) = actions.open_own_link {
                 open_url(&format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"));
             }
+            if actions.open_project_page {
+                open_url("https://itch.io/jam/raylib-6x-gamejam/rate/4767021");
+            }
             // Author-requested: footer button replacing the old "click your
             // own island" gesture, which just painted instead of opening
             // the popup.
@@ -917,6 +943,7 @@ fn main() {
         // Shift needed — everything downstream that already gates on
         // `!panning` (painting, long-press-merge) is skipped for free.
         let panning = map_input_allowed
+            && !mouse_state_stale
             && (rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
                 || rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT)
                 || (rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT) && rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT))
@@ -954,7 +981,7 @@ fn main() {
         // is over the header/footer HUD.
         if map_input_allowed && over_map_area && matches!(ui_state.tool, ui::Tool::Paint | ui::Tool::Erase) {
             if let Some(me) = me {
-                if rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && !panning {
+                if rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && !panning && !mouse_state_stale {
                     let (wq, wr) = world::world_to_axial(mouse_world);
                     let target = match classify(&ctx, me, wq, wr) {
                         Paintable::OwnIsland(lq, lr) => Some((0u8, lq, lr)),
@@ -1589,7 +1616,7 @@ fn main() {
                 is_admin: is_admin(&ctx, me),
             };
             if let Some(name) = export_name.as_deref() {
-                ui::draw_export_frame(&mut d, name);
+                ui::draw_export_frame(&mut d, name, info.link_id);
             } else {
                 ui::draw(&mut d, &ui_state, &info, mouse_screen);
 

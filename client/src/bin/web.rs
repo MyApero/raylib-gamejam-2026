@@ -880,6 +880,20 @@ struct State {
     /// the click that closes an overlay can't also paint the cell behind it
     /// once it's gone.
     suppress_map_until_release: bool,
+    /// Bug fix: mirrors `main.rs`'s stale-focus latch. Opening the header's
+    /// "hexel" link (`window.open`, `_blank`) can switch the browser's
+    /// active tab away from the canvas mid-gesture; the canvas's mouseup
+    /// never lands if the release happens after that switch, so raylib's
+    /// web platform (blur/focus-callback driven `IsWindowFocused`, canvas-
+    /// scoped mouse state) reads stuck-"pressed" the moment the tab regains
+    /// focus. `was_focused` tracks the previous frame's focus state so the
+    /// unfocused->focused edge can be detected.
+    was_focused: bool,
+    /// True from that edge until every mouse button genuinely reads up
+    /// again — see the same field's twin in `main.rs` for the full
+    /// explanation. Held off level-triggered input (painting, panning) for
+    /// as long as this is true.
+    mouse_state_stale: bool,
     /// F12: `None` if the audio device failed to init (no sound card,
     /// browser autoplay block, headless) — every call site degrades to
     /// silence instead of unwrapping. Backed by a leaked `'static`
@@ -934,6 +948,21 @@ extern "C" fn on_frame(arg: *mut c_void) {
 }
 
 fn frame(state: &mut State) {
+    // Bug fix (see `mouse_state_stale`'s doc comment): latch stale on the
+    // unfocused->focused edge, clear it once every button genuinely reads
+    // up again.
+    let focused_now = state.rl.is_window_focused();
+    if focused_now && !state.was_focused {
+        state.mouse_state_stale = true;
+    }
+    state.was_focused = focused_now;
+    if state.mouse_state_stale
+        && !state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
+        && !state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
+        && !state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT)
+    {
+        state.mouse_state_stale = false;
+    }
     // One JS call pulls in everything the socket received since last frame.
     let raw = run_js("window.stdb ? window.stdb.frame() : '{}'");
     let data: FrameData = serde_json::from_str(&raw).unwrap_or_default();
@@ -1306,6 +1335,9 @@ fn frame(state: &mut State) {
             let js_url = serde_json::to_string(&url).unwrap();
             run_js(&format!("window.open({js_url}, '_blank')"));
         }
+        if actions.open_project_page {
+            run_js("window.open('https://itch.io/jam/raylib-6x-gamejam/rate/4767021', '_blank')");
+        }
         // Author-requested: footer button replacing the old "click your own
         // island" gesture, which just painted instead of opening the popup.
         // Discarding the reference half as `_` (rather than binding it) ends
@@ -1407,6 +1439,7 @@ fn frame(state: &mut State) {
     // needed — mirrors `main.rs`.
     let panning = map_input_allowed
         && !gesturing
+        && !state.mouse_state_stale
         && (state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
             || state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT)
             || (state.rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT) && state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT))
@@ -1449,7 +1482,7 @@ fn frame(state: &mut State) {
         && matches!(state.ui_state.tool, ui::Tool::Paint | ui::Tool::Erase)
     {
         if let Some(me) = me {
-            if state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && !panning {
+            if state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && !panning && !state.mouse_state_stale {
                 let (wq, wr) = world::world_to_axial(mouse_world);
                 let target = match classify(&state.tables, me, wq, wr) {
                     Paintable::OwnIsland(lq, lr) => Some((0u8, lq, lr)),
@@ -1979,7 +2012,7 @@ fn frame(state: &mut State) {
             is_admin: is_admin(&state.tables, me),
         };
         if let Some(name) = export_name.as_deref() {
-            ui::draw_export_frame(&mut d, name);
+            ui::draw_export_frame(&mut d, name, info.link_id);
         } else {
             ui::draw(&mut d, &state.ui_state, &info, mouse_screen);
 
@@ -2081,6 +2114,8 @@ fn main() {
         last_sent_at: Instant::now(),
         now_micros: 0,
         suppress_map_until_release: false,
+        was_focused: true,
+        mouse_state_stale: false,
         sfx,
     });
     let arg = Box::into_raw(state) as *mut c_void;

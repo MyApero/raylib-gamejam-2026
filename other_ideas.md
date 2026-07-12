@@ -98,7 +98,7 @@ cursor for free, no bot-specific client code. See plan.md's F12 entry.)
 - [x] hexel name at the center of the header
 - [x] Eyedropper button: click/tap it, then select a painted tile; middle-click remains a shortcut
 - [x] State to just move (third state with pencil and eraser)
-- [ ] Admin account with which you can connect and draw anywhere
+- [x] Admin account with which you can connect and draw anywhere
 
 - [ ] Export My Island button at the top right. Island, Name, Link to their project, hexel.mister-esman.uk
 - [ ] Keys for HUD (C for Colors, L for Lock, I for My Isle, O for Account, R for Eraser, M for Move, P for Paint, H for Help)
@@ -107,4 +107,4 @@ cursor for free, no bot-specific client code. See plan.md's F12 entry.)
 - [ ] Load screen while connecting to spacetimeDB, if it fails, suggest to deploy yourself
 - [ ] see leaderboard slot
 - [ ] hexel in bold
-- [ ] click on hexel go to itch io page
+- [x] click on hexel go to itch io page
