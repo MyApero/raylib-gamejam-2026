@@ -1781,12 +1781,12 @@ fn draw_help_overlay(d: &mut impl RaylibDraw) {
     d.draw_text("Merging colors", o.x as i32 + 20, ty, 15, section_color);
     ty += 24;
     const MERGE_LINES: &[&str] = &[
-        "Hues are your unlockable resource — you start with just one.",
-        "Touch cursors with another player: both brushes blend into a",
+        "Hues are your unlockable resource. You start with just one.",
+        "Touch cursors with another player and you both blend into a",
         "  brand-new hue and you both add it to your collection.",
-        "No other player around? Long-press any painted tile instead —",
-        "  you take a merge of your brush and that tile's color.",
-        "Merging earns XP; XP raises how saturated your brush can go.",
+        "No other player around? Long-press any painted tile instead.",
+        "You'll directly take that tile's color.",
+        "Merging earns XP and XP raises how saturated your brush can go.",
     ];
     for line in MERGE_LINES {
         d.draw_text(line, o.x as i32 + 20, ty, 14, Color::RAYWHITE);
