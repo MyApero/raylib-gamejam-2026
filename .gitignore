@@ -90,7 +90,7 @@ raylib
 emsdk
 
 # itch submission package
-hexaworld-itch.zip
+hexel-itch.zip
 
 # Secrets (F10: real ADMIN_PASSWORD lives here, never committed — see
 # server/.env.example for the template)
