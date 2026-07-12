@@ -103,6 +103,47 @@ spacetime call hexel admin_set_xp_by_name "<display name>" 300 -s local
 
 ### Backups
 
+#### Save
+
+```sh
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+BACKUP_DIR="$HOME/spacetime-backups"
+DATA_DIR="$HOME/.local/share/spacetime/data"
+mkdir -p "$BACKUP_DIR"
+tar -C "$DATA_DIR" --exclude=cache --exclude=spacetime.pid \
+  -cf - control-db program-bytes replicas metadata.toml config.toml \
+  | zstd -T0 -19 -q -o "$BACKUP_DIR/hexel-$STAMP.tar.zst"
+```
+
+#### Restore
+
+```sh
+# 1. Safety snapshot of current state before overwriting it (skippable)
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+DATA_DIR="$HOME/.local/share/spacetime/data"
+tar -C "$DATA_DIR" --exclude=cache --exclude=spacetime.pid \
+  -cf - control-db program-bytes replicas metadata.toml config.toml \
+  | zstd -T0 -19 -q -o "$HOME/spacetime-backups/pre-restore-safety-$STAMP.tar.zst"
+
+# 2. Stop the live server
+pkill -f spacetimedb-standalone
+while pgrep -f spacetimedb-standalone >/dev/null; do sleep 1; done
+
+# 3. Swap in the backup to restore
+rm -rf "$DATA_DIR/control-db" "$DATA_DIR/program-bytes" "$DATA_DIR/replicas" "$DATA_DIR/metadata.toml" "$DATA_DIR/config.toml"
+zstd -dc ~/spacetime-backups/hexel-<STAMP>.tar.zst | tar -C "$DATA_DIR" -xf -
+
+# 4. Restart it the same way it was originally running
+nohup /home/antoine/.local/share/spacetime/bin/2.6.1/spacetimedb-standalone start \
+  --data-dir "$DATA_DIR" \
+  --jwt-key-dir ~/.config/spacetime/ \
+  > "$DATA_DIR/logs/restart-$(date -u +%Y%m%dT%H%M%SZ).log" 2>&1 &
+disown
+
+# 5. Verify
+spacetime sql -s local hexel -y "SELECT * FROM island_cell"
+```
+
 No automated backup job — restoring "from a backup" (hexel.md's Admin
 section) means re-publishing a `spacetime sql` dump. Dump the world state
 before anything risky (a schema migration, a manual DB edit):

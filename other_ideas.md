@@ -102,4 +102,6 @@ cursor for free, no bot-specific client code. See plan.md's F12 entry.)
 
 - [ ] Export My Island button at the top right. Island, Name, Link to their project, hexel.mister-esman.uk
 - [ ] Keys for HUD (C for Colors, L for Lock, I for My Isle, O for Account, R for Eraser, M for Move, P for Paint, H for Help)
-- [ ] Header: "HELP: PRESS ESC"
+- [x] Header: "HELP: PRESS ESC"
+- [ ] recent colors should be saved in server
+- [ ] Load screen while connecting to spacetimeDB, if it fails, suggest to deploy yourself
