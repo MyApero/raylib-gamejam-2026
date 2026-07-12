@@ -78,3 +78,4 @@ of whether the cursor was actually over the map — see status.md)
 
 - [ ] Wrong color in color modal for tile border
 - [ ] Pseudo is not showing the first refresh
+- [ ] staying, not moving, makes the merge mechanic fail
