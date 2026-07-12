@@ -61,7 +61,7 @@ mod constants {
     /// XP is deliberately not part of the test, since idle time-XP ticks may
     /// have granted a few by the time they're stale enough to qualify).
     pub const REAP_MAX_INVENTORY_ROWS: usize = 1;
-    /// F10 (Hexaworld.md's Admin section): SHA-256 of the admin password,
+    /// F10 (hexel.md's Admin section): SHA-256 of the admin password,
     /// baked in at compile time by `build.rs` from the `ADMIN_PASSWORD` env
     /// var / gitignored `.env` (see `server/.env.example`) — never the
     /// plaintext, since this repo is public. `claim_admin` hashes the
@@ -550,10 +550,16 @@ pub struct HexaEvent {
 /// calls that detect the same membership naturally agree on it without any
 /// cross-call synchronization, and it changes the instant membership
 /// actually changes. `cx`/`cy` is the live centroid of every member's
-/// current position, shared by the whole group; `vertex_index` (0..
-/// `member_count`, stable — sorted by identity) is which hexagon-vertex
-/// slot this member renders at, so clients don't need to re-derive vertex
-/// assignment themselves. `ignited` mirrors `member_count >= HEXA_SIZE`.
+/// current position, shared by the whole group; `vertex_index` (usually
+/// 0..6, can overflow past 6 — see `hexa_assign_seats`) is which
+/// hexagon-vertex slot this member renders at, so clients don't need to
+/// re-derive vertex assignment themselves. It is STICKY, not sorted by
+/// identity: a returning member keeps its prior seat across an unrelated
+/// join/leave, and only a fresh joiner gets placed by real-world angle (see
+/// `upsert_hexa_cluster`/`hexa_assign_seats`) — so it is stateful-but-
+/// consistent (reducers serialize, so there's no cross-call race) rather
+/// than a pure function of membership alone, unlike `cluster_id`.
+/// `ignited` mirrors `member_count >= HEXA_SIZE`.
 #[spacetimedb::table(accessor = hexa_cluster, public)]
 pub struct HexaCluster {
     #[primary_key]
@@ -575,6 +581,29 @@ pub struct HexaSweepSchedule {
     #[auto_inc]
     scheduled_id: u64,
     scheduled_at: ScheduleAt,
+}
+
+/// One row per cursor merge only (never a tile merge or eyedrop,
+/// which has no second live player to show) — purely so clients can render
+/// BOTH pre-merge hues alongside the result, which the existing
+/// `Inventory`/`obtained_with` fields can't: by the time a client sees the
+/// new `Inventory` row, `apply_merge` has already overwritten both players'
+/// `User.hue` to the merged value, so the "before" hues are gone from live
+/// state. `public`, same reasoning as `HexaEvent`. Told apart from a
+/// `reset_account` reseed the same way `HexaEvent` is: joined against
+/// `Inventory.obtained_at` on this row's `at`, both stamped with the same
+/// `ctx.timestamp` by the same reducer call.
+#[spacetimedb::table(accessor = merge_event, public)]
+pub struct MergeEvent {
+    #[primary_key]
+    #[auto_inc]
+    id: u64,
+    at: Timestamp,
+    a: Identity,
+    b: Identity,
+    hue_a: u16,
+    hue_b: u16,
+    merged_hue: u16,
 }
 
 /// Author decision (F6 follow-up): the merge toast used to fall back to a
@@ -691,7 +720,7 @@ fn require_admin(ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }
 
-/// F10 (Hexaworld.md's Admin section: "can freeze the game so no one can
+/// F10 (hexel.md's Admin section: "can freeze the game so no one can
 /// interact anymore"): shared guard called first by every player-facing
 /// mutating reducer. Scheduled/system reducers (rerank, time-XP, reap,
 /// connect/disconnect) and the three admin reducers deliberately do NOT call
@@ -750,6 +779,15 @@ pub fn set_pos(ctx: &ReducerContext, cx: f32, cy: f32) -> Result<(), String> {
         let me = ctx.db.user().identity().find(caller).ok_or("unknown user")?;
         if !me.locked && me.hue != partner_hue {
             let merged = merge::merge_hue(me.hue, partner_hue);
+            ctx.db.merge_event().insert(MergeEvent {
+                id: 0,
+                at: ctx.timestamp,
+                a: caller,
+                b: partner,
+                hue_a: me.hue,
+                hue_b: partner_hue,
+                merged_hue: merged,
+            });
             apply_merge(ctx, caller, partner, merged, true);
         }
     }
@@ -816,28 +854,123 @@ fn hexa_cluster_id(sorted_members: &[Identity]) -> u64 {
     hasher.finish()
 }
 
+/// Fixed world-angle (radians) of hexagon slot `s` —
+/// slot 0 straight up, `+FRAC_PI_3` per slot going around, matching the
+/// client's `hexagon_vertex_positions` layout at phase 0 exactly (both sides
+/// must agree on which physical direction "slot 2" points, since the client
+/// draws the vertex and this only picks the index).
+fn hexa_slot_angle(s: u32) -> f32 {
+    -std::f32::consts::FRAC_PI_2 + (s % 6) as f32 * std::f32::consts::FRAC_PI_3
+}
+
+/// Wrap-aware angular distance in radians, always in `[0, PI]` (e.g. the gap
+/// between angle `-PI + 0.1` and `PI - 0.1` is `0.2`, not `2*PI - 0.2`).
+fn hexa_ang_dist(a: f32, b: f32) -> f32 {
+    let diff = (a - b).rem_euclid(std::f32::consts::TAU);
+    diff.min(std::f32::consts::TAU - diff)
+}
+
+/// Sticky angle-based seat assignment. Identity-sort-order seating reshuffled
+/// every seat on any join or
+/// leave, since `vertex_index` was just "position in the sorted member
+/// list" — a hexagon that had settled into a shape would visibly re-scramble
+/// for an unrelated membership change. `prior`/`angles` are both indexed in
+/// the same identity-sorted order the caller (`upsert_hexa_cluster`) builds
+/// its member list in; `prior[i]` is the member's EXISTING seat (`None` for
+/// a fresh join, no current `hexa_cluster` row).
+///
+/// Pass 1: every returning member keeps `prior % 6`. If two returning
+/// members collide on the same mod-6 slot (only possible right after a
+/// cluster MERGE, where two previously-separate hexagons' seat numbering
+/// overlaps), the first one in identity order keeps it; the loser falls
+/// through to pass 2 and gets reseated like a fresh join.
+/// Pass 2: every unseated member takes whichever FREE slot (0..6) has the
+/// fixed angle closest to their actual angle around the fresh centroid —
+/// ties favor the lowest index, for determinism. This is what makes a new
+/// joiner slot in next to where they physically are, instead of an
+/// arbitrary identity-sort position.
+/// Overflow: `member_count > 6` is a real (if rare) edge case at this
+/// detection radius — once all 6 fixed slots are claimed, remaining members
+/// get consecutive indices 6, 7, ... The client's `hexagon_vertex_positions`
+/// already wraps any index `% 6` onto one of the 6 world positions, so this
+/// reads as an (unavoidable) overlap rather than a crash or a 7-gon.
+fn hexa_assign_seats(prior: &[Option<u32>], angles: &[f32]) -> Vec<u32> {
+    let n = prior.len();
+    let mut seats: Vec<Option<u32>> = vec![None; n];
+    let mut taken: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    for i in 0..n {
+        if let Some(p) = prior[i] {
+            let slot = p % 6;
+            if taken.insert(slot) {
+                seats[i] = Some(slot);
+            }
+        }
+    }
+
+    for i in 0..n {
+        if seats[i].is_some() {
+            continue;
+        }
+        let mut best: Option<(u32, f32)> = None;
+        for slot in 0..6u32 {
+            if taken.contains(&slot) {
+                continue;
+            }
+            let d = hexa_ang_dist(angles[i], hexa_slot_angle(slot));
+            if best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((slot, d));
+            }
+        }
+        let slot = match best {
+            Some((slot, _)) => slot,
+            None => {
+                let mut overflow = 6u32;
+                while taken.contains(&overflow) {
+                    overflow += 1;
+                }
+                overflow
+            }
+        };
+        taken.insert(slot);
+        seats[i] = Some(slot);
+    }
+
+    seats.into_iter().map(|s| s.unwrap()).collect()
+}
+
 /// F13: writes/updates EVERY member's own `HexaCluster` row in one pass
 /// (not just the caller's) — a single mover's `set_pos` call refreshes the
 /// whole visible group at once, rather than waiting for each member to
 /// happen to move themselves. `members` is the caller's own detected
 /// cluster (>= 2, itself included) with each member's current position, so
 /// the centroid/vertex assignment below reflect this instant's true state.
+/// Seat assignment (`hexa_assign_seats`) is sticky, not sort-order: a
+/// returning member's seat survives an unrelated join/leave; only a
+/// genuinely new member gets placed, by nearest real-world angle to a fixed
+/// slot — see that function's doc comment.
 fn upsert_hexa_cluster(ctx: &ReducerContext, members: &[(Identity, f32, f32)]) {
-    let mut sorted: Vec<Identity> = members.iter().map(|&(id, _, _)| id).collect();
-    sorted.sort();
-    let cluster_id = hexa_cluster_id(&sorted);
-    let n = members.len() as f32;
-    let cx = members.iter().map(|&(_, x, _)| x).sum::<f32>() / n;
-    let cy = members.iter().map(|&(_, _, y)| y).sum::<f32>() / n;
-    let ignited = members.len() >= constants::HEXA_SIZE;
-    for (idx, &identity) in sorted.iter().enumerate() {
+    let mut sorted: Vec<(Identity, f32, f32)> = members.to_vec();
+    sorted.sort_by_key(|&(id, _, _)| id);
+    let ids: Vec<Identity> = sorted.iter().map(|&(id, _, _)| id).collect();
+    let cluster_id = hexa_cluster_id(&ids);
+    let n = sorted.len() as f32;
+    let cx = sorted.iter().map(|&(_, x, _)| x).sum::<f32>() / n;
+    let cy = sorted.iter().map(|&(_, _, y)| y).sum::<f32>() / n;
+    let ignited = sorted.len() >= constants::HEXA_SIZE;
+
+    let prior: Vec<Option<u32>> = ids.iter().map(|&id| ctx.db.hexa_cluster().identity().find(id).map(|r| r.vertex_index)).collect();
+    let angles: Vec<f32> = sorted.iter().map(|&(_, x, y)| libm::atan2f(y - cy, x - cx)).collect();
+    let seats = hexa_assign_seats(&prior, &angles);
+
+    for (i, &identity) in ids.iter().enumerate() {
         let row = HexaCluster {
             identity,
             cluster_id,
             cx,
             cy,
-            member_count: members.len() as u32,
-            vertex_index: idx as u32,
+            member_count: sorted.len() as u32,
+            vertex_index: seats[i],
             ignited,
         };
         if ctx.db.hexa_cluster().identity().find(identity).is_some() {
@@ -958,6 +1091,12 @@ pub fn set_lock(ctx: &ReducerContext, locked: bool) -> Result<(), String> {
     check_not_frozen(ctx)?;
     let user = ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
     ctx.db.user().identity().update(User { locked, ..user });
+    if locked {
+        // Locked cursors cannot participate in a forming HEXA. Clear the
+        // owner's render row immediately rather than waiting for movement
+        // or the stale-row sweep.
+        ctx.db.hexa_cluster().identity().delete(ctx.sender());
+    }
     Ok(())
 }
 
@@ -1332,7 +1471,7 @@ pub fn show_island_border(ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }
 
-/// F10 (Hexaworld.md's Admin section): "1 identity with a password that is
+/// F10 (hexel.md's Admin section): "1 identity with a password that is
 /// admin" — grants `config.admin` to whoever proves knowledge of the
 /// password by hashing their input and comparing against
 /// `constants::ADMIN_PASSWORD_SHA256`. Idempotent for the current admin.
@@ -1366,7 +1505,7 @@ pub fn set_frozen(ctx: &ReducerContext, frozen: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// F10 (Hexaworld.md's Admin section): "can delete tiles" — a moderation
+/// F10 (hexel.md's Admin section): "can delete tiles" — a moderation
 /// tool for offensive/abusive island art. Wipes every painted cell on the
 /// target island; the island row itself (ownership, likes, link, border,
 /// slot) is untouched, so the owner keeps their spot and can repaint from
@@ -1638,7 +1777,7 @@ pub fn rerank_warn(ctx: &ReducerContext, _arg: RerankWarnSchedule) -> Result<(),
 
 /// F8 re-rank, step 2/2 (one-shot, fired by `rerank_warn`): re-sorts islands
 /// by likes desc, then painted-tile count desc (author-requested: the
-/// "hidden leaderboard" — Hexaworld.md — should reward active painters, not
+/// "hidden leaderboard" — hexel.md — should reward active painters, not
 /// just liked ones), then owner name asc (author-requested), ties finally by
 /// `created_at`, and rewrites `island.slot` accordingly. Slot 0 (reserved for
 /// the P2/F10 admin island) is never touched — only slots 1.. are re-sorted.
@@ -1816,5 +1955,68 @@ pub fn identity_disconnected(ctx: &ReducerContext) {
         ctx.db.user().identity().update(User { online: false, ..user });
     } else {
         log::warn!("Disconnect event for unknown user {:?}", ctx.sender());
+    }
+}
+
+/// `hexa_assign_seats` is pure and can be covered without a reducer context
+/// or database.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_3, TAU};
+
+    fn corner_angle(slot: u32) -> f32 {
+        -FRAC_PI_2 + (slot % 6) as f32 * FRAC_PI_3
+    }
+
+    #[test]
+    fn fresh_six_at_corner_angles_get_matching_slots() {
+        let prior = [None; 6];
+        let angles: Vec<f32> = (0..6).map(corner_angle).collect();
+        let seats = hexa_assign_seats(&prior, &angles);
+        assert_eq!(seats, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn returning_member_keeps_its_seat() {
+        // Member 0 previously sat at slot 4; a brand-new member (angle near
+        // slot 1's corner) joins. Slot 4 must stay reserved for member 0
+        // even though its real-world angle (near slot 0's corner here) would
+        // otherwise be closer to a different free slot.
+        let prior = [Some(4), None];
+        let angles = [corner_angle(0), corner_angle(1)];
+        let seats = hexa_assign_seats(&prior, &angles);
+        assert_eq!(seats[0], 4);
+        assert_eq!(seats[1], 1);
+    }
+
+    #[test]
+    fn merge_collision_resolves_deterministically() {
+        // Two previously-separate clusters merge; both members 0 and 1
+        // claim prior seat 2 (mod 6). Identity order (index order here)
+        // wins the collision: member 0 keeps slot 2, member 1 falls through
+        // to pass 2 and gets reseated by nearest angle.
+        let prior = [Some(2), Some(8)]; // 8 % 6 == 2, same slot as member 0
+        let angles = [corner_angle(2), corner_angle(5)];
+        let seats = hexa_assign_seats(&prior, &angles);
+        assert_eq!(seats[0], 2);
+        assert_eq!(seats[1], 5);
+    }
+
+    #[test]
+    fn seventh_member_overflows_to_index_six() {
+        let prior = [None; 7];
+        let angles: Vec<f32> = (0..6).map(corner_angle).chain(std::iter::once(corner_angle(0))).collect();
+        let seats = hexa_assign_seats(&prior, &angles);
+        assert_eq!(seats[..6], [0, 1, 2, 3, 4, 5]);
+        assert_eq!(seats[6], 6);
+    }
+
+    #[test]
+    fn ang_dist_wraps_around() {
+        let just_under_pi = std::f32::consts::PI - 0.1;
+        let just_over_neg_pi = -std::f32::consts::PI + 0.1;
+        assert!((hexa_ang_dist(just_under_pi, just_over_neg_pi) - 0.2).abs() < 1e-4);
+        assert_eq!(hexa_ang_dist(0.0, TAU), 0.0);
     }
 }

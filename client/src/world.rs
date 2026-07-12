@@ -123,17 +123,20 @@ pub mod constants {
     /// here as it does server-side) and the visual affordance radius.
     pub use shared::constants::GIFT_CLAIM_DIST;
 
-    /// F13: world-unit radius of the rendered hexagon a cluster's cursors
-    /// snap their DISPLAY position onto — client-only cosmetic (cluster
-    /// DETECTION is server-authoritative, via `hexa_cluster` rows; this only
-    /// controls how big the resulting shape reads on screen), picked a
-    /// little over one hex tile so it's clear without the snapped cursors
-    /// overlapping the tiles underneath.
-    pub const HEXA_VERTEX_RADIUS: f32 = 1.4;
+    /// F13: each snapped cursor is an equilateral wedge of the completed
+    /// hexagon. A regular hexagon's circumradius equals its side length, so
+    /// deriving the world radius from the cursor's screen-space side and
+    /// the fixed formation zoom makes every cursor base coincide exactly
+    /// with one polygon side.
+    pub const HEXA_CURSOR_SIDE_PX: f32 = 24.0;
+    pub const HEXA_VERTEX_RADIUS: f32 = HEXA_CURSOR_SIDE_PX / ISLAND_FIT_ZOOM;
     /// F13: how long a display position takes to lerp to a newly (re)assigned
     /// hexagon vertex slot — instant snapping reads as jarring teleportation
     /// once six cursors converge; this smooths it into a settle.
     pub const HEXA_SNAP_LERP_SECS: f32 = 0.35;
+    /// Camera settles quickly rather than cutting when a player joins a
+    /// formation. Zoom input remains locked until their cluster row leaves.
+    pub const HEXA_ZOOM_LERP_SECS: f32 = 0.18;
 }
 
 /// Strips an optional "0x" prefix, lowercases, then left-pads with `'0'` to
@@ -164,6 +167,61 @@ mod tests {
     fn normalize_identity_hex_leaves_full_width_unchanged() {
         let full = "AB".repeat(32);
         assert_eq!(normalize_identity_hex(&format!("0x{full}")), full.to_lowercase());
+    }
+
+    #[test]
+    fn hexa_cluster_frame_targets_shared_centre() {
+        let centre = Vector2::new(10.0, 10.0);
+        let members = [(7u32, 0u32)];
+        let (frame, vertices) = hexa_cluster_frame(centre, 2, &members, |_, t| t);
+        assert_eq!(vertices.len(), 6, "partial cluster still gets the full ring");
+        let target = frame[0].1;
+        assert!((target.x - centre.x).abs() < 1e-4 && (target.y - centre.y).abs() < 1e-4, "got {target:?}");
+    }
+
+    #[test]
+    fn hexa_side_exactly_matches_snapped_cursor_at_formation_zoom() {
+        let vertices = hexagon_vertex_positions(Vector2::zero(), 6, 0.0);
+        let dx = vertices[1].x - vertices[0].x;
+        let dy = vertices[1].y - vertices[0].y;
+        let side_px = (dx * dx + dy * dy).sqrt() * constants::ISLAND_FIT_ZOOM;
+        assert!((side_px - constants::HEXA_CURSOR_SIDE_PX).abs() < 1e-4, "got {side_px}");
+    }
+
+    #[test]
+    fn hexa_fixed_centre_ignores_motion_until_membership_changes() {
+        let mut fixed = std::collections::HashMap::new();
+        let initial = hexa_fixed_centre(&mut fixed, 7, Vector2::new(2.0, 3.0));
+        let moved = hexa_fixed_centre(&mut fixed, 7, Vector2::new(9.0, 11.0));
+        assert_eq!(initial, moved);
+
+        hexa_begin_fixed_centres(&mut fixed, [8]);
+        assert!(!fixed.contains_key(&7));
+        assert_eq!(hexa_fixed_centre(&mut fixed, 8, Vector2::new(9.0, 11.0)), Vector2::new(9.0, 11.0));
+    }
+
+    #[test]
+    fn hexa_advance_display_glides_in_from_raw() {
+        let prev = std::collections::HashMap::new();
+        let raw = Vector2::new(0.0, 0.0);
+        let target = Vector2::new(10.0, 0.0);
+        let members = [(1u32, target, raw)];
+        let after_short = hexa_advance_display(&prev, &members, 0.01);
+        let pos_short = after_short[&1];
+        assert!(pos_short.x > raw.x && pos_short.x < target.x, "first frame should start at raw and move toward target, got {pos_short:?}");
+        let after_long = hexa_advance_display(&after_short, &members, 5.0);
+        let pos_long = after_long[&1];
+        assert!((pos_long.x - target.x).abs() < 0.01, "should have settled near target after enough time, got {pos_long:?}");
+    }
+
+    #[test]
+    fn eyedropper_requires_an_owned_hue_and_clamps_saturation() {
+        assert_eq!(eyedropper_pick(None, |_| true, 50), EyedropperPick::Empty);
+        assert_eq!(eyedropper_pick(Some((120, 80, 90)), |_| false, 50), EyedropperPick::Locked);
+        assert_eq!(
+            eyedropper_pick(Some((120, 80, 90)), |hue| hue == 120, 50),
+            EyedropperPick::Selected { hue: 120, sat: 50, val: 90 }
+        );
     }
 }
 
@@ -201,18 +259,37 @@ pub fn sat_cap(level: u64) -> u8 {
 /// long-press ownership check).
 pub use shared::hue_dist;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EyedropperPick {
+    Empty,
+    Locked,
+    Selected { hue: u16, sat: u8, val: u8 },
+}
+
+/// Resolves an eyedropper sample independently of the native/web table and
+/// reducer adapters. Sampling never unlocks a color: the hue must already
+/// exist in the player's inventory, and saturation is clamped to their
+/// current level cap before it becomes the active brush.
+pub fn eyedropper_pick(
+    painted: Option<(u16, u8, u8)>,
+    owns_hue: impl FnOnce(u16) -> bool,
+    sat_cap: u8,
+) -> EyedropperPick {
+    let Some((hue, sat, val)) = painted else {
+        return EyedropperPick::Empty;
+    };
+    if !owns_hue(hue) {
+        return EyedropperPick::Locked;
+    }
+    EyedropperPick::Selected { hue, sat: sat.min(sat_cap), val }
+}
+
 /// Ease-in-out-cubic (author-requested for the launch intro: slow start,
 /// accelerating through the middle, slowing again into the landing — not
 /// the ease-OUT-cubic the intro originally shipped with, which was fast at
 /// the start instead). Standard formula: two mirrored cubic curves, one per
 /// half of `t`.
-pub fn ease_in_out_cubic(t: f32) -> f32 {
-    if t < 0.5 {
-        4.0 * t.powi(3)
-    } else {
-        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
-    }
-}
+pub use shared::ease_in_out_cubic;
 
 /// F11: flying-gift world position — a small circular drift around the
 /// spawn point, a pure function of elapsed seconds since `Gift.spawned_at`.
@@ -475,9 +552,45 @@ pub fn draw_cursor(d: &mut impl RaylibDraw, m: Vector2, color: Color, locked: bo
 /// without opening anyone's info popup. Needs `draw_line_ex` per edge rather
 /// than `draw_triangle_lines`, which has no thickness parameter.
 pub fn draw_cursor_scaled(d: &mut impl RaylibDraw, m: Vector2, color: Color, scale: f32, locked: bool) {
-    let tip = m;
-    let left = Vector2::new(m.x, m.y + 18.0 * scale);
-    let right = Vector2::new(m.x + 13.0 * scale, m.y + 13.0 * scale);
+    // (cos, sin) = (1, 0): identity rotation — the ordinary unrotated arrow.
+    draw_cursor_tri(d, m, 1.0, 0.0, color, scale, locked);
+}
+
+/// Draws one equilateral cursor wedge in a HEXA formation. `tip` is the
+/// shared centre and `side_midpoint` identifies the member's outer side;
+/// both are screen-space. Degenerate geometry falls back to the ordinary
+/// cursor rather than dividing by a near-zero length.
+pub fn draw_cursor_snapped(d: &mut impl RaylibDraw, tip: Vector2, side_midpoint: Vector2, color: Color, scale: f32, locked: bool) {
+    let (ox, oy) = (side_midpoint.x - tip.x, side_midpoint.y - tip.y);
+    let len = (ox * ox + oy * oy).sqrt();
+    if len < 1e-3 {
+        return draw_cursor_scaled(d, tip, color, scale, locked);
+    }
+    let (ox, oy) = (ox / len, oy / len);
+    let tangent = Vector2::new(-oy, ox);
+    let half_side = constants::HEXA_CURSOR_SIDE_PX * scale * 0.5;
+    let height = constants::HEXA_CURSOR_SIDE_PX * scale * 0.5 * 3.0_f32.sqrt();
+    let base_mid = Vector2::new(tip.x + ox * height, tip.y + oy * height);
+    // Keep the same winding as the ordinary cursor triangle. raylib culls
+    // the opposite face, which used to leave HEXA wedges showing only their
+    // black outline instead of the player's brush colour.
+    let left = Vector2::new(base_mid.x + tangent.x * half_side, base_mid.y + tangent.y * half_side);
+    let right = Vector2::new(base_mid.x - tangent.x * half_side, base_mid.y - tangent.y * half_side);
+    draw_cursor_triangle(d, tip, left, right, color, locked);
+}
+
+/// Shared body of `draw_cursor_scaled`/`draw_cursor_snapped`: the arrow
+/// triangle with its base offsets rotated by the caller's (cos, sin) about
+/// the tip. Rotation preserves winding, so `draw_triangle`'s face culling
+/// behaves identically to the old fixed-orientation call.
+fn draw_cursor_tri(d: &mut impl RaylibDraw, tip: Vector2, c: f32, s: f32, color: Color, scale: f32, locked: bool) {
+    let rot = |x: f32, y: f32| Vector2::new(tip.x + x * c - y * s, tip.y + x * s + y * c);
+    let left = rot(0.0, 18.0 * scale);
+    let right = rot(13.0 * scale, 13.0 * scale);
+    draw_cursor_triangle(d, tip, left, right, color, locked);
+}
+
+fn draw_cursor_triangle(d: &mut impl RaylibDraw, tip: Vector2, left: Vector2, right: Vector2, color: Color, locked: bool) {
     d.draw_triangle(tip, left, right, color);
     let outline_px = if locked { 3.0 } else { 1.0 };
     d.draw_line_ex(tip, left, outline_px, Color::BLACK);
@@ -512,59 +625,124 @@ pub fn draw_cursor_label(d: &mut impl RaylibDraw, tip: Vector2, name: &str, scal
 /// `HEXA_RADIUS`'s detection circle) — `HEXA_VERTEX_RADIUS` is picked purely
 /// for how the shape reads on screen. `count` past `HEXA_SIZE` (a rare
 /// geometric edge case: a cluster briefly bigger than 6 at this radius)
-/// wraps onto an already-occupied slot rather than growing a 7+-gon; angle
-/// offset puts slot 0 straight up.
+/// wraps onto an already-occupied slot rather than growing a 7+-gon.
+/// `phase` (radians) rotates the whole ring — slot 0 sits straight up only
+/// at `phase` 0; callers now pass `count.max(6)` since seats are no longer
+/// contiguous (sticky angle-based server seating, see `upsert_hexa_cluster`)
+/// and a partial cluster can hold non-contiguous slots like {0, 2, 5}.
 /// Author follow-up: vertex ASSIGNMENT (which slot a given member renders
-/// at) is now server-authoritative (`HexaCluster.vertex_index`), so both
+/// at) is server-authoritative (`HexaCluster.vertex_index`), so both
 /// clients read the identical slot for a given member instead of each
 /// re-sorting the group themselves — this function only turns a
-/// (center, count) pair into the actual on-screen positions.
-pub fn hexagon_vertex_positions(center: Vector2, count: usize) -> Vec<Vector2> {
+/// (center, count, phase) triple into the actual on-screen positions.
+pub fn hexagon_vertex_positions(center: Vector2, count: usize, phase: f32) -> Vec<Vector2> {
     (0..count)
         .map(|i| {
-            let angle = -std::f32::consts::FRAC_PI_2 + (i % 6) as f32 * std::f32::consts::FRAC_PI_3;
+            let angle = -std::f32::consts::FRAC_PI_2 + (i % 6) as f32 * std::f32::consts::FRAC_PI_3 + phase;
             Vector2::new(center.x + constants::HEXA_VERTEX_RADIUS * angle.cos(), center.y + constants::HEXA_VERTEX_RADIUS * angle.sin())
         })
         .collect()
+}
+
+/// Turns one cluster's server rows into the
+/// `hexa_advance_display` inputs (target per member) plus its drawn
+/// polygon — the one piece of per-frame hexa logic that's genuinely
+/// identical between `main.rs` and `web.rs` (grouping-by-cluster_id and the
+/// row/table types themselves differ too much between the native SDK
+/// bindings and the web JS-bridge state to share, but everything from here
+/// on doesn't), so it lives once here instead of twice. `members` contains
+/// this cluster's `(key, vertex_index)` pairs. Seats stay at phase zero and
+/// every cursor settles at the shared centre; its vertex index selects the
+/// outer polygon side used when drawing the wedge.
+///
+/// `raw` resolves a member's real unsnapped position given its own snap
+/// target as a fallback (used only if the member's live position can't be
+/// found, e.g. a stale row for someone who just disconnected) — callers
+/// close over their own `me`/mouse-position check and user-table lookup,
+/// since those differ by client.
+pub fn hexa_cluster_frame<K: Clone + Eq + std::hash::Hash>(
+    center: Vector2,
+    member_count: usize,
+    members: &[(K, u32)],
+    mut raw: impl FnMut(&K, Vector2) -> Vector2,
+) -> (Vec<(K, Vector2, Vector2)>, Vec<Vector2>) {
+    let vertices = hexagon_vertex_positions(center, member_count.max(6), 0.0);
+    let mut frame = Vec::with_capacity(members.len());
+    for (key, vertex_index) in members {
+        if vertices.get(*vertex_index as usize).is_some() {
+            // Six equilateral cursor wedges share the centroid as their tip.
+            // `vertex_index` selects the matching outer polygon side at draw
+            // time; the display position itself therefore settles here.
+            let target = center;
+            frame.push((key.clone(), target, raw(key, target)));
+        }
+    }
+    (frame, vertices)
+}
+
+/// Keeps the render anchor for each exact server-authoritative HEXA
+/// membership stable. Native and web have different table adapters, but
+/// cluster lifetime and anchor semantics must remain shared here.
+pub fn hexa_begin_fixed_centres(
+    fixed: &mut std::collections::HashMap<u64, Vector2>,
+    active_cluster_ids: impl IntoIterator<Item = u64>,
+) {
+    let active: std::collections::HashSet<u64> = active_cluster_ids.into_iter().collect();
+    fixed.retain(|id, _| active.contains(id));
+}
+
+/// Returns the centre captured on the first frame of this exact cluster
+/// membership. Later live centroid updates are deliberately ignored so
+/// small physical cursor movements cannot jitter the rendered figure.
+pub fn hexa_fixed_centre(
+    fixed: &mut std::collections::HashMap<u64, Vector2>,
+    cluster_id: u64,
+    observed: Vector2,
+) -> Vector2 {
+    *fixed.entry(cluster_id).or_insert(observed)
 }
 
 /// F13: advances the previous frame's persisted per-member DISPLAY position
 /// toward this frame's hexagon-vertex targets (read straight off the
 /// server's `hexa_cluster` rows — see that table's doc comment) — frame-rate
 /// independent exponential smoothing, reaching `HEXA_SNAP_LERP_SECS`-ish
-/// settle time regardless of `dt`. `clusters` pairs each group's member keys
-/// with its `hexagon_vertex_positions` output (same length, same order,
-/// index-matched by each member's own `vertex_index`). The returned map
-/// contains ONLY currently-clustered keys (a member no longer in any
-/// cluster is silently dropped, not lerped back to nothing), so it never
-/// grows past however many cursors are hexagon-snapped RIGHT NOW — this
-/// includes the LOCAL player's own key when they're a participant: per the
-/// author, your own cursor should visibly move to its hexagon slot too, not
-/// stay glued to the literal mouse position while everyone else's snaps.
-/// A key's first frame in a cluster starts already AT its target (no
-/// animating in from a stale or absent prior position).
+/// settle time regardless of `dt`. `members` is every currently-clustered
+/// key paired with its hexagon-vertex target (from `hexagon_vertex_positions`,
+/// index-matched by each member's own `vertex_index`) and its RAW position —
+/// the real, unsnapped cursor spot it was drawn at last frame (own mouse, or
+/// the other player's live `(cx, cy)`). The returned map contains ONLY
+/// currently-clustered keys (a member no longer in any cluster is silently
+/// dropped, not lerped back to nothing), so it never grows past however many
+/// cursors are hexagon-snapped RIGHT NOW — this includes the LOCAL player's
+/// own key when they're a participant: the local cursor
+/// should visibly move to its hexagon slot too, not stay glued to the
+/// literal mouse position while everyone else's snaps.
+/// A key's first frame in a cluster starts at its `raw` position and glides
+/// toward the target. Initializing at `target` would visibly teleport the
+/// cursor straight to the formation and skip the lerp entirely.
 pub fn hexa_advance_display<K: Clone + Eq + std::hash::Hash>(
     prev: &std::collections::HashMap<K, Vector2>,
-    clusters: &[(Vec<K>, Vec<Vector2>)],
+    members: &[(K, Vector2, Vector2)],
     dt: f32,
 ) -> std::collections::HashMap<K, Vector2> {
     let rate = (1.0 - (-dt / constants::HEXA_SNAP_LERP_SECS.max(0.001)).exp()).clamp(0.0, 1.0);
     let mut next = std::collections::HashMap::new();
-    for (keys, targets) in clusters {
-        for (key, &target) in keys.iter().zip(targets) {
-            let pos = prev.get(key).copied().unwrap_or(target);
-            next.insert(key.clone(), Vector2::new(pos.x + (target.x - pos.x) * rate, pos.y + (target.y - pos.y) * rate));
-        }
+    for (key, target, raw) in members {
+        let pos = prev.get(key).copied().unwrap_or(*raw);
+        next.insert(key.clone(), Vector2::new(pos.x + (target.x - pos.x) * rate, pos.y + (target.y - pos.y) * rate));
     }
     next
 }
 
 /// F13: connects a cluster's hexagon vertex slots pairwise — world-space, so
 /// it naturally pans/zooms with everything else (same as `draw_gift_icon`).
-/// A full 6-member cluster closes into a hexagon; fewer members draw an open
-/// chain (e.g. 2 members = one edge), reading as "waiting for the rest" per
-/// the author's spec. `ignited` (member_count >= `HEXA_SIZE`) draws it
-/// bright and thick; below that, a faint preview.
+/// `ignited` (member_count >= `HEXA_SIZE`) draws it bright and thick; below
+/// that, a faint preview. With sticky angle-based seating, `vertices` is now
+/// always the full 6-slot ring (callers pass `count.max(6)`) regardless of
+/// how many are actually occupied — a partial cluster with non-contiguous
+/// seats like {0, 2, 5} can't draw a meaningful "open chain" anymore, so this
+/// always closes into a full faint hexagon outline, reading as "the shape
+/// waiting to fill" rather than a chain growing toward closure.
 pub fn draw_hexa_polygon(d: &mut impl RaylibDraw, vertices: &[Vector2], ignited: bool) {
     let n = vertices.len().min(6);
     if n < 2 {

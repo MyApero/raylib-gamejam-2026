@@ -78,3 +78,14 @@ pub fn hue_dist(a: u16, b: u16) -> i32 {
     let diff = (a as i32 - b as i32).unsigned_abs() as i32;
     diff.min(360 - diff)
 }
+
+/// Standard ease-in-out cubic curve, shared by every client-side motion
+/// that needs the same slow-start / fast-middle / slow-finish timing.
+pub fn ease_in_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        4.0 * t.powi(3)
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}

@@ -4,7 +4,7 @@
 //! `run-bots.sh`): any disconnect exits the process non-zero and the
 //! supervisor reconnects it a moment later.
 //!
-//! Usage: `cargo run -p client --bin bot --release -- heart|hexagon|center`
+//! Usage: `cargo run -p client --bin bot --release -- heart|hexagon|center|assist-N`
 //!
 //! F12: positions are WORLD CARTESIAN units (1.0 = one hex outer radius,
 //! world origin = admin's slot-0 island center — see plan.md's geometry
@@ -30,7 +30,7 @@ use std::f32::consts::PI;
 use std::time::{Duration, Instant};
 
 const HOST: &str = "http://localhost:3000";
-const DB_NAME: &str = "hexmerge";
+const DB_NAME: &str = "hexel";
 /// World origin — the admin island's slot-0 center (plan.md geometry spec).
 const CENTER: (f32, f32) = (0.0, 0.0);
 /// Heart/hexagon loop radius, world units: comfortably past
@@ -44,6 +44,14 @@ const PATH_RADIUS: f32 = world_geometry::ISLAND_EDGE_REACH + 10.0;
 const CENTER_LOOP_RADIUS: f32 = 5.0;
 /// Seconds for one full lap of the trajectory.
 const PERIOD_SECS: f32 = 12.0;
+/// The five demo bots each own one of five corners of the central white
+/// island, leaving its sixth corner free for the presenter. Their 12-second
+/// cycle is: ease inward, hold together long enough to showcase HEXA, ease
+/// outward, then pause at their respective corners.
+const ASSIST_TRAVEL_SECS: f32 = 3.0;
+const ASSIST_CENTER_HOLD_SECS: f32 = 3.0;
+const ASSIST_CORNER_HOLD_SECS: f32 = 3.0;
+const ASSIST_PERIOD_SECS: f32 = ASSIST_TRAVEL_SECS * 2.0 + ASSIST_CENTER_HOLD_SECS + ASSIST_CORNER_HOLD_SECS;
 /// Position update rate — matches roughly what a human mouse-drag produces.
 const TICK: Duration = Duration::from_millis(50);
 
@@ -52,6 +60,9 @@ enum Shape {
     Heart,
     Hexagon,
     Center,
+    /// Five independently authenticated demo bots leave one HEXA slot open
+    /// for a human participant.
+    Assist(u8),
 }
 
 impl Shape {
@@ -60,18 +71,19 @@ impl Shape {
             "heart" => Some(Self::Heart),
             "hexagon" => Some(Self::Hexagon),
             "center" => Some(Self::Center),
-            _ => None,
+            _ => s.strip_prefix("assist-").and_then(|n| n.parse().ok()).filter(|&n| (1..=5).contains(&n)).map(Self::Assist),
         }
     }
 
     /// Distinct per-shape key so each bot keeps (and reuses across
     /// restarts) its own SpacetimeDB identity instead of colliding with
     /// the human client's or each other's.
-    fn creds_key(self) -> &'static str {
+    fn creds_key(self) -> String {
         match self {
-            Self::Heart => "hexmerge-bot-heart",
-            Self::Hexagon => "hexmerge-bot-hexagon",
-            Self::Center => "hexmerge-bot-center",
+            Self::Heart => "hexel-bot-heart".to_string(),
+            Self::Hexagon => "hexel-bot-hexagon".to_string(),
+            Self::Center => "hexel-bot-center".to_string(),
+            Self::Assist(n) => format!("hexel-bot-assist-{n}"),
         }
     }
 
@@ -79,11 +91,12 @@ impl Shape {
     /// the display name IS the on-screen callout — `world::draw_cursor_label`
     /// renders every online player's name above their cursor, so setting it
     /// to this string is the whole feature, no bot-specific client code.
-    fn display_name(self) -> &'static str {
+    fn display_name(self) -> String {
         match self {
-            Self::Heart => "heart-bot",
-            Self::Hexagon => "hexagon-bot",
-            Self::Center => "Merge with me!",
+            Self::Heart => "heart-bot".to_string(),
+            Self::Hexagon => "hexagon-bot".to_string(),
+            Self::Center => "Merge with me!".to_string(),
+            Self::Assist(n) => format!("Hexa bot {n}"),
         }
     }
 
@@ -93,6 +106,7 @@ impl Shape {
             Self::Heart => heart_position(t),
             Self::Hexagon => hexagon_position(t),
             Self::Center => center_position(t),
+            Self::Assist(n) => assist_position(n, t),
         }
     }
 }
@@ -130,13 +144,91 @@ fn center_position(t: f32) -> (f32, f32) {
     (CENTER.0 + CENTER_LOOP_RADIUS * a.cos(), CENTER.1 + CENTER_LOOP_RADIUS * a.sin())
 }
 
+fn assist_position(n: u8, t: f32) -> (f32, f32) {
+    // Use five of the actual six hexagon corners, rather than distributing
+    // five points around a pentagon. Slot 5 remains visibly available for
+    // the presenter.
+    let angle = (n - 1) as f32 * PI / 3.0;
+    let corner = (
+        CENTER.0 + world_geometry::ISLAND_EDGE_REACH * angle.cos(),
+        CENTER.1 + world_geometry::ISLAND_EDGE_REACH * angle.sin(),
+    );
+    let elapsed = t.fract() * ASSIST_PERIOD_SECS;
+    let radius_fraction = if elapsed < ASSIST_TRAVEL_SECS {
+        1.0 - shared::ease_in_out_cubic(elapsed / ASSIST_TRAVEL_SECS)
+    } else if elapsed < ASSIST_TRAVEL_SECS + ASSIST_CENTER_HOLD_SECS {
+        0.0
+    } else if elapsed < ASSIST_TRAVEL_SECS * 2.0 + ASSIST_CENTER_HOLD_SECS {
+        shared::ease_in_out_cubic((elapsed - ASSIST_TRAVEL_SECS - ASSIST_CENTER_HOLD_SECS) / ASSIST_TRAVEL_SECS)
+    } else {
+        1.0
+    };
+    (
+        CENTER.0 + (corner.0 - CENTER.0) * radius_fraction,
+        CENTER.1 + (corner.1 - CENTER.1) * radius_fraction,
+    )
+}
+
+fn assist_is_corner_hold(t: f32) -> bool {
+    let elapsed = t.fract() * ASSIST_PERIOD_SECS;
+    elapsed >= ASSIST_TRAVEL_SECS * 2.0 + ASSIST_CENTER_HOLD_SECS
+}
+
+fn reset_demo_account(ctx: &DbConnection) {
+    let (reset_tx, reset_rx) = std::sync::mpsc::sync_channel(1);
+    ctx.reducers
+        .reset_account_then(move |_ctx, result| {
+            let outcome = match result {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(message)) => Err(message),
+                Err(error) => Err(format!("internal reducer error: {error}")),
+            };
+            let _ = reset_tx.send(outcome);
+        })
+        .unwrap_or_else(|error| {
+            eprintln!("Failed to send reset_account: {error}");
+            std::process::exit(1);
+        });
+    match reset_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(())) => eprintln!("Demo account reset confirmed"),
+        Ok(Err(error)) => {
+            eprintln!("reset_account rejected: {error}");
+            std::process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("Timed out waiting for reset_account: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assist_bots_hold_center_for_three_seconds_and_leave_sixth_corner_free() {
+        assert_eq!(assist_position(1, 0.0), (world_geometry::ISLAND_EDGE_REACH, 0.0));
+        assert_eq!(assist_position(1, 3.0 / PERIOD_SECS), CENTER);
+        assert_eq!(assist_position(1, 5.9 / PERIOD_SECS), CENTER);
+        assert_eq!(assist_position(1, 9.0 / PERIOD_SECS), (world_geometry::ISLAND_EDGE_REACH, 0.0));
+        assert!(!assist_is_corner_hold(8.9 / PERIOD_SECS));
+        assert!(assist_is_corner_hold(9.0 / PERIOD_SECS));
+        assert!(!assist_is_corner_hold(0.0));
+
+        let unused_angle = 5.0 * PI / 3.0;
+        let unused = (world_geometry::ISLAND_EDGE_REACH * unused_angle.cos(), world_geometry::ISLAND_EDGE_REACH * unused_angle.sin());
+        assert!((1..=5).all(|n| assist_position(n, 0.0) != unused));
+    }
+}
+
 fn main() {
     let shape = std::env::args()
         .nth(1)
         .as_deref()
         .and_then(Shape::parse)
         .unwrap_or_else(|| {
-            eprintln!("usage: bot <heart|hexagon>");
+            eprintln!("usage: bot <heart|hexagon|center|assist-1..assist-5>");
             std::process::exit(2);
         });
 
@@ -167,11 +259,29 @@ fn main() {
     while ctx.try_identity().is_none() {
         std::thread::sleep(Duration::from_millis(20));
     }
-    let _ = ctx.reducers.set_name(shape.display_name().to_string());
+    // Demo assistants should start each launched showcase from a clean
+    // account and therefore receive a newly-rerolled starting hue. Keep
+    // the ambient heart/hexagon/center bots persistent. Reducer calls are
+    // asynchronous: wait for the server result before sending any position
+    // updates, otherwise a rejected reset is silent and the movement loop
+    // can begin with the previous run's hue.
+    if matches!(shape, Shape::Assist(_)) {
+        reset_demo_account(&ctx);
+    }
+    let _ = ctx.reducers.set_name(shape.display_name());
 
     let start = Instant::now();
+    let mut was_assist_corner_hold = false;
     loop {
         let t = (start.elapsed().as_secs_f32() / PERIOD_SECS).fract();
+        let is_assist_corner_hold = matches!(shape, Shape::Assist(_)) && assist_is_corner_hold(t);
+        if is_assist_corner_hold && !was_assist_corner_hold {
+            // The bot has just completed its outward easing. Reset exactly
+            // once on entry to the corner hold so the next inward trip
+            // starts with a fresh color.
+            reset_demo_account(&ctx);
+        }
+        was_assist_corner_hold = is_assist_corner_hold;
         let (x, y) = shape.position(t);
         let _ = ctx.reducers.set_pos(x, y);
         std::thread::sleep(TICK);

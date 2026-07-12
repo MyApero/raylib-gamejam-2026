@@ -1,4 +1,4 @@
-# Hexaworld — itch.io page draft (F12: "page styling on itch")
+# hexel — itch.io page draft (F12: "page styling on itch")
 
 Paste/adapt this into the itch.io project page's Description field (itch's
 editor supports headers, bold, links, and images — this file uses plain
@@ -9,7 +9,7 @@ login, which this environment doesn't have.
 
 ---
 
-## Hexaworld
+## hexel
 
 **One shared canvas. Every player paints their own hex island — and when
 two cursors touch, your colors merge into something neither of you had

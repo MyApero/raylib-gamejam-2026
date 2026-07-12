@@ -12,18 +12,18 @@ use std::time::{Duration, Instant};
 
 /// Local SpacetimeDB instance (`spacetime start`).
 const HOST: &str = "http://localhost:3000";
-const DB_NAME: &str = "hexmerge";
+const DB_NAME: &str = "hexel";
 
 /// `credentials::File` keys its storage path only by this string
 /// (`~/.spacetimedb_client_credentials/<key>`), shared by every process on
 /// the machine — so two `cargo run` instances side by side would silently
 /// load/save the SAME identity unless given distinct keys. Set
-/// `HEXMERGE_PLAYER` to test as separate players locally, e.g.
-/// `HEXMERGE_PLAYER=p1 cargo run -p client --bin client` in one terminal
-/// and `HEXMERGE_PLAYER=p2 ...` in another. Unset defaults to the old
+/// `HEXEL_PLAYER` to test as separate players locally, e.g.
+/// `HEXEL_PLAYER=p1 cargo run -p client --bin client` in one terminal
+/// and `HEXEL_PLAYER=p2 ...` in another. Unset defaults to the old
 /// shared single-player key, so solo runs are unaffected.
 fn creds_store() -> credentials::File {
-    let key = std::env::var("HEXMERGE_PLAYER").unwrap_or_else(|_| DB_NAME.to_string());
+    let key = std::env::var("HEXEL_PLAYER").unwrap_or_else(|_| DB_NAME.to_string());
     credentials::File::new(key)
 }
 
@@ -197,6 +197,38 @@ fn have_hue(ctx: &DbConnection, me: Identity, hue: u16) -> bool {
         .any(|inv| inv.owner == me && world::hue_dist(inv.hue, hue) <= HUE_TOLERANCE)
 }
 
+fn pick_color_at(
+    ctx: &DbConnection,
+    ui_state: &mut ui::UiState,
+    sfx: Option<&sfx::Sfx<'_>>,
+    me: Identity,
+    world_q: i32,
+    world_r: i32,
+) -> bool {
+    let level = ctx.db.user().identity().find(&me).map_or(0, |u| world::level_of(u.xp));
+    match world::eyedropper_pick(
+        painted_color_at(ctx, world_q, world_r),
+        |hue| have_hue(ctx, me, hue),
+        world::sat_cap(level),
+    ) {
+        world::EyedropperPick::Selected { hue, sat, val } => {
+            let _ = ctx.reducers.set_brush(hue, sat, val);
+            true
+        }
+        world::EyedropperPick::Locked => {
+            ui_state.show_info_toast("not unlocked — long-press to merge".to_string());
+            if let Some(s) = sfx {
+                s.error.play();
+            }
+            false
+        }
+        world::EyedropperPick::Empty => {
+            ui_state.show_info_toast("no painted color here".to_string());
+            false
+        }
+    }
+}
+
 /// F8: coarse "N {unit} ago" label for the island-info popup — no date/time
 /// crate in this workspace, and a jam popup doesn't need calendar precision.
 fn format_age(now: Timestamp, created_at: Timestamp) -> String {
@@ -301,11 +333,12 @@ fn main() {
         "SELECT * FROM gift",
         "SELECT * FROM hexa_event",
         "SELECT * FROM hexa_cluster",
+        "SELECT * FROM merge_event",
     ]);
 
     let (mut rl, thread) = raylib::init()
         .size(720, 720) // jam hard constraint
-        .title("hexaworld — raylib 6.0 + SpacetimeDB")
+        .title("hexel — raylib 6.0 + SpacetimeDB")
         .build();
     rl.set_target_fps(60);
     rl.hide_cursor(); // we draw our own pointer in the caller's brush color
@@ -377,7 +410,11 @@ fn main() {
     // see `world::hexa_advance_display`'s doc comment), lerped frame to
     // frame from the server's authoritative `hexa_cluster` rows.
     let mut hexa_display: HashMap<Identity, Vector2> = HashMap::new();
-
+    // A cluster's figure is anchored when that exact membership first
+    // appears. Live cursor reports keep arriving while participants make
+    // tiny mouse movements; following the server's freshly recomputed
+    // centroid made the whole HEXA visibly jitter.
+    let mut hexa_fixed_centres: HashMap<u64, Vector2> = HashMap::new();
     while !rl.window_should_close() {
         if let Err(e) = ctx.frame_tick() {
             eprintln!("frame_tick: {e}");
@@ -386,6 +423,14 @@ fn main() {
 
         let me = ctx.try_identity();
         let now = Timestamp::now();
+        let hexa_zoom_locked = me.is_some_and(|id| ctx.db.hexa_cluster().iter().any(|row| row.identity == id));
+        if hexa_zoom_locked {
+            let rate = (1.0 - (-rl.get_frame_time() / world::constants::HEXA_ZOOM_LERP_SECS).exp()).clamp(0.0, 1.0);
+            camera.zoom += (ISLAND_FIT_ZOOM - camera.zoom) * rate;
+            if (camera.zoom - ISLAND_FIT_ZOOM).abs() < 0.001 {
+                camera.zoom = ISLAND_FIT_ZOOM;
+            }
+        }
         let mouse_screen = rl.get_mouse_position();
         let mouse_world = rl.get_screen_to_world2D(mouse_screen, camera);
 
@@ -499,7 +544,20 @@ fn main() {
                             }
                         } else {
                             let label = inv.obtained_with.map_or_else(|| "someone".to_string(), |p| player_label(&ctx, p));
-                            ui_state.show_merge_toast(inv.hue, &label);
+                            // Look up the matching `MergeEvent`
+                            // row for the two PRE-merge hues — same
+                            // timestamp join as the Hexa event above. A
+                            // tile-merge/eyedrop never inserts one (see
+                            // `set_pos`'s cursor-merge-only insert), so
+                            // `merge_from` stays `None` there and the toast
+                            // falls back to showing just the result, as before.
+                            let merge_from = ctx
+                                .db
+                                .merge_event()
+                                .iter()
+                                .find(|e| e.at == inv.obtained_at && (e.a == me || e.b == me))
+                                .map(|e| if e.a == me { (e.hue_a, e.hue_b) } else { (e.hue_b, e.hue_a) });
+                            ui_state.show_merge_toast(inv.hue, &label, merge_from);
                             if let Some(s) = &sfx {
                                 s.merge.play();
                             }
@@ -691,7 +749,7 @@ fn main() {
         // Zoom toward the cursor (official raylib recipe): re-anchor
         // offset/target at the mouse before changing zoom so the world
         // point under the cursor doesn't jump.
-        let wheel = if map_input_allowed { rl.get_mouse_wheel_move() } else { 0.0 };
+        let wheel = if map_input_allowed && !hexa_zoom_locked { rl.get_mouse_wheel_move() } else { 0.0 };
         if wheel != 0.0 {
             camera.offset = mouse_screen;
             camera.target = mouse_world;
@@ -724,19 +782,22 @@ fn main() {
                 camera.target.x += dx * speed * dt;
                 camera.target.y += dy * speed * dt;
             }
-            if rl.is_key_down(KeyboardKey::KEY_Q) {
+            if !hexa_zoom_locked && rl.is_key_down(KeyboardKey::KEY_Q) {
                 camera.zoom = (camera.zoom * (1.0 - KEY_ZOOM_RATE * dt)).clamp(0.25, 60.0);
             }
-            if rl.is_key_down(KeyboardKey::KEY_E) {
+            if !hexa_zoom_locked && rl.is_key_down(KeyboardKey::KEY_E) {
                 camera.zoom = (camera.zoom * (1.0 + KEY_ZOOM_RATE * dt)).clamp(0.25, 60.0);
             }
         }
 
+        // F13 follow-up: the Move tool makes plain left-drag pan too, no
+        // Shift needed — everything downstream that already gates on
+        // `!panning` (painting, long-press-merge) is skipped for free.
         let panning = map_input_allowed
             && (rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
                 || rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT)
-                || (rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
-                    && rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)));
+                || (rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT) && rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT))
+                || (ui_state.tool == ui::Tool::Move && rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)));
         if panning {
             let delta = rl.get_mouse_delta();
             camera.target.x -= delta.x / camera.zoom;
@@ -754,10 +815,11 @@ fn main() {
         }
 
         // Painting/erasing: left-drag, not while panning (SHIFT/middle/right
-        // held). F9.6 item 1: which reducer fires depends on
-        // `ui_state.eraser_on` — same target-cell classification either way.
-        // `over_map_area`: not while the cursor is over the header/footer HUD.
-        if map_input_allowed && over_map_area {
+        // held, or the Move tool active — see `panning` above). F9.6 item 1:
+        // which reducer fires depends on `ui_state.tool` — same target-cell
+        // classification either way. `over_map_area`: not while the cursor
+        // is over the header/footer HUD.
+        if map_input_allowed && over_map_area && matches!(ui_state.tool, ui::Tool::Paint | ui::Tool::Erase) {
             if let Some(me) = me {
                 if rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && !panning {
                     let (wq, wr) = world::world_to_axial(mouse_world);
@@ -771,7 +833,7 @@ fn main() {
                         let fresh_cell = stroke_last != Some(key);
                         let rate_ok = last_paint_at.elapsed() >= Duration::from_secs_f32(1.0 / CLIENT_PAINT_HZ);
                         if fresh_cell && rate_ok {
-                            match (key, ui_state.eraser_on) {
+                            match (key, ui_state.tool == ui::Tool::Erase) {
                                 ((0, lq, lr), false) => {
                                     let _ = ctx.reducers.paint_island_cell(lq, lr);
                                 }
@@ -803,6 +865,24 @@ fn main() {
             stroke_last = None;
         }
 
+        // The footer eyedropper is a one-shot tool usable with a normal
+        // click, trackpad tap, or mobile touch. A successful sample returns
+        // to Paint; an empty or locked sample leaves it armed for retry.
+        if map_input_allowed
+            && over_map_area
+            && ui_state.tool == ui::Tool::Eyedropper
+            && rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+        {
+            if let Some(me) = me {
+                let (wq, wr) = world::world_to_axial(mouse_world);
+                if pick_color_at(&ctx, &mut ui_state, sfx.as_ref(), me, wq, wr) {
+                    if ui_state.finish_eyedropper() {
+                        let _ = ctx.reducers.set_lock(false);
+                    }
+                }
+            }
+        }
+
         // F9.6 item 2: middle-click eyedropper. A clean press+release within
         // `MIDDLE_CLICK_TOL_PX` picks the hovered tile's color; if the caller
         // already owns that hue (within `HUE_TOLERANCE`, same window
@@ -821,16 +901,9 @@ fn main() {
                     if (dx * dx + dy * dy).sqrt() <= MIDDLE_CLICK_TOL_PX {
                         if let Some(me) = me {
                             let (wq, wr) = world::world_to_axial(mouse_world);
-                            if let Some((hue, sat, val)) = painted_color_at(&ctx, wq, wr) {
-                                if have_hue(&ctx, me, hue) {
-                                    let level = ctx.db.user().identity().find(&me).map_or(0, |u| world::level_of(u.xp));
-                                    let sat = sat.min(world::sat_cap(level));
-                                    let _ = ctx.reducers.set_brush(hue, sat, val);
-                                } else {
-                                    ui_state.show_info_toast("not unlocked — long-press to merge".to_string());
-                                    if let Some(s) = &sfx {
-                                        s.error.play();
-                                    }
+                            if pick_color_at(&ctx, &mut ui_state, sfx.as_ref(), me, wq, wr) {
+                                if ui_state.finish_eyedropper() {
+                                    let _ = ctx.reducers.set_lock(false);
                                 }
                             }
                         }
@@ -851,7 +924,11 @@ fn main() {
         if !map_input_allowed {
             long_press = None;
         } else if let Some(me) = me {
-            if !panning && over_map_area && rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
+            if ui_state.tool != ui::Tool::Eyedropper
+                && !panning
+                && over_map_area
+                && rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+            {
                 let (wq, wr) = world::world_to_axial(mouse_world);
                 long_press = Some(LongPress {
                     press_screen: mouse_screen,
@@ -1059,31 +1136,55 @@ fn main() {
         for row in ctx.db.hexa_cluster().iter() {
             hexa_groups.entry(row.cluster_id).or_default().push(row);
         }
-        let mut cluster_targets: Vec<(Vec<Identity>, Vec<Vector2>)> = Vec::new();
+        // Flattened (key, hexagon target, raw fallback) triples across every
+        // cluster, fed straight to `hexa_advance_display` — raw is the
+        // actual unsnapped cursor spot (own live mouse, or the other
+        // player's own `(cx, cy)`), what a first-seen member glides IN
+        // from instead of teleporting straight to its vertex.
+        let mut cluster_members: Vec<(Identity, Vector2, Vector2)> = Vec::new();
+        // World-space cluster centroid per snapped member — the rotated
+        // cursor draw (`draw_cursor_snapped`) needs to know where to aim.
+        let mut hexa_centres: HashMap<Identity, Vector2> = HashMap::new();
         // World-space hexagon edges (drawn inside `d2` below, same trick
         // `draw_gift_icon` uses). `ignited` mirrors the server's own
         // `member_count >= HEXA_SIZE` check.
         let mut hexa_polygons: Vec<(Vec<Vector2>, bool)> = Vec::new();
+        world::hexa_begin_fixed_centres(&mut hexa_fixed_centres, hexa_groups.keys().copied());
         for rows in hexa_groups.into_values() {
             let Some(first) = rows.first() else { continue };
-            let vertices = world::hexagon_vertex_positions(Vector2::new(first.cx, first.cy), first.member_count as usize);
-            let mut keys: Vec<Identity> = Vec::with_capacity(rows.len());
-            let mut targets: Vec<Vector2> = Vec::with_capacity(rows.len());
-            for row in &rows {
-                if let Some(&v) = vertices.get(row.vertex_index as usize) {
-                    keys.push(row.identity);
-                    targets.push(v);
-                }
+            let members: Vec<(Identity, u32)> = rows.iter().map(|r| (r.identity, r.vertex_index)).collect();
+            let centre = world::hexa_fixed_centre(
+                &mut hexa_fixed_centres,
+                first.cluster_id,
+                Vector2::new(first.cx, first.cy),
+            );
+            let (frame, vertices) = world::hexa_cluster_frame(
+                centre,
+                first.member_count as usize,
+                &members,
+                |&key, target| {
+                    if Some(key) == me {
+                        mouse_world
+                    } else {
+                        ctx.db.user().identity().find(&key).map(|u| Vector2::new(u.cx, u.cy)).unwrap_or(target)
+                    }
+                },
+            );
+            for (key, vertex_index) in &members {
+                let i = *vertex_index as usize % 6;
+                let a = vertices[i];
+                let b = vertices[(i + 1) % 6];
+                hexa_centres.insert(*key, Vector2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5));
             }
+            cluster_members.extend(frame);
             hexa_polygons.push((vertices, first.ignited));
-            cluster_targets.push((keys, targets));
         }
-        hexa_display = world::hexa_advance_display(&hexa_display, &cluster_targets, rl.get_frame_time());
+        hexa_display = world::hexa_advance_display(&hexa_display, &cluster_members, rl.get_frame_time());
 
         // Screen-space projection for other players' cursors, computed here
         // (not inside the draw call) because `rl` can't be borrowed again
         // once `begin_drawing` hands out its mutable borrow below.
-        let other_cursors: Vec<(Vector2, Color, bool, String)> = ctx
+        let other_cursors: Vec<(Vector2, Color, bool, String, Option<Vector2>)> = ctx
             .db
             .user()
             .iter()
@@ -1099,13 +1200,16 @@ fn main() {
                 // snapped display position instead of its raw cursor
                 // position — the real network position is untouched
                 // (detection above keeps using it), this is purely a render
-                // override.
+                // override. A snapped member also carries its cluster's
+                // centre (screen-projected) so the draw call can aim the
+                // rotated arrow at it.
                 let world_pos = hexa_display.get(&u.identity).copied().unwrap_or(Vector2::new(u.cx, u.cy));
                 (
                     rl.get_world_to_screen2D(world_pos, camera),
                     world::hsv_color(u.hue, u.sat, u.val),
                     u.locked,
                     u.name.clone().unwrap_or_default(),
+                    hexa_centres.get(&u.identity).map(|&c| rl.get_world_to_screen2D(c, camera)),
                 )
             })
             .collect();
@@ -1116,7 +1220,20 @@ fn main() {
         // can't be borrowed again once `begin_drawing` hands out its
         // mutable borrow below). `None` (not clustered, or `me` unknown
         // yet) falls back to the literal mouse position at the draw call.
-        let my_hexa_screen: Option<Vector2> = me.and_then(|me| hexa_display.get(&me)).map(|&pos| rl.get_world_to_screen2D(pos, camera));
+        // Carries (tip, cluster centre), both screen-space, for the rotated
+        // snapped-arrow draw.
+        let my_hexa_screen: Option<(Vector2, Vector2)> = me.and_then(|me| {
+            let pos = hexa_display.get(&me)?;
+            let centre = hexa_centres.get(&me)?;
+            Some((rl.get_world_to_screen2D(*pos, camera), rl.get_world_to_screen2D(*centre, camera)))
+        });
+        let eyedropper_preview = (ui_state.tool == ui::Tool::Eyedropper)
+            .then(|| {
+                let (q, r) = world::world_to_axial(mouse_world);
+                painted_color_at(&ctx, q, r).map(|(h, s, v)| world::hsv_color(h, s, v))
+            })
+            .flatten()
+            .unwrap_or(Color::new(150, 150, 156, 255));
 
         let hover_takeable;
         let mut d = rl.begin_drawing(&thread);
@@ -1231,8 +1348,10 @@ fn main() {
             // a footer button could flash the white hex through the HUD's
             // semi-transparent background.
             let (hq, hr) = world::world_to_axial(mouse_world);
-            let hover_paintable =
-                map_input_allowed && over_map_area && me.is_some_and(|me| !matches!(classify(&ctx, me, hq, hr), Paintable::None));
+            let hover_paintable = map_input_allowed
+                && over_map_area
+                && matches!(ui_state.tool, ui::Tool::Paint | ui::Tool::Erase)
+                && me.is_some_and(|me| !matches!(classify(&ctx, me, hq, hr), Paintable::None));
             if hover_paintable {
                 let hover_center = world::axial_to_world(hq, hr);
                 d2.draw_poly(hover_center, 6, 1.0, 0.0, Color::new(255, 255, 255, 70));
@@ -1258,9 +1377,15 @@ fn main() {
         // Other players' cursors sit under the HUD (world-space indicators);
         // only the caller's own cursor needs to stay visible over the
         // header/footer/overlay, so it's drawn last, after the HUD.
-        for (screen, color, locked, name) in &other_cursors {
-            world::draw_cursor_scaled(&mut d, *screen, *color, other_cursor_scale, *locked);
-            if other_cursor_scale >= 0.5 {
+        let hexa_cursor_scale = camera.zoom / ISLAND_FIT_ZOOM;
+        for (screen, color, locked, name, snap_centre) in &other_cursors {
+            match snap_centre {
+                // F13 follow-up #2: a hexagon-snapped cursor aims its tip
+                // at the cluster centre instead of the fixed up-left arrow.
+                Some(centre) => world::draw_cursor_snapped(&mut d, *screen, *centre, *color, hexa_cursor_scale, *locked),
+                None => world::draw_cursor_scaled(&mut d, *screen, *color, other_cursor_scale, *locked),
+            }
+            if snap_centre.is_none() && other_cursor_scale >= 0.5 {
                 world::draw_cursor_label(&mut d, *screen, name, other_cursor_scale);
             }
         }
@@ -1304,15 +1429,26 @@ fn main() {
             // instead of the brush hue, plus a small eraser badge — visibly
             // distinct from paint mode at a glance.
             let (hue, sat, val) = brush;
-            let cursor_color = if ui_state.eraser_on { Color::new(210, 210, 216, 255) } else { world::hsv_color(hue, sat, val) };
+            let cursor_color =
+                if ui_state.tool == ui::Tool::Erase { Color::new(210, 210, 216, 255) } else { world::hsv_color(hue, sat, val) };
             // F13 (author follow-up): visually snaps to the hexagon slot
             // while merging — painting/hover logic above still uses the
-            // real `mouse_world`/`mouse_screen`, only this draw call moves.
-            world::draw_cursor(&mut d, my_hexa_screen.unwrap_or(mouse_screen), cursor_color, locked);
+            // real `mouse_world`/`mouse_screen`, only this draw call moves
+            // (and, follow-up #2, rotates to aim at the cluster centre).
+            if ui_state.tool == ui::Tool::Eyedropper {
+                ui::draw_eyedropper_cursor(&mut d, mouse_screen, eyedropper_preview);
+            } else {
+                match my_hexa_screen {
+                    Some((tip, centre)) => world::draw_cursor_snapped(&mut d, tip, centre, cursor_color, hexa_cursor_scale, locked),
+                    None => world::draw_cursor(&mut d, mouse_screen, cursor_color, locked),
+                }
+            }
         }
-        if ui_state.eraser_on {
+        if ui_state.tool == ui::Tool::Erase {
             world::draw_eraser_badge(&mut d, mouse_screen);
-        } else if hover_takeable {
+        } else if hover_takeable && matches!(ui_state.tool, ui::Tool::Paint | ui::Tool::Erase) {
+            // Move tool: left-drag pans instead of merging, so the "+"
+            // take-hint (which promises a long-press merge) would mislead.
             world::draw_plus_hint(&mut d, mouse_screen);
         }
         if let Some(frac) = long_press.as_ref().filter(|lp| !lp.fired && lp.target.is_some()).map(|lp| {

@@ -2,7 +2,7 @@
 <html lang="en-us">
   <head>
     <meta charset="utf-8">
-    <title>hexmerge — raylib 6.0 + SpacetimeDB</title>
+    <title>hexel — raylib 6.0 + SpacetimeDB</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
       body { margin: 0; overflow: hidden; background-color: black; }
@@ -136,7 +136,7 @@
         // not the same origin, so the public deploy can't reuse the page's
         // own hostname the way local/LAN dev does.
         var PUBLIC_HOST = 'spacetime.mister-esman.uk';
-        var DB = 'hexmerge';
+        var DB = 'hexel';
         var PROTOCOL = 'v1.json.spacetimedb';
         var TABLES = [
           'SELECT * FROM config',
@@ -149,6 +149,7 @@
           'SELECT * FROM gift',
           'SELECT * FROM hexa_event',
           'SELECT * FROM hexa_cluster',
+          'SELECT * FROM merge_event',
         ];
         // localStorage (not sessionStorage) so identity survives inside the
         // itch.io iframe and across tab reloads (F6 recovery path). Same

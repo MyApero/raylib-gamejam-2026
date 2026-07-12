@@ -68,7 +68,7 @@ info popup.)
 - [x] Leaderboard should take like as a first metric and also number of tiles drawn in his ilot
 (Done: `rerank_fire` (server) now sorts by likes desc, then painted-cell
 count desc (one O(n) pass over `island_cell` building a per-island count),
-ties by `created_at` as before — the "hidden leaderboard" Hexaworld.md
+ties by `created_at` as before — the "hidden leaderboard" hexel.md
 describes now rewards active painters too, not just liked islands.)
 - [x] white border around the tile you hover should act like the ilot border, always visible even when zoomed out
 (Done: the hover highlight's outline used a fixed WORLD-unit thickness
@@ -96,8 +96,8 @@ cursor for free, no bot-specific client code. See plan.md's F12 entry.)
 - [x] The Saturation slider should go to 100 but block at the max you unlocked. Tooltip explaining (You need more XP to unlock more saturation)
 
 - [ ] hexel name at the center of the header
-- [ ] Bouton "pinceau" pour pickup une couleur. Tooltip "Middle click to pick up a color"
-- [ ] State to just move (third state with pencil and eraser)
+- [x] Eyedropper button: click/tap it, then select a painted tile; middle-click remains a shortcut
+- [x] State to just move (third state with pencil and eraser)
 - [ ] Admin account with which you can connect and draw anywhere
 
 - [ ] Export My Island button at the top right. Island, Name, Link to their project, raylib.mister-esman.uk

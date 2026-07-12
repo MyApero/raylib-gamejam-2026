@@ -23,18 +23,42 @@ aside a broken prebuilt one at `~/.local/bin/spacetime` if present).
 
 ```bash
 spacetime start                             # local instance on http://localhost:3000
-./server/publish.sh                         # publish module `hexmerge`
+./server/publish.sh                         # publish module `hexel`
 ./generate_module_bindings.sh               # (re)generate client/src/module_bindings
 cargo run -p client                         # run 2+ instances to see multiplayer
 ```
 
 Re-run `generate_module_bindings.sh` after any change to `server/src/lib.rs`.
 
+## HEXA demo bots
+
+Build and launch five assistants, leaving the sixth formation slot open for
+a player:
+
+```bash
+cargo build -p client --bin bot --release
+for n in {1..5}; do
+  ./target/release/bot "assist-$n" >"/tmp/hexa-bot-$n.log" 2>&1 &
+done
+```
+
+Each bot eases between a distinct corner of the central island and its
+centre. They hold the centre for three seconds, return to their corners, and
+reset once before the next pass so every demonstration starts with fresh
+colors. Reset confirmations and failures are written to the corresponding
+log file.
+
+Stop the assistants with:
+
+```bash
+pkill -f 'target/release/bot assist-'
+```
+
 ## Useful
 
 ```bash
-spacetime logs hexmerge
-spacetime sql hexmerge "SELECT * FROM user"
+spacetime logs hexel
+spacetime sql hexel "SELECT * FROM user"
 ```
 
 ## Troubleshooting
@@ -52,8 +76,8 @@ spacetime sql hexmerge "SELECT * FROM user"
 
 ## Verification
 
-1. `spacetime logs hexmerge` shows a `client_connected` line after a client starts.
-2. `spacetime sql hexmerge "SELECT * FROM user"` shows one row per connected client with
+1. `spacetime logs hexel` shows a `client_connected` line after a client starts.
+2. `spacetime sql hexel "SELECT * FROM user"` shows one row per connected client with
    live `x`/`y`.
 3. Run **two** `cargo run -p client` instances side by side: each window shows **two
    hexagons**; moving the mouse in one window moves that hexagon in *both* windows (your own

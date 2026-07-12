@@ -38,6 +38,8 @@ pub mod island_type;
 pub mod like_island_reducer;
 pub mod margin_cell_table;
 pub mod margin_cell_type;
+pub mod merge_event_table;
+pub mod merge_event_type;
 pub mod merge_with_cell_reducer;
 pub mod paint_community_cell_reducer;
 pub mod paint_island_cell_reducer;
@@ -91,6 +93,8 @@ pub use island_type::Island;
 pub use like_island_reducer::like_island;
 pub use margin_cell_table::*;
 pub use margin_cell_type::MarginCell;
+pub use merge_event_table::*;
+pub use merge_event_type::MergeEvent;
 pub use merge_with_cell_reducer::merge_with_cell;
 pub use paint_community_cell_reducer::paint_community_cell;
 pub use paint_island_cell_reducer::paint_island_cell;
@@ -311,6 +315,7 @@ pub struct DbUpdate {
     island_like: __sdk::TableUpdate<IslandLike>,
     island_link_click: __sdk::TableUpdate<IslandLinkClick>,
     margin_cell: __sdk::TableUpdate<MarginCell>,
+    merge_event: __sdk::TableUpdate<MergeEvent>,
     user: __sdk::TableUpdate<User>,
 }
 
@@ -350,6 +355,9 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "margin_cell" => db_update
                     .margin_cell
                     .append(margin_cell_table::parse_table_update(table_update)?),
+                "merge_event" => db_update
+                    .merge_event
+                    .append(merge_event_table::parse_table_update(table_update)?),
                 "user" => db_update
                     .user
                     .append(user_table::parse_table_update(table_update)?),
@@ -409,6 +417,9 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.margin_cell = cache
             .apply_diff_to_table::<MarginCell>("margin_cell", &self.margin_cell)
             .with_updates_by_pk(|row| &row.id);
+        diff.merge_event = cache
+            .apply_diff_to_table::<MergeEvent>("merge_event", &self.merge_event)
+            .with_updates_by_pk(|row| &row.id);
         diff.user = cache
             .apply_diff_to_table::<User>("user", &self.user)
             .with_updates_by_pk(|row| &row.identity);
@@ -448,6 +459,9 @@ impl __sdk::DbUpdate for DbUpdate {
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "margin_cell" => db_update
                     .margin_cell
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "merge_event" => db_update
+                    .merge_event
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "user" => db_update
                     .user
@@ -495,6 +509,9 @@ impl __sdk::DbUpdate for DbUpdate {
                 "margin_cell" => db_update
                     .margin_cell
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "merge_event" => db_update
+                    .merge_event
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "user" => db_update
                     .user
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
@@ -523,6 +540,7 @@ pub struct AppliedDiff<'r> {
     island_like: __sdk::TableAppliedDiff<'r, IslandLike>,
     island_link_click: __sdk::TableAppliedDiff<'r, IslandLinkClick>,
     margin_cell: __sdk::TableAppliedDiff<'r, MarginCell>,
+    merge_event: __sdk::TableAppliedDiff<'r, MergeEvent>,
     user: __sdk::TableAppliedDiff<'r, User>,
     __unused: std::marker::PhantomData<&'r ()>,
 }
@@ -555,6 +573,7 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
             event,
         );
         callbacks.invoke_table_row_callbacks::<MarginCell>("margin_cell", &self.margin_cell, event);
+        callbacks.invoke_table_row_callbacks::<MergeEvent>("merge_event", &self.merge_event, event);
         callbacks.invoke_table_row_callbacks::<User>("user", &self.user, event);
     }
 }
@@ -1226,6 +1245,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         island_like_table::register_table(client_cache);
         island_link_click_table::register_table(client_cache);
         margin_cell_table::register_table(client_cache);
+        merge_event_table::register_table(client_cache);
         user_table::register_table(client_cache);
     }
     const ALL_TABLE_NAMES: &'static [&'static str] = &[
@@ -1239,6 +1259,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         "island_like",
         "island_link_click",
         "margin_cell",
+        "merge_event",
         "user",
     ];
 }

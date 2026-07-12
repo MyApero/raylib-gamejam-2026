@@ -13,7 +13,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 STAGE="$ROOT/build/itch"          # under build/, which .gitignore ignores
-OUT="$ROOT/hexaworld-itch.zip"
+OUT="$ROOT/hexel-itch.zip"
 LIMIT=$((64 * 1024 * 1024))       # itch jam hard limit: 64 MB
 
 # 1. (Re)build web.js + web.wasm into client/web/.

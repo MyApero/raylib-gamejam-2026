@@ -45,6 +45,29 @@ enum Drag {
     Val,
 }
 
+/// F13 follow-up: the paint/erase footer toggle grew a third state — Move,
+/// which makes plain left-drag pan the camera instead of painting/merging
+/// (no Shift/right-click needed). Cycled by `X` or the footer button, in
+/// this order: Paint -> Erase -> Move -> Paint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Tool {
+    Paint,
+    Erase,
+    Move,
+    Eyedropper,
+}
+
+impl Tool {
+    fn cycle(self) -> Tool {
+        match self {
+            Tool::Paint => Tool::Erase,
+            Tool::Erase => Tool::Move,
+            Tool::Move => Tool::Paint,
+            Tool::Eyedropper => Tool::Paint,
+        }
+    }
+}
+
 /// Signed circular offset of `current` from `base`, in `(-180, 180]`.
 fn hue_offset_signed(current: u16, base: u16) -> i32 {
     let mut diff = current as i32 - base as i32;
@@ -59,9 +82,13 @@ fn hue_offset_signed(current: u16, base: u16) -> i32 {
 /// "New color obtained" feedback for a just-inserted `inventory` row of the
 /// caller's own — a toast line plus a fading flash of the new hue. `hue:
 /// None` (F9.6 item 2's plain info toasts) just skips the flash swatch.
+/// `merge_from`, when set (cursor-merge only — see `show_merge_toast`), adds
+/// the two PRE-merge hues so the toast can render "mine + his = new" instead
+/// of just the result.
 struct Toast {
     text: String,
     hue: Option<u16>,
+    merge_from: Option<(u16, u16)>,
     shown_at: Instant,
 }
 
@@ -114,9 +141,14 @@ pub struct UiState {
     /// the popup opens on the caller's own island — see `open_island_info`.
     link_edit_input: String,
     link_edit_focused: bool,
-    /// F9.6 item 1: paint/erase mode toggle — footer button or the `X` key
-    /// (not `E`, which item 6 claims for keyboard zoom-in).
-    pub eraser_on: bool,
+    /// F9.6 item 1 (extended by the F13 follow-up's Move state): paint/
+    /// erase/move tool — footer button or the `X` key (not `E`, which item 6
+    /// claims for keyboard zoom-in) cycles Paint -> Erase -> Move -> Paint.
+    pub tool: Tool,
+    /// True when Eyedropper temporarily enabled Lock for a player who was
+    /// previously unlocked. Leaving the tool restores that prior state;
+    /// players who entered already locked remain locked.
+    eyedropper_restore_unlock: bool,
     /// F9.6 item 5: minimal keybindings/help overlay, opened by Escape when
     /// nothing else is open (closed by Escape again, matching item 4's rule
     /// for every other overlay). Mutually exclusive with the other three.
@@ -186,7 +218,8 @@ impl UiState {
             like_anims: Vec::new(),
             link_edit_input: String::new(),
             link_edit_focused: false,
-            eraser_on: false,
+            tool: Tool::Paint,
+            eyedropper_restore_unlock: false,
             help_open: false,
             swatch_hsl: HashMap::new(),
         }
@@ -197,6 +230,20 @@ impl UiState {
     /// or zoom the camera, so typing a name doesn't also drive it.
     pub fn text_field_focused(&self) -> bool {
         self.name_focused || self.import_focused || self.link_edit_focused
+    }
+
+    /// Arms the eyedropper and reports whether the caller must enable Lock.
+    pub fn arm_eyedropper(&mut self, currently_locked: bool) -> bool {
+        self.tool = Tool::Eyedropper;
+        self.eyedropper_restore_unlock = !currently_locked;
+        !currently_locked
+    }
+
+    /// Returns to Paint and reports whether a temporary eyedropper Lock
+    /// should be removed.
+    pub fn finish_eyedropper(&mut self) -> bool {
+        self.tool = Tool::Paint;
+        std::mem::take(&mut self.eyedropper_restore_unlock)
     }
 
     /// Author-requested: called by the caller right after firing
@@ -262,11 +309,16 @@ impl UiState {
 
     /// Called by `main.rs` when it sees a fresh `inventory` row belonging to
     /// the caller (cursor- or tile-merge). `partner_label` is the other
-    /// player's name if set, else their short identity hex.
-    pub fn show_merge_toast(&mut self, hue: u16, partner_label: &str) {
+    /// player's name if set, else their short identity hex. `merge_from`
+    /// is `Some((my_hue, partner_hue))` — the two
+    /// PRE-merge hues, looked up by the caller against the matching
+    /// `MergeEvent` row — for a real two-player cursor-merge; `None` for a
+    /// tile-merge/eyedrop, which has no second live hue to show.
+    pub fn show_merge_toast(&mut self, hue: u16, partner_label: &str, merge_from: Option<(u16, u16)>) {
         self.toast = Some(Toast {
             text: format!("new color, obtained with {partner_label}"),
             hue: Some(hue),
+            merge_from,
             shown_at: Instant::now(),
         });
         self.note_used_hue(hue);
@@ -281,6 +333,7 @@ impl UiState {
         self.toast = Some(Toast {
             text: format!("Level up! Lv{level} — saturation cap now {sat_cap}%"),
             hue: Some(current_hue),
+            merge_from: None,
             shown_at: Instant::now(),
         });
     }
@@ -288,7 +341,7 @@ impl UiState {
     /// F9.6 item 2: plain-text toast (no flash swatch) — used for the
     /// middle-click eyedropper's "not unlocked" feedback.
     pub fn show_info_toast(&mut self, text: String) {
-        self.toast = Some(Toast { text, hue: None, shown_at: Instant::now() });
+        self.toast = Some(Toast { text, hue: None, merge_from: None, shown_at: Instant::now() });
     }
 
     /// F11: called by the caller when it sees a fresh `inventory` row with
@@ -296,7 +349,7 @@ impl UiState {
     /// treatment as `show_merge_toast`, distinct wording since there's no
     /// merge partner to name.
     pub fn show_gift_toast(&mut self, hue: u16) {
-        self.toast = Some(Toast { text: "gift claimed — new color!".to_string(), hue: Some(hue), shown_at: Instant::now() });
+        self.toast = Some(Toast { text: "gift claimed — new color!".to_string(), hue: Some(hue), merge_from: None, shown_at: Instant::now() });
         self.note_used_hue(hue);
     }
 
@@ -305,7 +358,7 @@ impl UiState {
     /// from both a merge (which always names a partner) and a gift/reset
     /// (neither of which has an event to join).
     pub fn show_hexa_toast(&mut self, hue: u16) {
-        self.toast = Some(Toast { text: "Hexa event! colors pooled with 5 others".to_string(), hue: Some(hue), shown_at: Instant::now() });
+        self.toast = Some(Toast { text: "Hexa event! colors pooled with 5 others".to_string(), hue: Some(hue), merge_from: None, shown_at: Instant::now() });
         self.note_used_hue(hue);
     }
 
@@ -474,6 +527,17 @@ fn lock_btn_rect() -> Rectangle {
 fn eraser_btn_rect() -> Rectangle {
     let lb = lock_btn_rect();
     Rectangle::new(lb.x - 4.0 - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
+}
+
+/// Eyedropper tool button: icon-only, mirroring the Eraser/Lock
+/// cluster's placement but on the OTHER side of the name field (the only
+/// free strip left in the footer at this screen width — the left side is
+/// already packed edge-to-edge with Colors/last3/Eraser/Lock/name field, and
+/// Account/My Isle/Center already claim the far right). Clicking it arms a
+/// one-shot click/tap selection; middle-click remains the desktop shortcut.
+fn brush_btn_rect() -> Rectangle {
+    let nf = name_field_rect();
+    Rectangle::new(nf.x + nf.width + 8.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
 }
 
 fn last3_rect(i: usize) -> Rectangle {
@@ -748,14 +812,36 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         }
         return actions;
     }
-    // F9.6 item 1: eraser toggle — `X` (not `E`, which item 6 gives to
-    // keyboard zoom-in), swallowed while a text field owns keyboard input so
-    // typing a name containing "x" doesn't flip it.
+    // F9.6 item 1 (F13 follow-up: Paint -> Erase -> Move -> Paint) — `X`
+    // (not `E`, which item 6 gives to keyboard zoom-in), swallowed while a
+    // text field owns keyboard input so typing a name containing "x"
+    // doesn't cycle it.
     if rl.is_key_pressed(KeyboardKey::KEY_X) && !state.text_field_focused() {
-        state.eraser_on = !state.eraser_on;
+        if state.tool == Tool::Eyedropper {
+            if state.finish_eyedropper() {
+                actions.set_lock = Some(false);
+            }
+        } else {
+            state.tool = state.tool.cycle();
+        }
     }
     if clicked && point_in(mouse, eraser_btn_rect()) {
-        state.eraser_on = !state.eraser_on;
+        if state.tool == Tool::Eyedropper {
+            if state.finish_eyedropper() {
+                actions.set_lock = Some(false);
+            }
+        } else {
+            state.tool = state.tool.cycle();
+        }
+    }
+    if clicked && point_in(mouse, brush_btn_rect()) {
+        if state.tool == Tool::Eyedropper {
+            if state.finish_eyedropper() {
+                actions.set_lock = Some(false);
+            }
+        } else if state.arm_eyedropper(info.locked) {
+            actions.set_lock = Some(true);
+        }
     }
 
     if clicked && point_in(mouse, center_btn_rect()) {
@@ -781,8 +867,12 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             state.pending_select = Some(hue);
             state.note_used_hue(hue);
         }
-        // Picking a color implies you want to paint with it, not erase.
-        state.eraser_on = false;
+        // Picking a color implies you want to paint with it, not erase or move.
+        if state.tool == Tool::Eyedropper && state.finish_eyedropper() {
+            actions.set_lock = Some(false);
+        } else {
+            state.tool = Tool::Paint;
+        }
     }
     if clicked && point_in(mouse, inventory_btn_rect()) {
         let opening = !state.overlay_open;
@@ -794,7 +884,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         // and immediately close the overlay it just opened.
         return actions;
     }
-    if clicked && point_in(mouse, lock_btn_rect()) {
+    if clicked && point_in(mouse, lock_btn_rect()) && state.tool != Tool::Eyedropper {
         actions.set_lock = Some(!info.locked);
     }
     if clicked && point_in(mouse, account_btn_rect()) {
@@ -1009,8 +1099,12 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 state.pending_select = Some(hue);
                 state.note_used_hue(hue);
             }
-            // Picking a color implies you want to paint with it, not erase.
-            state.eraser_on = false;
+            // Picking a color implies you want to paint with it, not erase or move.
+            if state.tool == Tool::Eyedropper && state.finish_eyedropper() {
+                actions.set_lock = Some(false);
+            } else {
+                state.tool = Tool::Paint;
+            }
         }
     }
 
@@ -1079,6 +1173,14 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         draw_help_overlay(d);
     } else if let Some(title) = hovered_last3_title(state, mouse) {
         draw_button_tooltip(d, title, &[], mouse);
+    } else if point_in(mouse, eraser_btn_rect()) {
+        let (title, lines): (&str, &[&str]) = match state.tool {
+            Tool::Paint => ("Paint", &["Click to cycle: Paint ->", "Eraser -> Move"]),
+            Tool::Erase => ("Eraser", &["Revert a cell to its", "original color"]),
+            Tool::Move => ("Move", &["Left-drag pans the camera", "instead of painting"]),
+            Tool::Eyedropper => ("Paint", &["Click to return to", "the paint tool"]),
+        };
+        draw_button_tooltip(d, title, lines, mouse);
     } else if let Some((title, lines)) = hovered_button_tooltip(mouse) {
         draw_button_tooltip(d, title, lines, mouse);
     }
@@ -1181,8 +1283,8 @@ const BTN_TOOLTIP_W: f32 = 210.0;
 const BUTTON_TOOLTIPS: &[(fn() -> Rectangle, &str, &[&str])] = &[
     (center_btn_rect, "Center", &["Go back to your island"]),
     (inventory_btn_rect, "Colors", &["Inventory: stores every", "color you've discovered"]),
-    (eraser_btn_rect, "Eraser", &["Revert a cell to its", "original color"]),
     (lock_btn_rect, "Lock", &["Makes you unmergeable", "with others"]),
+    (brush_btn_rect, "Eyedropper", &["Click or tap, then select", "a painted tile", "Merging is disabled while active"]),
     (account_btn_rect, "Account", &["Copy or import your ID,", "reset your account"]),
     (my_island_btn_rect, "My Isle", &["Center the camera on", "your own island"]),
 ];
@@ -1304,21 +1406,46 @@ fn draw_rerank_banner(d: &mut impl RaylibDraw, secs: i64) {
 }
 
 /// Banner just under the header, with a flash swatch that fades out over
-/// `TOAST_DURATION` (the "new color" feedback from a merge).
+/// `TOAST_DURATION` (the "new color" feedback from a merge). Author-
+/// requested follow-up: when `toast.merge_from` is set (a cursor-merge, not
+/// a tile-merge/eyedrop), also renders the two PRE-merge swatches as
+/// "[mine] + [his] = [new]" before the flash swatch, instead of just the
+/// result alone — widened and re-centered on the same axis so it still sits
+/// under the header symmetrically.
 fn draw_toast(d: &mut impl RaylibDraw, toast: &Toast, info: &HudInfo) {
     let frac = 1.0 - (toast.shown_at.elapsed().as_secs_f32() / TOAST_DURATION.as_secs_f32()).clamp(0.0, 1.0);
     let alpha = (frac * 235.0) as u8;
-    let bar = Rectangle::new(180.0, HEADER_H + 10.0, 360.0, 34.0);
+    let bar_w = if toast.merge_from.is_some() { 430.0 } else { 360.0 };
+    let bar = Rectangle::new(360.0 - bar_w / 2.0, HEADER_H + 10.0, bar_w, 34.0);
     d.draw_rectangle_rec(bar, Color::new(24, 24, 30, alpha));
     d.draw_rectangle_lines_ex(bar, 1.0, Color::new(255, 215, 0, alpha));
+
+    let mut x = bar.x + 6.0;
+    if let Some((mine, his)) = toast.merge_from {
+        let sw = 18.0;
+        let y = bar.y + (bar.height - sw) / 2.0;
+        let mut mine_c = canonical_color(mine);
+        mine_c.a = alpha;
+        let mut his_c = canonical_color(his);
+        his_c.a = alpha;
+        let glyph = Color::new(200, 200, 200, alpha);
+        d.draw_rectangle_rec(Rectangle::new(x, y, sw, sw), mine_c);
+        x += sw + 4.0;
+        d.draw_text("+", x as i32, bar.y as i32 + 9, 14, glyph);
+        x += 12.0;
+        d.draw_rectangle_rec(Rectangle::new(x, y, sw, sw), his_c);
+        x += sw + 4.0;
+        d.draw_text("=", x as i32, bar.y as i32 + 9, 14, glyph);
+        x += 16.0;
+    }
     let text_x = if let Some(hue) = toast.hue {
-        let swatch = Rectangle::new(bar.x + 6.0, bar.y + 6.0, 22.0, 22.0);
+        let swatch = Rectangle::new(x, bar.y + 6.0, 22.0, 22.0);
         let mut flash = world::hsv_color(hue, info.sat_cap, 90);
         flash.a = alpha;
         d.draw_rectangle_rec(swatch, flash);
-        bar.x as i32 + 36
+        (x + 30.0) as i32
     } else {
-        bar.x as i32 + 10
+        x as i32 + 4
     };
     d.draw_text(&toast.text, text_x, bar.y as i32 + 9, 14, Color::new(255, 255, 255, alpha));
 }
@@ -1329,6 +1456,7 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo) {
     // it's already reachable via the Account overlay ("Signed in as ..."),
     // so the header itself only needs the level/xp readout.
     d.draw_text(&format!("Lv{}  {}xp", info.level, info.xp), 10, 6, 16, Color::RAYWHITE);
+    d.draw_text("hexel", 338, 6, 16, Color::RAYWHITE);
     // Fixed-position right-side label rather than measuring text width —
     // the draw handle has no default-font `measure_text` (that's only on
     // `RaylibHandle`, unavailable once `begin_drawing` hands out its borrow).
@@ -1359,18 +1487,24 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     draw_colors_label(d, ib);
 
     // Author-requested: icon-only, left of the name field. The icon itself
-    // now shows which TOOL is active (pencil = painting, eraser = erasing)
-    // rather than a static "eraser" glyph that only ever meant "click to
-    // erase" — a red border is the active-state signal instead of a solid
-    // fill, so it reads apart from the Lock button's fill-based signal
-    // right next to it.
+    // shows which TOOL is active (pencil = painting, eraser = erasing, the
+    // F13 follow-up's 4-arrow glyph = moving) rather than a static "eraser"
+    // glyph that only ever meant "click to erase" — a colored border is the
+    // active-state signal instead of a solid fill, so it reads apart from
+    // the Lock button's fill-based signal right next to it.
     let eb = eraser_btn_rect();
     d.draw_rectangle_rec(eb, Color::new(40, 40, 48, 255));
-    if state.eraser_on {
-        d.draw_rectangle_lines_ex(eb, 2.0, Color::new(220, 70, 70, 255));
-        draw_eraser_icon(d, eb);
-    } else {
-        draw_pencil_icon(d, eb);
+    match state.tool {
+        Tool::Paint => draw_pencil_icon(d, eb),
+        Tool::Erase => {
+            d.draw_rectangle_lines_ex(eb, 2.0, Color::new(220, 70, 70, 255));
+            draw_eraser_icon(d, eb);
+        }
+        Tool::Move => {
+            d.draw_rectangle_lines_ex(eb, 2.0, Color::new(90, 160, 230, 255));
+            draw_move_icon(d, eb);
+        }
+        Tool::Eyedropper => draw_pencil_icon(d, eb),
     }
 
     let lb = lock_btn_rect();
@@ -1382,6 +1516,15 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     d.draw_rectangle_lines_ex(nf, 1.0, if state.name_focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
     let label = if state.name_input.is_empty() && !state.name_focused { "name..." } else { &state.name_input };
     d.draw_text(label, nf.x as i32 + 6, nf.y as i32 + 7, 14, Color::RAYWHITE);
+
+    // Eyedropper tool. The tip droplet is tinted with the live brush color;
+    // a gold border marks the active sampling state.
+    let bb = brush_btn_rect();
+    d.draw_rectangle_rec(bb, Color::new(40, 40, 48, 255));
+    if state.tool == Tool::Eyedropper {
+        d.draw_rectangle_lines_ex(bb, 2.0, Color::GOLD);
+    }
+    draw_brush_icon(d, bb, world::hsv_color(info.brush.0, info.brush.1, info.brush.2));
 
     let ab = account_btn_rect();
     d.draw_rectangle_rec(ab, Color::new(40, 40, 48, 255));
@@ -1452,10 +1595,11 @@ fn draw_locate_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     d.draw_line_ex(Vector2::new(cx + ring_r + gap, cy), Vector2::new(cx + ring_r + gap + tick, cy), 2.0, icon_color);
 }
 
-/// Author-requested: default (paint-mode) icon for the paint/erase toggle —
-/// a pencil with a pink eraser-band cap and a graphite tip, swapped for
-/// `draw_eraser_icon` while `state.eraser_on` is true (see `draw_footer`),
-/// so the button always shows which tool is currently active.
+/// Default paint-mode icon for the paint/erase/move
+/// tool button — a pencil with a pink eraser-band cap and a graphite tip,
+/// swapped for `draw_eraser_icon`/`draw_move_icon` while `state.tool` is
+/// `Erase`/`Move` (see `draw_footer`), so the button always shows which
+/// tool is currently active.
 ///
 /// Author-caught, twice: two earlier cuts of this used a diagonal
 /// (rotated-quad-via-triangles) construction that kept rendering invisible
@@ -1512,6 +1656,89 @@ fn draw_eraser_icon(d: &mut impl RaylibDraw, r: Rectangle) {
         Color::new(235, 120, 150, 255),
     );
     d.draw_rectangle_rounded_lines(body, 0.3, 4, Color::new(40, 40, 48, 255));
+}
+
+/// F13 follow-up: icon for the new Move tool state — the standard 4-way
+/// "pan" glyph (a plus-shaped cross with an arrowhead on each end). Every
+/// arrowhead is axis-aligned (up/down/left/right), so this needs no rotated
+/// geometry — same constraint `draw_pencil_icon`'s doc comment explains.
+fn draw_move_icon(d: &mut impl RaylibDraw, r: Rectangle) {
+    let cx = r.x + r.width / 2.0;
+    let cy = r.y + r.height / 2.0;
+    let icon_color = Color::new(235, 235, 240, 255);
+    let outline = Color::new(40, 40, 48, 255);
+    let shaft_half_w = 1.5;
+    let arm = 7.0;
+    let head_w = 5.0;
+    let head_l = 4.0;
+
+    d.draw_rectangle_rec(Rectangle::new(cx - shaft_half_w, cy - arm, shaft_half_w * 2.0, arm * 2.0), icon_color);
+    d.draw_rectangle_rec(Rectangle::new(cx - arm, cy - shaft_half_w, arm * 2.0, shaft_half_w * 2.0), icon_color);
+
+    let heads = [
+        // Up
+        [Vector2::new(cx - head_w / 2.0, cy - arm), Vector2::new(cx + head_w / 2.0, cy - arm), Vector2::new(cx, cy - arm - head_l)],
+        // Down
+        [Vector2::new(cx - head_w / 2.0, cy + arm), Vector2::new(cx, cy + arm + head_l), Vector2::new(cx + head_w / 2.0, cy + arm)],
+        // Left
+        [Vector2::new(cx - arm, cy - head_w / 2.0), Vector2::new(cx - arm - head_l, cy), Vector2::new(cx - arm, cy + head_w / 2.0)],
+        // Right
+        [Vector2::new(cx + arm, cy - head_w / 2.0), Vector2::new(cx + arm, cy + head_w / 2.0), Vector2::new(cx + arm + head_l, cy)],
+    ];
+    for h in heads {
+        d.draw_triangle(h[0], h[1], h[2], icon_color);
+        d.draw_triangle_lines(h[0], h[1], h[2], outline);
+    }
+    d.draw_circle(cx as i32, cy as i32, 2.0, icon_color);
+    d.draw_circle_lines(cx as i32, cy as i32, 2.0, outline);
+}
+
+/// Paintbrush glyph with a color
+/// droplet at the tip. Axis-aligned only — see `draw_pencil_icon`'s doc
+/// comment above for why rotated custom geometry is avoided in this file.
+fn draw_brush_icon(d: &mut impl RaylibDraw, r: Rectangle, tip_color: Color) {
+    let handle_w = 8.0;
+    let handle_h = 9.0;
+    let ferrule_h = 4.0;
+    let bristle_h = 6.0;
+    let total_h = handle_h + ferrule_h + bristle_h;
+    let x = r.x + (r.width - handle_w) / 2.0;
+    let y = r.y + (r.height - total_h) / 2.0 - 1.0;
+    let outline = Color::new(40, 40, 48, 255);
+
+    let handle = Rectangle::new(x, y, handle_w, handle_h);
+    d.draw_rectangle_rounded(handle, 0.3, 4, Color::new(200, 150, 90, 255));
+    d.draw_rectangle_rounded_lines(handle, 0.3, 4, outline);
+
+    let bristle_top_w = handle_w + 2.0;
+    let ferrule = Rectangle::new(x - 1.0, y + handle_h, bristle_top_w, ferrule_h);
+    d.draw_rectangle_rec(ferrule, Color::new(190, 190, 196, 255));
+    d.draw_rectangle_lines(ferrule.x as i32, ferrule.y as i32, ferrule.width as i32, ferrule.height as i32, outline);
+
+    let bristle_y = y + handle_h + ferrule_h;
+    let tip_cx = x - 1.0 + bristle_top_w / 2.0;
+    let tip = [
+        Vector2::new(x - 1.0, bristle_y),
+        Vector2::new(x - 1.0 + bristle_top_w, bristle_y),
+        Vector2::new(tip_cx, bristle_y + bristle_h),
+    ];
+    // Match raylib's visible-face winding. The reverse order can be culled,
+    // leaving the map visible through the bristle area and making the icon
+    // look partially transparent.
+    d.draw_triangle(tip[0], tip[2], tip[1], Color::new(60, 55, 50, 255));
+    d.draw_triangle_lines(tip[0], tip[1], tip[2], outline);
+
+    // Droplet: the caller's LIVE brush color — reinforces "pick up a color"
+    // rather than reading as a generic paint tool.
+    let drop_c = Vector2::new(tip_cx, bristle_y + bristle_h + 2.0);
+    d.draw_circle_v(drop_c, 3.0, tip_color);
+    d.draw_circle_lines(drop_c.x as i32, drop_c.y as i32, 3.0, outline);
+}
+
+/// World-cursor version of the footer eyedropper icon. The droplet is
+/// anchored at `tip` and previews the painted color currently underneath.
+pub fn draw_eyedropper_cursor(d: &mut impl RaylibDraw, tip: Vector2, preview: Color) {
+    draw_brush_icon(d, Rectangle::new(tip.x - 15.0, tip.y - 25.5, 30.0, 30.0), preview);
 }
 
 /// Author-requested: icon-only Lock button — padlock glyph, shackle swung
@@ -1571,8 +1798,10 @@ fn draw_help_overlay(d: &mut impl RaylibDraw) {
     ty += 24;
     const CONTROL_LINES: &[&str] = &[
         "Left-drag on your island or the margin: paint",
-        "X or the Eraser button: toggle paint/erase",
-        "Middle-click a painted tile: eyedropper (must be unlocked)",
+        "X or the tool button: cycle Paint / Eraser / Move",
+        "Move tool: left-drag pans instead of painting",
+        "Eyedropper button, then click/tap a painted tile",
+        "Middle-click is the eyedropper shortcut",
         "Long-press a foreign tile: merge/take its color",
         "Double-click/-tap a foreign island: like / unlike",
         "Hover (or tap) a foreign island: info",
@@ -1620,7 +1849,10 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse:
     d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
 
     // F9.6 item 4: sorted by hue (see `sorted_hues`), and a hex-code label
-    // pops up above whichever swatch the mouse is currently over.
+    // pops up above whichever swatch the mouse is currently over. Author-
+    // requested follow-up: the label also names the raw hue degree (the
+    // actual unlockable resource, decision 7) alongside the hex code, since
+    // two close swatches can look identical at a glance otherwise.
     let mut hovered_hex: Option<(Rectangle, String)> = None;
     for (i, &hue) in sorted_hues(info).iter().enumerate() {
         let r = swatch_rect(i);
@@ -1643,7 +1875,7 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse:
             draw_crosshair(d, r, Color::new(255, 255, 255, 110));
         }
         if hovered {
-            hovered_hex = Some((r, color_hex(color)));
+            hovered_hex = Some((r, format!("{}  H:{hue}", color_hex(color))));
         }
     }
     if let Some((r, hex)) = hovered_hex {
@@ -1844,5 +2076,22 @@ fn draw_slider_capped(
             2.0,
             Color::new(220, 180, 80, 255),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eyedropper_restores_only_a_temporary_lock() {
+        let mut state = UiState::new();
+        assert!(state.arm_eyedropper(false));
+        assert_eq!(state.tool, Tool::Eyedropper);
+        assert!(state.finish_eyedropper());
+        assert_eq!(state.tool, Tool::Paint);
+
+        assert!(!state.arm_eyedropper(true));
+        assert!(!state.finish_eyedropper());
     }
 }
