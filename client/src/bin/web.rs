@@ -66,8 +66,6 @@ unsafe extern "C" {
 #[derive(Deserialize, Default)]
 struct FrameData {
     #[serde(default)]
-    status: String,
-    #[serde(default)]
     identity: Option<String>,
     #[serde(default)]
     now_micros: i64,
@@ -140,9 +138,6 @@ struct MergeEventRow {
 /// comment for why: every client renders the exact same group instead of
 /// each guessing its own approximate clustering).
 struct HexaClusterRow {
-    cluster_id: u64,
-    cx: f32,
-    cy: f32,
     member_count: u32,
     vertex_index: u32,
     ignited: bool,
@@ -396,12 +391,11 @@ fn parse_merge_event(v: &Value) -> Option<(u64, MergeEventRow)> {
 fn parse_hexa_cluster(v: &Value) -> Option<(String, HexaClusterRow)> {
     let r = row_view(v)?;
     let identity = identity_hex(r.field("identity", 0)?)?;
+    // Compatible server fields `cx`/`cy` remain at positions 2/3 but are
+    // now always the world origin, so the client no longer stores them.
     Some((
         identity,
         HexaClusterRow {
-            cluster_id: r.field("cluster_id", 1)?.as_u64()?,
-            cx: r.field("cx", 2)?.as_f64()? as f32,
-            cy: r.field("cy", 3)?.as_f64()? as f32,
             member_count: r.field("member_count", 4)?.as_u64()? as u32,
             vertex_index: r.field("vertex_index", 5)?.as_u64()? as u32,
             ignited: r.field("ignited", 6)?.as_bool()?,
@@ -808,15 +802,13 @@ struct State {
     ui_state: ui::UiState,
     known_inventory_ids: HashSet<u64>,
     inventory_seeded: bool,
+    known_hexa_event_ids: HashSet<u64>,
+    hexa_events_seeded: bool,
     /// F13: mirrors `main.rs`'s `hexa_display` — persisted, lerped hexagon-
     /// vertex snap positions (including the local player's own, per the
     /// author) keyed by identity hex string (this client has no SDK
     /// `Identity` type).
     hexa_display: HashMap<String, Vector2>,
-    /// Stable centre per exact HEXA membership. The server centroid follows
-    /// every tiny cursor report; rendering from it directly makes the whole
-    /// figure jitter while participants move their physical pointers.
-    hexa_fixed_centres: HashMap<u64, Vector2>,
     /// F9 level-up toast: mirrors `main.rs`'s `last_level` — `None` until the
     /// first frame `me` is known, so connecting already at some level
     /// doesn't fire a spurious toast.
@@ -840,7 +832,6 @@ struct State {
     last_paint_at: Instant,
     last_sent_pos: Option<Vector2>,
     last_sent_at: Instant,
-    ws_status: String,
     now_micros: i64,
     /// F9.5 item 5 (modal click-through): mirrors `main.rs`'s
     /// `suppress_map_until_release` — latches at press-start whether a modal
@@ -905,7 +896,6 @@ fn frame(state: &mut State) {
     // One JS call pulls in everything the socket received since last frame.
     let raw = run_js("window.stdb ? window.stdb.frame() : '{}'");
     let data: FrameData = serde_json::from_str(&raw).unwrap_or_default();
-    state.ws_status = data.status;
     state.now_micros = data.now_micros;
     if state.my_identity.is_none() {
         state.my_identity = data.identity.as_deref().map(normalize_identity);
@@ -1006,6 +996,21 @@ fn frame(state: &mut State) {
     // Inventory-insert watch (merge toast): toast + last3 nudge when a new
     // row for `me` appears. Mirrors `main.rs` exactly.
     if let Some(me) = me {
+        if !state.hexa_events_seeded {
+            state.known_hexa_event_ids = state.tables.hexa_events.keys().copied().collect();
+            state.hexa_events_seeded = true;
+        } else {
+            for (&event_id, _) in &state.tables.hexa_events {
+                if state.known_hexa_event_ids.insert(event_id)
+                    && state.tables.hexa_clusters.get(me).is_some_and(|row| row.ignited)
+                {
+                    state.ui_state.show_hexa_success_popup();
+                    if let Some(s) = &state.sfx {
+                        s.merge.play();
+                    }
+                }
+            }
+        }
         if !state.inventory_seeded {
             if state.tables.inventory.values().any(|i| i.owner_hex == me) {
                 state.known_inventory_ids = state.tables.inventory.keys().copied().collect();
@@ -1114,7 +1119,12 @@ fn frame(state: &mut State) {
         let locked = user.is_some_and(|u| u.locked);
         let level = world::level_of(xp);
         // F9 level-up feedback: mirrors `main.rs` exactly.
-        if state.last_level.is_some_and(|prev| level > prev) {
+        if state.last_level.is_some_and(|prev| prev < shared::constants::HEXA_UNLOCK_LEVEL && level >= shared::constants::HEXA_UNLOCK_LEVEL) {
+            state.ui_state.show_hexa_unlocked_toast();
+            if let Some(s) = &state.sfx {
+                s.levelup.play();
+            }
+        } else if state.last_level.is_some_and(|prev| level > prev) {
             state.ui_state.show_levelup_toast(level, world::sat_cap(level), hue);
             if let Some(s) = &state.sfx {
                 s.levelup.play();
@@ -1149,6 +1159,7 @@ fn frame(state: &mut State) {
             short_id: short_hex(&short_id),
             level,
             xp,
+            camera_target: state.camera.target,
             online,
             total,
             locked,
@@ -1225,6 +1236,12 @@ fn frame(state: &mut State) {
             if let Some((island, _)) = my_island(&state.tables, me) {
                 recenter(&mut state.camera, island);
             }
+        }
+        if actions.center_world {
+            let (target, zoom) = world_fit(&state.tables, state.camera.target, state.camera.zoom);
+            state.camera.target = target;
+            state.camera.zoom = zoom;
+            state.camera.offset = Vector2::new(360.0, 360.0);
         }
         if actions.export_screenshot {
             if let Some((island, _)) = my_island(&state.tables, me) {
@@ -1592,35 +1609,26 @@ fn frame(state: &mut State) {
     // `ISLAND_FIT_ZOOM`), floored so they stay findable when zoomed out.
     let other_cursor_scale = (state.camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
 
-    // F13 (Hexa event): mirrors `main.rs` — server-authoritative cluster
-    // membership, grouped by `cluster_id`, each member placed at ITS OWN
+    // F13 (Hexa event): mirrors `main.rs` — the server-authoritative central
+    // formation, with each member placed at ITS OWN
     // `vertex_index` (paired per-row, not by list position). `me`'s own row
     // is included like everyone else's — per the author, the LOCAL player's
     // own cursor should visibly move to its hexagon slot too (see the
     // local-cursor draw call below).
-    let mut hexa_groups: HashMap<u64, Vec<(&String, &HexaClusterRow)>> = HashMap::new();
-    for (id, row) in &state.tables.hexa_clusters {
-        hexa_groups.entry(row.cluster_id).or_default().push((id, row));
-    }
+    let hexa_rows: Vec<(&String, &HexaClusterRow)> = state.tables.hexa_clusters.iter().collect();
     // Flattened (key, hexagon target, raw fallback) triples across every
     // cluster, fed straight to `hexa_advance_display` — mirrors `main.rs` via
     // the shared `world::hexa_cluster_frame`; only the row shape and the user-table
     // lookup closure below are web-specific.
     let mut cluster_members: Vec<(String, Vector2, Vector2)> = Vec::new();
-    // World-space cluster centroid per snapped member, for the rotated
+    // Fixed world-centre target per snapped member, for the rotated
     // cursor draw — mirrors `main.rs`'s `hexa_centres`.
     let mut hexa_centres: HashMap<String, Vector2> = HashMap::new();
     // World-space hexagon edges (drawn inside `d2` below, mirrors `main.rs`).
     let mut hexa_polygons: Vec<(Vec<Vector2>, bool)> = Vec::new();
-    world::hexa_begin_fixed_centres(&mut state.hexa_fixed_centres, hexa_groups.keys().copied());
-    for rows in hexa_groups.into_values() {
-        let Some(&(_, first)) = rows.first() else { continue };
-        let members: Vec<(String, u32)> = rows.iter().map(|&(id, row)| (id.clone(), row.vertex_index)).collect();
-        let centre = world::hexa_fixed_centre(
-            &mut state.hexa_fixed_centres,
-            first.cluster_id,
-            Vector2::new(first.cx, first.cy),
-        );
+    if let Some(&(_, first)) = hexa_rows.first() {
+        let members: Vec<(String, u32)> = hexa_rows.iter().map(|&(id, row)| (id.clone(), row.vertex_index)).collect();
+        let centre = Vector2::zero();
         let (frame, vertices) = world::hexa_cluster_frame(
             centre,
             first.member_count as usize,
@@ -1831,6 +1839,7 @@ fn frame(state: &mut State) {
             short_id: short_hex(&short_id),
             level,
             xp,
+            camera_target: state.camera.target,
             online,
             total,
             locked,
@@ -1883,12 +1892,6 @@ fn frame(state: &mut State) {
         {
             world::draw_hold_ring(&mut d, mouse_screen, frac);
         }
-        // Author-requested: moved into the header band (top of screen, between
-        // the level/xp readout and the online count) instead of the footer's
-        // bottom-right corner — drawn here rather than inside `ui::draw_header`
-        // so both stay visible even before `me`/the HUD itself exists (e.g.
-        // while the socket is still connecting).
-        d.draw_text(&format!("ws: {}", state.ws_status), 220, 8, 13, Color::new(140, 140, 148, 220));
         d.draw_fps(440, 4);
     }
     // EndDrawing must complete before the browser reads the finished canvas.
@@ -1928,8 +1931,9 @@ fn main() {
         ui_state: ui::UiState::new(),
         known_inventory_ids: HashSet::new(),
         inventory_seeded: false,
+        known_hexa_event_ids: HashSet::new(),
+        hexa_events_seeded: false,
         hexa_display: HashMap::new(),
-        hexa_fixed_centres: HashMap::new(),
         last_level: None,
         long_press: None,
         pending_info_click: None,
@@ -1940,7 +1944,6 @@ fn main() {
         last_paint_at: Instant::now(),
         last_sent_pos: None,
         last_sent_at: Instant::now(),
-        ws_status: "connecting".to_string(),
         now_micros: 0,
         suppress_map_until_release: false,
         sfx,

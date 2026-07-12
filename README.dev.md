@@ -44,9 +44,23 @@ done
 
 Each bot eases between a distinct corner of the central island and its
 centre. They hold the centre for three seconds, return to their corners, and
-reset once before the next pass so every demonstration starts with fresh
-colors. Reset confirmations and failures are written to the corresponding
-log file.
+reset once when launched so every new showcase starts with fresh colors.
+They do not reset between passes, which preserves their promoted HEXA level.
+Reset confirmations and failures are written to the corresponding log file.
+
+To showcase HEXA, first claim admin as described in `WORK.md`. Wait until
+`spacetime sql hexel "SELECT name, xp FROM user"` lists `Hexa bot 1` through
+`Hexa bot 5`, then promote them to level 3 (300 XP):
+
+```bash
+for n in {1..5}; do
+  spacetime call hexel admin_set_xp_by_name "Hexa bot $n" 300 -s local
+done
+```
+
+Promote yourself with the same command, replacing the name with your unique
+in-game display name. `spacetime sql hexel "SELECT name, xp FROM user"` shows
+the exact names currently connected.
 
 Stop the assistants with:
 

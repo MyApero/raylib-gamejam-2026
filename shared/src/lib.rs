@@ -52,17 +52,17 @@ pub mod constants {
     /// counts" always means the same thing on both sides.
     pub const GIFT_CLAIM_DIST: f32 = 3.0;
 
-    /// F13 (Hexa event): cursors needed, clustered and same-hued, to ignite.
+    /// F13 (Hexa event): cursors needed in the six fixed world-centre slots
+    /// to ignite.
     /// Shared because the client mirrors the server's own detection to
     /// decide which cursors to snap onto hexagon-vertex render positions —
     /// see `hexa_clusters` in `world.rs`.
     pub const HEXA_SIZE: usize = 6;
-    /// F13: cluster radius for Hexa detection, world units — same "centered
-    /// on one member, scan for near neighbors" trick `MERGE_DIST` uses for
-    /// pairwise merge, just server-only there since only the server enforces
-    /// merge; here the client needs the identical radius too so its
-    /// rendering-only detection pass agrees with what the server actually
-    /// ignited.
+    /// HEXA becomes available on reaching level 3.
+    pub const HEXA_UNLOCK_LEVEL: u64 = 3;
+    /// Distance from the world origin at which an eligible cursor joins the
+    /// fixed central formation. Ordinary merging has its own independent
+    /// cursor-to-cursor distance.
     pub const HEXA_RADIUS: f32 = 2.0;
     /// F13: one-time-per-player Hexa bonus, granted the first time a player
     /// is ever part of an ignition. Server-only (client just observes the

@@ -6,6 +6,7 @@
 #![allow(unused, clippy::all)]
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
+pub mod admin_set_xp_by_name_reducer;
 pub mod claim_admin_reducer;
 pub mod claim_gift_reducer;
 pub mod click_link_reducer;
@@ -61,6 +62,7 @@ pub mod unlike_island_reducer;
 pub mod user_table;
 pub mod user_type;
 
+pub use admin_set_xp_by_name_reducer::admin_set_xp_by_name;
 pub use claim_admin_reducer::claim_admin;
 pub use claim_gift_reducer::claim_gift;
 pub use click_link_reducer::click_link;
@@ -124,6 +126,7 @@ pub use user_type::User;
 /// to indicate which reducer caused the event.
 
 pub enum Reducer {
+    AdminSetXpByName { name: String, xp: u64 },
     ClaimAdmin { password: String },
     ClaimGift { gift_id: u64 },
     ClickLink { island_id: u32 },
@@ -156,6 +159,7 @@ impl __sdk::InModule for Reducer {
 impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
+            Reducer::AdminSetXpByName { .. } => "admin_set_xp_by_name",
             Reducer::ClaimAdmin { .. } => "claim_admin",
             Reducer::ClaimGift { .. } => "claim_gift",
             Reducer::ClickLink { .. } => "click_link",
@@ -185,6 +189,12 @@ impl __sdk::Reducer for Reducer {
     #[allow(clippy::clone_on_copy)]
     fn args_bsatn(&self) -> Result<Vec<u8>, __sats::bsatn::EncodeError> {
         match self {
+            Reducer::AdminSetXpByName { name, xp } => {
+                __sats::bsatn::to_vec(&admin_set_xp_by_name_reducer::AdminSetXpByNameArgs {
+                    name: name.clone(),
+                    xp: xp.clone(),
+                })
+            }
             Reducer::ClaimAdmin { password } => {
                 __sats::bsatn::to_vec(&claim_admin_reducer::ClaimAdminArgs {
                     password: password.clone(),

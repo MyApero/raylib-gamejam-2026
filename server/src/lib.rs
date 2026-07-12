@@ -89,7 +89,7 @@ mod constants {
     /// detection radius/size, so these two (unlike the tuning knobs above)
     /// live in the `shared` crate. `XP_HEXA` is server-only but kept
     /// alongside them as the third F13 canonical constant.
-    pub use shared::constants::{HEXA_RADIUS, HEXA_SIZE, XP_HEXA};
+    pub use shared::constants::{HEXA_RADIUS, HEXA_SIZE, HEXA_UNLOCK_LEVEL, XP_HEXA};
     /// F13: how often the `hexa_cluster` safety-net sweep runs — deletes a
     /// row whose owner went stale (offline, or `last_seen` past
     /// `PRESENCE_TIMEOUT_SECS`) without ever calling `set_pos` again to
@@ -520,9 +520,8 @@ pub struct HexaReward {
 
 /// F13: one row per ignition, purely so clients can animate it (flash the
 /// hexagon edges, play the sfx) — `public` for that reason, unlike
-/// `HexaReward` above. `cx`/`cy` are the cluster centroid at ignition time;
-/// `member_count` lets the animation distinguish a fresh 6 from a cluster
-/// that's grown past it. Also doubles as the "was this `None`-obtained-with
+/// `HexaReward` above. `cx`/`cy` are the fixed world origin and
+/// `member_count` records the six occupants. Also doubles as the "was this `None`-obtained-with
 /// `Inventory` row a Hexa grant, not a `reset_account` reseed?" join key for
 /// the client's existing inventory-insert watch — see `apply_hexa`'s
 /// comment on why that's a timestamp join rather than a new `Inventory`
@@ -542,23 +541,18 @@ pub struct HexaEvent {
 /// (not just the ignition moment `HexaEvent` logs) — "the server would tell
 /// that there is an HEXA happening and give an id and position to players
 /// so that everyone sees they are merging." One row per CURRENTLY-clustered
-/// user (>= 2 same-hue, mutually-close members; deleted once that stops
-/// being true), `public` so every client renders the exact same authoritative
-/// group instead of each guessing its own approximate clustering.
-/// `cluster_id` is a hash of the sorted member identities (see
-/// `hexa_cluster_id`), not an arbitrary counter — independent `set_pos`
-/// calls that detect the same membership naturally agree on it without any
-/// cross-call synchronization, and it changes the instant membership
-/// actually changes. `cx`/`cy` is the live centroid of every member's
-/// current position, shared by the whole group; `vertex_index` (usually
-/// 0..6, can overflow past 6 — see `hexa_assign_seats`) is which
+/// user occupying one of the six fixed world-origin slots. Level-3+
+/// unlocked players within `HEXA_RADIUS` qualify regardless of hue. It is
+/// `public` so every client renders the same authoritative formation.
+/// `cluster_id` is always zero because only this one central formation can
+/// exist. `cx`/`cy` is always the world origin;
+/// `vertex_index` (0..=5) is which
 /// hexagon-vertex slot this member renders at, so clients don't need to
 /// re-derive vertex assignment themselves. It is STICKY, not sorted by
 /// identity: a returning member keeps its prior seat across an unrelated
 /// join/leave, and only a fresh joiner gets placed by real-world angle (see
-/// `upsert_hexa_cluster`/`hexa_assign_seats`) — so it is stateful-but-
-/// consistent (reducers serialize, so there's no cross-call race) rather
-/// than a pure function of membership alone, unlike `cluster_id`.
+/// `refresh_central_hexa`/`hexa_assign_seats`) — so it is stateful-but-
+/// consistent (reducers serialize, so there's no cross-call race).
 /// `ignited` mirrors `member_count >= HEXA_SIZE`.
 #[spacetimedb::table(accessor = hexa_cluster, public)]
 pub struct HexaCluster {
@@ -792,66 +786,11 @@ pub fn set_pos(ctx: &ReducerContext, cx: f32, cy: f32) -> Result<(), String> {
         }
     }
 
-    // F13 (Hexa event): AFTER the pairwise-merge scan above, since it may
-    // have just updated the caller's own hue — the cluster scan below must
-    // see that fresh value, not the one `set_pos` was called with. Same
-    // eligibility filter as the pairwise scan (online, fresh, unlocked),
-    // plus same-hue-as-caller (within HUE_TOLERANCE) and within
-    // HEXA_RADIUS; count includes the caller itself.
-    let me = ctx.db.user().identity().find(caller).ok_or("unknown user")?;
-    if !me.locked {
-        let mut cluster: Vec<(Identity, f32, f32)> = vec![(caller, cx, cy)];
-        for other in ctx.db.user().iter() {
-            if other.identity == caller || !other.online || other.locked {
-                continue;
-            }
-            if ctx
-                .timestamp
-                .duration_since(other.last_seen)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(i64::MAX)
-                >= constants::PRESENCE_TIMEOUT_SECS
-            {
-                continue;
-            }
-            if hue_dist(other.hue, me.hue) > constants::HUE_TOLERANCE {
-                continue;
-            }
-            let d2 = (other.cx - cx).powi(2) + (other.cy - cy).powi(2);
-            if d2 >= constants::HEXA_RADIUS * constants::HEXA_RADIUS {
-                continue;
-            }
-            cluster.push((other.identity, other.cx, other.cy));
-        }
-        if cluster.len() >= 2 {
-            // Author follow-up: broadcast the live forming/formed cluster to
-            // EVERY member, not just the caller — see `HexaCluster`'s doc
-            // comment. Ignition (reward-granting) stays a SEPARATE check
-            // right below, unaffected by this broadcast.
-            upsert_hexa_cluster(ctx, &cluster);
-        } else {
-            ctx.db.hexa_cluster().identity().delete(caller);
-        }
-        if cluster.len() >= constants::HEXA_SIZE {
-            let ids: Vec<Identity> = cluster.iter().map(|&(id, _, _)| id).collect();
-            apply_hexa(ctx, &ids, cx, cy);
-        }
-    }
+    // HEXA is deliberately separate from ordinary cursor merging. Level-3+
+    // unlocked players near the world origin occupy the nearest free fixed
+    // slot, regardless of hue or proximity to one another.
+    refresh_central_hexa(ctx);
     Ok(())
-}
-
-/// F13: deterministic id for a specific cluster MEMBERSHIP — a hash of the
-/// sorted participant identities, not an arbitrary counter, so independent
-/// callers' own `set_pos`-triggered scans naturally agree on the same id as
-/// long as they detect the same member set (no cross-call synchronization
-/// needed), and the id changes the instant membership actually changes.
-fn hexa_cluster_id(sorted_members: &[Identity]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for id in sorted_members {
-        id.hash(&mut hasher);
-    }
-    hasher.finish()
 }
 
 /// Fixed world-angle (radians) of hexagon slot `s` —
@@ -870,14 +809,10 @@ fn hexa_ang_dist(a: f32, b: f32) -> f32 {
     diff.min(std::f32::consts::TAU - diff)
 }
 
-/// Sticky angle-based seat assignment. Identity-sort-order seating reshuffled
-/// every seat on any join or
-/// leave, since `vertex_index` was just "position in the sorted member
-/// list" — a hexagon that had settled into a shape would visibly re-scramble
-/// for an unrelated membership change. `prior`/`angles` are both indexed in
-/// the same identity-sorted order the caller (`upsert_hexa_cluster`) builds
-/// its member list in; `prior[i]` is the member's EXISTING seat (`None` for
-/// a fresh join, no current `hexa_cluster` row).
+/// Sticky angle-based seat assignment for the six fixed slots at the world
+/// origin. `prior`/`angles` use the same member order; returning occupants
+/// retain their seat and a newcomer takes the free slot closest to the
+/// direction from which they approached the centre.
 ///
 /// Pass 1: every returning member keeps `prior % 6`. If two returning
 /// members collide on the same mod-6 slot (only possible right after a
@@ -885,15 +820,10 @@ fn hexa_ang_dist(a: f32, b: f32) -> f32 {
 /// overlaps), the first one in identity order keeps it; the loser falls
 /// through to pass 2 and gets reseated like a fresh join.
 /// Pass 2: every unseated member takes whichever FREE slot (0..6) has the
-/// fixed angle closest to their actual angle around the fresh centroid —
+/// fixed angle closest to their actual approach angle around the origin —
 /// ties favor the lowest index, for determinism. This is what makes a new
 /// joiner slot in next to where they physically are, instead of an
 /// arbitrary identity-sort position.
-/// Overflow: `member_count > 6` is a real (if rare) edge case at this
-/// detection radius — once all 6 fixed slots are claimed, remaining members
-/// get consecutive indices 6, 7, ... The client's `hexagon_vertex_positions`
-/// already wraps any index `% 6` onto one of the 6 world positions, so this
-/// reads as an (unavoidable) overlap rather than a crash or a 7-gon.
 fn hexa_assign_seats(prior: &[Option<u32>], angles: &[f32]) -> Vec<u32> {
     let n = prior.len();
     let mut seats: Vec<Option<u32>> = vec![None; n];
@@ -922,16 +852,7 @@ fn hexa_assign_seats(prior: &[Option<u32>], angles: &[f32]) -> Vec<u32> {
                 best = Some((slot, d));
             }
         }
-        let slot = match best {
-            Some((slot, _)) => slot,
-            None => {
-                let mut overflow = 6u32;
-                while taken.contains(&overflow) {
-                    overflow += 1;
-                }
-                overflow
-            }
-        };
+        let slot = best.expect("central HEXA is capped at six occupants").0;
         taken.insert(slot);
         seats[i] = Some(slot);
     }
@@ -939,36 +860,75 @@ fn hexa_assign_seats(prior: &[Option<u32>], angles: &[f32]) -> Vec<u32> {
     seats.into_iter().map(|s| s.unwrap()).collect()
 }
 
-/// F13: writes/updates EVERY member's own `HexaCluster` row in one pass
-/// (not just the caller's) — a single mover's `set_pos` call refreshes the
-/// whole visible group at once, rather than waiting for each member to
-/// happen to move themselves. `members` is the caller's own detected
-/// cluster (>= 2, itself included) with each member's current position, so
-/// the centroid/vertex assignment below reflect this instant's true state.
-/// Seat assignment (`hexa_assign_seats`) is sticky, not sort-order: a
-/// returning member's seat survives an unrelated join/leave; only a
-/// genuinely new member gets placed, by nearest real-world angle to a fixed
-/// slot — see that function's doc comment.
-fn upsert_hexa_cluster(ctx: &ReducerContext, members: &[(Identity, f32, f32)]) {
-    let mut sorted: Vec<(Identity, f32, f32)> = members.to_vec();
-    sorted.sort_by_key(|&(id, _, _)| id);
-    let ids: Vec<Identity> = sorted.iter().map(|&(id, _, _)| id).collect();
-    let cluster_id = hexa_cluster_id(&ids);
-    let n = sorted.len() as f32;
-    let cx = sorted.iter().map(|&(_, x, _)| x).sum::<f32>() / n;
-    let cy = sorted.iter().map(|&(_, _, y)| y).sum::<f32>() / n;
-    let ignited = sorted.len() >= constants::HEXA_SIZE;
+/// Rebuilds the one world-centre HEXA formation from live eligible players.
+/// Existing occupants get first refusal on their seats; remaining places go
+/// to the nearest waiting cursors. At most six rows exist, so a full HEXA
+/// never overlaps a seventh cursor.
+fn refresh_central_hexa(ctx: &ReducerContext) {
+    let prior_ignited: std::collections::HashSet<Identity> = ctx
+        .db
+        .hexa_cluster()
+        .iter()
+        .filter(|row| row.ignited)
+        .map(|row| row.identity)
+        .collect();
+    let radius2 = constants::HEXA_RADIUS * constants::HEXA_RADIUS;
+    let mut eligible: Vec<(Identity, f32, f32, Option<u32>)> = ctx
+        .db
+        .user()
+        .iter()
+        .filter(|u| {
+            u.online
+                && !u.locked
+                && level_of(u.xp) >= constants::HEXA_UNLOCK_LEVEL
+                && u.cx * u.cx + u.cy * u.cy < radius2
+                && ctx
+                    .timestamp
+                    .duration_since(u.last_seen)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(i64::MAX)
+                    < constants::PRESENCE_TIMEOUT_SECS
+        })
+        .map(|u| {
+            let prior = ctx.db.hexa_cluster().identity().find(u.identity).map(|row| row.vertex_index);
+            (u.identity, u.cx, u.cy, prior)
+        })
+        .collect();
 
-    let prior: Vec<Option<u32>> = ids.iter().map(|&id| ctx.db.hexa_cluster().identity().find(id).map(|r| r.vertex_index)).collect();
-    let angles: Vec<f32> = sorted.iter().map(|&(_, x, y)| libm::atan2f(y - cy, x - cx)).collect();
+    eligible.sort_by(|a, b| {
+        b.3.is_some()
+            .cmp(&a.3.is_some())
+            .then_with(|| (a.1 * a.1 + a.2 * a.2).total_cmp(&(b.1 * b.1 + b.2 * b.2)))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    eligible.truncate(constants::HEXA_SIZE);
+    eligible.sort_by_key(|&(id, _, _, _)| id);
+
+    let selected: std::collections::HashSet<Identity> = eligible.iter().map(|&(id, _, _, _)| id).collect();
+    let departed: Vec<Identity> = ctx.db.hexa_cluster().iter().filter(|row| !selected.contains(&row.identity)).map(|row| row.identity).collect();
+    for identity in departed {
+        ctx.db.hexa_cluster().identity().delete(identity);
+    }
+
+    if eligible.is_empty() {
+        return;
+    }
+
+    let sorted: Vec<(Identity, f32, f32)> = eligible.iter().map(|&(id, x, y, _)| (id, x, y)).collect();
+    let ids: Vec<Identity> = sorted.iter().map(|&(id, _, _)| id).collect();
+    let ignited = sorted.len() >= constants::HEXA_SIZE;
+    let new_ignition = ignited && prior_ignited != selected;
+
+    let prior: Vec<Option<u32>> = eligible.iter().map(|row| row.3).collect();
+    let angles: Vec<f32> = sorted.iter().map(|&(_, x, y)| libm::atan2f(y, x)).collect();
     let seats = hexa_assign_seats(&prior, &angles);
 
     for (i, &identity) in ids.iter().enumerate() {
         let row = HexaCluster {
             identity,
-            cluster_id,
-            cx,
-            cy,
+            cluster_id: 0,
+            cx: 0.0,
+            cy: 0.0,
             member_count: sorted.len() as u32,
             vertex_index: seats[i],
             ignited,
@@ -978,6 +938,9 @@ fn upsert_hexa_cluster(ctx: &ReducerContext, members: &[(Identity, f32, f32)]) {
         } else {
             ctx.db.hexa_cluster().insert(row);
         }
+    }
+    if ignited {
+        apply_hexa(ctx, &ids, 0.0, 0.0, new_ignition);
     }
 }
 
@@ -1028,16 +991,15 @@ fn apply_merge(ctx: &ReducerContext, a: Identity, b: Identity, merged_hue: u16, 
 /// received it. Pooling is idempotent for a fixed group — re-running this on
 /// a cluster that's already fully pooled and rewarded grants nothing new —
 /// so `set_pos` calling it on every tick a cluster holds needs no cooldown
-/// (author-confirmed design). That same idempotence is reused here to gate
-/// the `HexaEvent` log row itself: only written when this pass actually
-/// granted something, so a cluster that just sits there formed doesn't spam
-/// a fresh ignition-flash event every frame. Granted rows use
+/// (author-confirmed design). `force_event` is true only when a new six-player
+/// formation ignites, so repeat passes over the same formation do not spam
+/// events while a later re-formation still gets its own popup. Granted rows use
 /// `obtained_with: None` (same as a fresh seed hue or a `reset_account`
 /// reseed) — the client tells them apart from those by joining
 /// `Inventory.obtained_at` against this same call's `HexaEvent.at` (both
 /// stamped with the same `ctx.timestamp`), rather than a fourth `Inventory`
 /// meaning needing its own dedicated bool field.
-fn apply_hexa(ctx: &ReducerContext, participants: &[Identity], cx: f32, cy: f32) {
+fn apply_hexa(ctx: &ReducerContext, participants: &[Identity], cx: f32, cy: f32, force_event: bool) {
     let mut union_hues: Vec<u16> = Vec::new();
     for &p in participants {
         union_hues.extend(ctx.db.inventory().owner().filter(&p).map(|inv| inv.hue));
@@ -1070,7 +1032,7 @@ fn apply_hexa(ctx: &ReducerContext, participants: &[Identity], cx: f32, cy: f32)
         }
     }
 
-    if changed {
+    if changed || force_event {
         ctx.db.hexa_event().insert(HexaEvent { id: 0, at: ctx.timestamp, cx, cy, member_count: participants.len() as u32 });
     }
 }
@@ -1091,12 +1053,9 @@ pub fn set_lock(ctx: &ReducerContext, locked: bool) -> Result<(), String> {
     check_not_frozen(ctx)?;
     let user = ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
     ctx.db.user().identity().update(User { locked, ..user });
-    if locked {
-        // Locked cursors cannot participate in a forming HEXA. Clear the
-        // owner's render row immediately rather than waiting for movement
-        // or the stale-row sweep.
-        ctx.db.hexa_cluster().identity().delete(ctx.sender());
-    }
+    // Lock changes HEXA eligibility immediately; rebuild all rows so the
+    // remaining occupants also see the updated member count.
+    refresh_central_hexa(ctx);
     Ok(())
 }
 
@@ -1365,6 +1324,7 @@ pub fn reset_account(ctx: &ReducerContext) -> Result<(), String> {
         val: 100,
         ..user
     });
+    refresh_central_hexa(ctx);
     Ok(())
 }
 
@@ -1502,6 +1462,34 @@ pub fn set_frozen(ctx: &ReducerContext, frozen: bool) -> Result<(), String> {
     require_admin(ctx)?;
     let config = ctx.db.config().id().find(0).ok_or("config not initialized")?;
     ctx.db.config().id().update(Config { frozen, ..config });
+    Ok(())
+}
+
+/// Admin-only showcase/debug tool: set one uniquely named player's XP to an
+/// exact value. Names are not generally unique, so reject ambiguity rather
+/// than accidentally promoting the wrong player. This deliberately bypasses
+/// the normal gameplay XP sources and is intended for demonstrations only.
+#[spacetimedb::reducer]
+pub fn admin_set_xp_by_name(ctx: &ReducerContext, name: String, xp: u64) -> Result<(), String> {
+    require_admin(ctx)?;
+    let matches: Vec<User> = ctx
+        .db
+        .user()
+        .iter()
+        .filter(|user| user.name.as_deref() == Some(name.as_str()))
+        .collect();
+    let [user] = matches.as_slice() else {
+        return Err(if matches.is_empty() {
+            format!("no player named {name:?}")
+        } else {
+            format!("multiple players are named {name:?}; choose a unique display name")
+        });
+    };
+    let sat = user.sat.min(sat_cap(level_of(xp)));
+    ctx.db.user().identity().update(User { xp, sat, ..user.clone() });
+    // A promotion while the player is already waiting at the centre should
+    // make them HEXA-eligible immediately, without requiring mouse motion.
+    refresh_central_hexa(ctx);
     Ok(())
 }
 
@@ -1723,39 +1711,14 @@ pub fn gift_tick(ctx: &ReducerContext, _arg: GiftSchedule) -> Result<(), String>
     Ok(())
 }
 
-/// F13: repeating safety-net sweep (same lazy-seeding pattern as the other
-/// schedules) — `upsert_hexa_cluster`/`set_pos`'s own `cluster.len() < 2`
-/// branch only clear a member's row on THAT member's own next `set_pos`
-/// call, so a member who goes offline (or just stops moving) while the rest
-/// of their cluster drifts apart would otherwise leave a stale row showing
-/// a hexagon that no longer really exists. Deletes any `hexa_cluster` row
-/// whose owner is no longer online or has gone stale. Restricted to the
-/// scheduler itself, same as every other scheduled reducer here.
+/// Rebuilds the fixed central formation periodically so stale occupants are
+/// removed even if nobody sends another position update.
 #[spacetimedb::reducer]
 pub fn hexa_sweep(ctx: &ReducerContext, _arg: HexaSweepSchedule) -> Result<(), String> {
     if ctx.sender() != ctx.database_identity() {
         return Err("hexa_sweep may not be invoked by clients".to_string());
     }
-    let stale: Vec<Identity> = ctx
-        .db
-        .hexa_cluster()
-        .iter()
-        .filter(|row| {
-            ctx.db.user().identity().find(row.identity).is_none_or(|u| {
-                !u.online
-                    || ctx
-                        .timestamp
-                        .duration_since(u.last_seen)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(i64::MAX)
-                        >= constants::PRESENCE_TIMEOUT_SECS
-            })
-        })
-        .map(|row| row.identity)
-        .collect();
-    for identity in stale {
-        ctx.db.hexa_cluster().identity().delete(identity);
-    }
+    refresh_central_hexa(ctx);
     Ok(())
 }
 
@@ -1953,6 +1916,7 @@ pub fn identity_disconnected(ctx: &ReducerContext) {
     );
     if let Some(user) = ctx.db.user().identity().find(ctx.sender()) {
         ctx.db.user().identity().update(User { online: false, ..user });
+        refresh_central_hexa(ctx);
     } else {
         log::warn!("Disconnect event for unknown user {:?}", ctx.sender());
     }
@@ -2001,15 +1965,6 @@ mod tests {
         let seats = hexa_assign_seats(&prior, &angles);
         assert_eq!(seats[0], 2);
         assert_eq!(seats[1], 5);
-    }
-
-    #[test]
-    fn seventh_member_overflows_to_index_six() {
-        let prior = [None; 7];
-        let angles: Vec<f32> = (0..6).map(corner_angle).chain(std::iter::once(corner_angle(0))).collect();
-        let seats = hexa_assign_seats(&prior, &angles);
-        assert_eq!(seats[..6], [0, 1, 2, 3, 4, 5]);
-        assert_eq!(seats[6], 6);
     }
 
     #[test]

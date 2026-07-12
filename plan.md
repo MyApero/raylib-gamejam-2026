@@ -131,7 +131,8 @@ pointing here).
 | `RERANK_WARNING` | 5 s | countdown before islands move (P1) |
 | `HUE_TOLERANCE` | 5° | hue-slider nudge range (added in F4); every "same hue" comparison uses circular distance ≤ this, never exact equality |
 | `HEXA_SIZE` | 6 | cursors needed to ignite a Hexa event (P2) |
-| `HEXA_RADIUS` | 2.0 | cluster radius for Hexa detection, world units (P2) |
+| `HEXA_UNLOCK_LEVEL` | 3 | minimum level for the central Hexa formation |
+| `HEXA_RADIUS` | 2.0 | activation radius around the world origin, world units (P2) |
 | `XP_HEXA` | 150 | one-time-per-player Hexa bonus (P2) |
 | `HEXA_SWEEP_PERIOD_SECS` | 2 | `hexa_cluster` stale-row safety-net sweep interval, server-only (P2, F13 follow-up) |
 | `GIFT_SPAWN_PERIOD_SECS` | 45 | flying-gift spawn/expire tick interval, server-only (P2, F11) |
@@ -773,6 +774,16 @@ center bot, customizable island border color.
 - **F13 Hexa event** — the merge mechanic at 6 (author-designed). IMPLEMENTED
   (2026-07-11) — see status.md's F13 batch note for the executor's design calls;
   summary:
+  - **Author revision (2026-07-12; supersedes the trigger/render-location details
+    below):** HEXA is a fixed easter egg at the world origin on the white community
+    island. It unlocks at level 3; the level-up banner says "HEXA UNLOCKED! Meet your
+    friends at the centre of the world!" Unlocked, fresh, online players entering
+    `HEXA_RADIUS` take the nearest unoccupied one of six fixed angular seats,
+    regardless of hue. Existing occupants retain their seats, the formation is capped
+    at six, and Lock opts out. The server broadcasts `(0,0)` as its fixed centre, so
+    cursor motion cannot jitter the figure. Ordinary two-player merging remains a
+    separate raw-cursor-proximity check using `MERGE_DIST`; HEXA's visual snap never
+    changes the network positions used by merging or painting.
   - *Trigger* (server, in `set_pos` after the pairwise-merge scan): count eligible
     cursors — online, `last_seen` < `PRESENCE_TIMEOUT`, not locked — within
     `HEXA_RADIUS` of the caller whose brush hue matches the caller's within

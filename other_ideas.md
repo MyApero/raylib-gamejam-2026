@@ -91,7 +91,7 @@ cursor name-label rendering (`world::draw_cursor_label`) shows it above the
 cursor for free, no bot-specific client code. See plan.md's F12 entry.)
 - [x] Customise your Isle border color or make it transparent (remove)
 
-- [ ] Put a clear hexel title with a ENTER
+- [x] Put a clear hexel title with a ENTER
 
 - [x] The Saturation slider should go to 100 but block at the max you unlocked. Tooltip explaining (You need more XP to unlock more saturation)
 

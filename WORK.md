@@ -20,62 +20,30 @@ Keep this running. First time only (and again any time `server/src/lib.rs` chang
 ./generate_module_bindings.sh
 ```
 
-## Terminal 2 — client
+## Terminal 2 — Client
 
-```bash
-cargo run -p client
-```
-
-Running this in extra terminals unmodified will NOT spawn distinct players —
-`credentials::File` stores its token at a single fixed path per key
-(`~/.spacetimedb_client_credentials/hexel`), shared by every process on
-the machine. Set `HEXEL_PLAYER` to a different value per terminal to test
-as separate players locally:
-
-```bash
-HEXEL_PLAYER=p1 cargo run -p client --bin client   # terminal 2
-HEXEL_PLAYER=p2 cargo run -p client --bin client   # terminal 3
-```
-
-## Terminal 3 — web build (optional)
-
-Requires emsdk activated (`emsdk_env.sh` sourced) — `build-web.sh` does this
-for you (assumes `../emsdk`, override with `EMSDK_DIR=...`).
+### Web
 
 ```bash
 ./build-web.sh
 python3 -m http.server -d client/web 8080
 ```
 
-Then open http://localhost:8080 in a browser. Debug builds crash the
-emscripten linker (binaryen assertion), so the script always builds
-`--release`.
+Then open http://localhost:8080 in a browser.
 
-`index.html` is a thin wrapper that embeds two independent copies of the
-game (`game.html?slot=1` / `?slot=2`) in iframes, side by side in landscape
-and stacked in portrait, so two players can play on one screen. Open
-`game.html` directly for a single instance (e.g. while debugging). The
-`slot` query param namespaces the SpacetimeDB session token in
-`sessionStorage` so the two iframes don't collide on one identity.
 
-The web client can't use spacetimedb-sdk (raylib's web target is
-emscripten; the SDK's browser feature needs wasm-bindgen, which doesn't
-support emscripten), so it speaks SpacetimeDB's `v1.json.spacetimedb`
-WebSocket protocol directly: the socket lives in JS (`client/web/game.html`)
-and the game drains its pushed messages once per frame. See
-`client/src/bin/web.rs`.
+### Native
 
-### Testing on your phone (same Wi-Fi)
+```bash
+cargo run -p client
+```
 
-Both `http.server` and `spacetime start` bind all interfaces by default, so
-they're already reachable from other devices on the same network — no
-firewall/config changes needed on a typical setup. Find your machine's LAN
-IP (`ip -4 addr` or similar) and open `http://<lan-ip>:8080` on the phone.
-The web client resolves SpacetimeDB's address from the page's own hostname
-at runtime, so this works without editing any code. Single-finger touch
-drags move your hexagon (raylib translates single-touch to mouse position
-on the web platform); the canvas is CSS-scaled to fit the screen without
-zooming.
+Multiple clients
+
+```bash
+HEXEL_PLAYER=p1 cargo run -p client --bin client
+HEXEL_PLAYER=p2 cargo run -p client --bin client
+```
 
 ## VPS setup (SpacetimeDB 2.7, for later)
 
@@ -120,20 +88,23 @@ No in-game admin UI — these are CLI-only ops tools, called against whichever
 server you're pointed at (swap `-s local` for the production server name):
 
 ```bash
-# claim admin for the identity `spacetime call` is currently using (grants
-# config.admin, relocates that identity's island to the reserved slot 0)
-spacetime call hexel claim_admin '["<the admin password>"]' -s local
+# claim admin for the identity `spacetime call` is currently using
+spacetime call hexel claim_admin "<the admin password>" -s local
 
 # freeze/unfreeze all player interaction (painting, merging, moving, liking,
 # link editing, border editing) — a panic button for active abuse; the admin
 # reducers themselves stay callable while frozen
-spacetime call hexel set_frozen '[true]' -s local
-spacetime call hexel set_frozen '[false]' -s local
+spacetime call hexel set_frozen true -s local
+spacetime call hexel set_frozen false -s local
 
 # wipe every painted cell on a given island (moderation for offensive/abusive
 # art) — the island row itself (ownership, likes, link, border, slot) is
 # untouched, so the owner keeps their spot
-spacetime call hexel delete_island_cells '[<island_id>]' -s local
+spacetime call hexel delete_island_cells <island_id> -s local
+
+# demo/debug only: assign an exact XP total to one uniquely named player.
+# 300 XP is level 3, which unlocks the central HEXA feature.
+spacetime call hexel admin_set_xp_by_name "<display name>" 300 -s local
 ```
 
 The admin password is never committed in plaintext — only its SHA-256 digest

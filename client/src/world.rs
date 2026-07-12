@@ -189,18 +189,6 @@ mod tests {
     }
 
     #[test]
-    fn hexa_fixed_centre_ignores_motion_until_membership_changes() {
-        let mut fixed = std::collections::HashMap::new();
-        let initial = hexa_fixed_centre(&mut fixed, 7, Vector2::new(2.0, 3.0));
-        let moved = hexa_fixed_centre(&mut fixed, 7, Vector2::new(9.0, 11.0));
-        assert_eq!(initial, moved);
-
-        hexa_begin_fixed_centres(&mut fixed, [8]);
-        assert!(!fixed.contains_key(&7));
-        assert_eq!(hexa_fixed_centre(&mut fixed, 8, Vector2::new(9.0, 11.0)), Vector2::new(9.0, 11.0));
-    }
-
-    #[test]
     fn hexa_advance_display_glides_in_from_raw() {
         let prev = std::collections::HashMap::new();
         let raw = Vector2::new(0.0, 0.0);
@@ -621,14 +609,11 @@ pub fn draw_cursor_label(d: &mut impl RaylibDraw, tip: Vector2, name: &str, scal
 }
 
 /// F13: regular-hexagon vertex slots around `center`, `count` of them.
-/// Client-only cosmetic (the server has no notion of a vertex layout, only
-/// `HEXA_RADIUS`'s detection circle) — `HEXA_VERTEX_RADIUS` is picked purely
-/// for how the shape reads on screen. `count` past `HEXA_SIZE` (a rare
-/// geometric edge case: a cluster briefly bigger than 6 at this radius)
-/// wraps onto an already-occupied slot rather than growing a 7+-gon.
+/// Client-only cosmetic — `HEXA_VERTEX_RADIUS` is picked purely for how the
+/// shape reads on screen. The server caps the central formation at six.
 /// `phase` (radians) rotates the whole ring — slot 0 sits straight up only
 /// at `phase` 0; callers now pass `count.max(6)` since seats are no longer
-/// contiguous (sticky angle-based server seating, see `upsert_hexa_cluster`)
+/// contiguous (sticky angle-based server seating, see `refresh_central_hexa`)
 /// and a partial cluster can hold non-contiguous slots like {0, 2, 5}.
 /// Author follow-up: vertex ASSIGNMENT (which slot a given member renders
 /// at) is server-authoritative (`HexaCluster.vertex_index`), so both
@@ -670,7 +655,7 @@ pub fn hexa_cluster_frame<K: Clone + Eq + std::hash::Hash>(
     let mut frame = Vec::with_capacity(members.len());
     for (key, vertex_index) in members {
         if vertices.get(*vertex_index as usize).is_some() {
-            // Six equilateral cursor wedges share the centroid as their tip.
+            // Six equilateral cursor wedges share the world origin as their tip.
             // `vertex_index` selects the matching outer polygon side at draw
             // time; the display position itself therefore settles here.
             let target = center;
@@ -678,28 +663,6 @@ pub fn hexa_cluster_frame<K: Clone + Eq + std::hash::Hash>(
         }
     }
     (frame, vertices)
-}
-
-/// Keeps the render anchor for each exact server-authoritative HEXA
-/// membership stable. Native and web have different table adapters, but
-/// cluster lifetime and anchor semantics must remain shared here.
-pub fn hexa_begin_fixed_centres(
-    fixed: &mut std::collections::HashMap<u64, Vector2>,
-    active_cluster_ids: impl IntoIterator<Item = u64>,
-) {
-    let active: std::collections::HashSet<u64> = active_cluster_ids.into_iter().collect();
-    fixed.retain(|id, _| active.contains(id));
-}
-
-/// Returns the centre captured on the first frame of this exact cluster
-/// membership. Later live centroid updates are deliberately ignored so
-/// small physical cursor movements cannot jitter the rendered figure.
-pub fn hexa_fixed_centre(
-    fixed: &mut std::collections::HashMap<u64, Vector2>,
-    cluster_id: u64,
-    observed: Vector2,
-) -> Vector2 {
-    *fixed.entry(cluster_id).or_insert(observed)
 }
 
 /// F13: advances the previous frame's persisted per-member DISPLAY position

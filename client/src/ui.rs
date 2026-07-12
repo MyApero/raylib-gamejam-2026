@@ -110,6 +110,8 @@ pub struct UiState {
     pub last3: VecDeque<u16>,
     dragging: Drag,
     toast: Option<Toast>,
+    /// A confirmed local Hexa reward opens this acknowledgement modal.
+    hexa_success_open: bool,
     /// Anchor hue for the Hue slider's ±`HUE_TOLERANCE` window. Set exactly
     /// on a swatch click; otherwise auto-recentered (see `handle_input`)
     /// whenever the server's actual brush hue drifts outside that window —
@@ -219,6 +221,7 @@ impl UiState {
             last3: VecDeque::new(),
             dragging: Drag::None,
             toast: None,
+            hexa_success_open: false,
             base_hue: 0,
             pending_select: None,
             account_open: false,
@@ -284,6 +287,7 @@ impl UiState {
             || self.overlay_open
             || self.account_open
             || self.help_open
+            || self.hexa_success_open
             || self.island_popup.as_ref().is_some_and(|p| p.is_own)
     }
 
@@ -295,6 +299,7 @@ impl UiState {
         self.overlay_open = false;
         self.account_open = false;
         self.help_open = false;
+        self.hexa_success_open = false;
         self.island_popup = None;
         self.dragging = Drag::None;
     }
@@ -357,6 +362,16 @@ impl UiState {
         });
     }
 
+    /// Shown once when a player crosses the level-3 HEXA unlock threshold.
+    pub fn show_hexa_unlocked_toast(&mut self) {
+        self.toast = Some(Toast {
+            text: "HEXA UNLOCKED! Meet your friends at the centre of the world!".to_string(),
+            hue: None,
+            merge_from: None,
+            shown_at: Instant::now(),
+        });
+    }
+
     /// F9.6 item 2: plain-text toast (no flash swatch) — used for the
     /// middle-click eyedropper's "not unlocked" feedback.
     pub fn show_info_toast(&mut self, text: String) {
@@ -379,6 +394,14 @@ impl UiState {
     pub fn show_hexa_toast(&mut self, hue: u16) {
         self.toast = Some(Toast { text: "Hexa event! colors pooled with 5 others".to_string(), hue: Some(hue), merge_from: None, shown_at: Instant::now() });
         self.note_used_hue(hue);
+    }
+
+    /// Prominent acknowledgement for completing the six-player formation.
+    /// Kept separate from `Toast`: several pooled inventory rows can arrive
+    /// together, but they should all refer to one shared modal.
+    pub fn show_hexa_success_popup(&mut self) {
+        self.close_all_modals();
+        self.hexa_success_open = true;
     }
 
     /// Seeds the name field from the server row exactly once. After that the
@@ -446,6 +469,8 @@ pub struct HudInfo<'a> {
     pub short_id: &'a str,
     pub level: u64,
     pub xp: u64,
+    /// Camera world-space target, shown as X/Y in the header.
+    pub camera_target: Vector2,
     pub online: usize,
     pub total: usize,
     pub locked: bool,
@@ -468,6 +493,9 @@ pub struct Actions {
     pub set_name: Option<String>,
     pub set_lock: Option<bool>,
     pub center_camera: bool,
+    /// World Centre footer button: zoom out to frame the whole world instead
+    /// of the caller's own island.
+    pub center_world: bool,
     /// Header's export control: the caller temporarily frames the player's
     /// island, renders the clean share card, then captures that frame.
     pub export_screenshot: bool,
@@ -530,11 +558,19 @@ fn inventory_btn_rect() -> Rectangle {
     Rectangle::new(FOOTER_EDGE_PAD, SCREEN_H - FOOTER_H + 7.0, 88.0, 30.0)
 }
 
-/// Author-requested: icon-only (a "recenter"/geolocation glyph, see
-/// `draw_locate_icon`), now anchors the very bottom-right corner of the
-/// footer (previously it was the leftmost button in the cluster).
-fn center_btn_rect() -> Rectangle {
+/// Author-requested: a second recenter button, right of Isle Centre, that
+/// zooms out to frame the whole world (`world_fit`) instead of the caller's
+/// own island. Anchors the very bottom-right corner of the footer.
+fn world_centre_btn_rect() -> Rectangle {
     Rectangle::new(SCREEN_W - FOOTER_EDGE_PAD - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
+}
+
+/// Author-requested: icon-only (a "recenter"/geolocation glyph, see
+/// `draw_locate_icon`), renamed "Isle Centre" now that `world_centre_btn_rect`
+/// covers the whole-world case — sits directly left of it.
+fn center_btn_rect() -> Rectangle {
+    let wb = world_centre_btn_rect();
+    Rectangle::new(wb.x - 4.0 - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
 }
 
 /// Author-requested: the name field is centered on screen, with the last-3
@@ -600,6 +636,12 @@ fn overlay_rect() -> Rectangle {
 fn overlay_close_rect() -> Rectangle {
     let o = overlay_rect();
     Rectangle::new(o.x + o.width - 38.0, o.y + 8.0, 30.0, 30.0)
+}
+
+/// The acknowledgement control in the HEXA completion modal. Kept as a
+/// shared layout helper so its hitbox and drawn button cannot drift apart.
+fn hexa_success_ok_rect() -> Rectangle {
+    Rectangle::new(SCREEN_W / 2.0 - 78.0, 472.0, 156.0, 42.0)
 }
 
 /// Whether this frame's click should dismiss whichever modal occupies the
@@ -817,6 +859,18 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         }
         return Actions::default();
     }
+    // HEXA completion is deliberately acknowledged through its own OK
+    // button. It blocks every other input, including Escape and outside
+    // clicks, so it cannot be dismissed accidentally while the player is
+    // celebrating the rare six-player success.
+    if state.hexa_success_open {
+        if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+            && point_in(rl.get_mouse_position(), hexa_success_ok_rect())
+        {
+            state.hexa_success_open = false;
+        }
+        return Actions::default();
+    }
     // Re-anchor the Hue slider whenever the actual brush hue has drifted
     // outside its window (a merge changed it server-side, the live hue was
     // left nudged away from any exact swatch by a previous session, or this
@@ -889,6 +943,9 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
 
     if clicked && point_in(mouse, center_btn_rect()) {
         actions.center_camera = true;
+    }
+    if clicked && point_in(mouse, world_centre_btn_rect()) {
+        actions.center_world = true;
     }
     if clicked && point_in(mouse, export_btn_rect()) {
         actions.export_screenshot = true;
@@ -1244,6 +1301,39 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         draw_rerank_banner(d, secs);
     }
     draw_like_anims(d, state);
+    if state.hexa_success_open {
+        draw_hexa_success_popup(d);
+    }
+}
+
+/// Big, explicit acknowledgement for a successful HEXA. It deliberately
+/// draws last, over both the map and HUD, and stays open until OK is clicked.
+fn draw_hexa_success_popup(d: &mut impl RaylibDraw) {
+    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(5, 7, 13, 185));
+
+    let panel = Rectangle::new(94.0, 185.0, 532.0, 350.0);
+    d.draw_rectangle_rec(panel, Color::new(22, 25, 38, 250));
+    d.draw_rectangle_lines_ex(panel, 3.0, Color::new(255, 220, 92, 255));
+    d.draw_rectangle_lines_ex(Rectangle::new(panel.x + 8.0, panel.y + 8.0, panel.width - 16.0, panel.height - 16.0), 1.0, Color::new(255, 245, 190, 180));
+
+    let centre = Vector2::new(SCREEN_W / 2.0, panel.y + 62.0);
+    for i in 0..6 {
+        let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::FRAC_PI_3;
+        let p = Vector2::new(centre.x + 78.0 * angle.cos(), centre.y + 78.0 * angle.sin());
+        d.draw_poly(p, 6, 12.0, 0.0, Color::new(255, 210, 75, 210));
+    }
+    d.draw_poly(centre, 6, 29.0, 0.0, Color::new(255, 240, 170, 255));
+    d.draw_poly_lines_ex(centre, 6, 29.0, 0.0, 2.0, Color::new(70, 48, 20, 255));
+
+    d.draw_text("HEXA!", 230, 300, 62, Color::new(255, 232, 125, 255));
+    d.draw_text("FORMATION COMPLETE", 236, 365, 24, Color::RAYWHITE);
+    d.draw_text("Thank you for playing HEXEL.", 228, 407, 20, Color::new(255, 245, 205, 255));
+    d.draw_text("You and your friends made the HEXA and pooled your colors.", 139, 438, 16, Color::new(220, 224, 236, 255));
+
+    let ok = hexa_success_ok_rect();
+    d.draw_rectangle_rounded(ok, 0.3, 8, Color::new(255, 220, 92, 255));
+    d.draw_rectangle_rounded_lines(ok, 0.3, 8, Color::new(72, 52, 24, 255));
+    d.draw_text("OK", ok.x as i32 + 58, ok.y as i32 + 10, 20, Color::new(38, 31, 22, 255));
 }
 
 /// F8/F9: own-island management panel (opened via the "My Isle" footer
@@ -1334,12 +1424,14 @@ const BTN_TOOLTIP_W: f32 = 210.0;
 /// otherwise carry no on-screen label at all. The name field is
 /// deliberately excluded (self-explanatory as a text input).
 const BUTTON_TOOLTIPS: &[(fn() -> Rectangle, &str, &[&str])] = &[
-    (center_btn_rect, "Center", &["Go back to your island"]),
+    (center_btn_rect, "Isle Centre", &["Go back to your island"]),
+    (world_centre_btn_rect, "World Centre", &["Zoom out to see", "the whole world"]),
     (inventory_btn_rect, "Colors", &["Inventory: stores every", "color you've discovered"]),
-    (lock_btn_rect, "Lock", &["Makes you unmergeable", "with others"]),
+    (lock_btn_rect, "Lock", &["Blocks cursor merging", "and central HEXA"]),
     (brush_btn_rect, "Eyedropper", &["Click or tap, then select", "a painted tile", "Merging is disabled while active"]),
     (account_btn_rect, "Account", &["Copy or import your ID,", "reset your account"]),
-    (my_island_btn_rect, "My Isle", &["Center the camera on", "your own island"]),
+    (my_island_btn_rect, "My Isle", &["Get info on your island", "and set your project link"]),
+    (export_btn_rect, "Export", &["Save a shareable image", "of your island"]),
 ];
 
 fn hovered_button_tooltip(mouse: Vector2) -> Option<(&'static str, &'static [&'static str])> {
@@ -1468,7 +1560,10 @@ fn draw_rerank_banner(d: &mut impl RaylibDraw, secs: i64) {
 fn draw_toast(d: &mut impl RaylibDraw, toast: &Toast, info: &HudInfo) {
     let frac = 1.0 - (toast.shown_at.elapsed().as_secs_f32() / TOAST_DURATION.as_secs_f32()).clamp(0.0, 1.0);
     let alpha = (frac * 235.0) as u8;
-    let bar_w = if toast.merge_from.is_some() { 430.0 } else { 360.0 };
+    let content_w = toast.text.chars().count() as f32 * 8.0
+        + if toast.hue.is_some() { 42.0 } else { 20.0 }
+        + if toast.merge_from.is_some() { 80.0 } else { 0.0 };
+    let bar_w = content_w.clamp(if toast.merge_from.is_some() { 430.0 } else { 360.0 }, 680.0);
     let bar = Rectangle::new(360.0 - bar_w / 2.0, HEADER_H + 10.0, bar_w, 34.0);
     d.draw_rectangle_rec(bar, Color::new(24, 24, 30, alpha));
     d.draw_rectangle_lines_ex(bar, 1.0, Color::new(255, 215, 0, alpha));
@@ -1509,7 +1604,15 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo) {
     // it's already reachable via the Account overlay ("Signed in as ..."),
     // so the header itself only needs the level/xp readout.
     d.draw_text(&format!("Lv{}  {}xp", info.level, info.xp), 10, 6, 16, Color::RAYWHITE);
+    // Author-requested: sits in the gap right after the level/xp readout
+    // (freed up by removing the web-only "ws: ..." debug line that used to
+    // live here).
+    d.draw_text("PRESS ESC for help", 150, 8, 12, Color::GRAY);
     d.draw_text("hexel", 338, 6, 16, Color::RAYWHITE);
+    // Author-requested: camera world position, two stacked lines in the gap
+    // between the wordmark and the online count.
+    d.draw_text(&format!("X: {}", info.camera_target.x.round() as i32), 400, 2, 11, Color::LIGHTGRAY);
+    d.draw_text(&format!("Y: {}", info.camera_target.y.round() as i32), 400, 14, 11, Color::LIGHTGRAY);
     // Fixed-position right-side label rather than measuring text width —
     // the draw handle has no default-font `measure_text` (that's only on
     // `RaylibHandle`, unavailable once `begin_drawing` hands out its borrow).
@@ -1552,6 +1655,10 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     let cb = center_btn_rect();
     d.draw_rectangle_rec(cb, Color::new(40, 40, 48, 255));
     draw_locate_icon(d, cb);
+
+    let wcb = world_centre_btn_rect();
+    d.draw_rectangle_rec(wcb, Color::new(40, 40, 48, 255));
+    draw_globe_icon(d, wcb);
 
     for (i, &hue) in state.last3.iter().enumerate() {
         let r = last3_rect(i);
@@ -1672,6 +1779,18 @@ fn draw_locate_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     d.draw_line_ex(Vector2::new(cx + ring_r + gap, cy), Vector2::new(cx + ring_r + gap + tick, cy), 2.0, icon_color);
 }
 
+/// World Centre glyph: a globe (ring plus a meridian/equator cross), distinct
+/// from the locate-me ring-and-ticks used for Isle Centre right next to it.
+fn draw_globe_icon(d: &mut impl RaylibDraw, r: Rectangle) {
+    let cx = r.x + r.width / 2.0;
+    let cy = r.y + r.height / 2.0;
+    let icon_color = Color::new(235, 235, 240, 255);
+    let ring_r = 7.0;
+    d.draw_ring(Vector2::new(cx, cy), ring_r - 1.3, ring_r, 0.0, 360.0, 24, icon_color);
+    d.draw_line_ex(Vector2::new(cx - ring_r, cy), Vector2::new(cx + ring_r, cy), 1.0, icon_color);
+    d.draw_ellipse_lines(cx as i32, cy as i32, ring_r * 0.45, ring_r, icon_color);
+}
+
 /// Export/share glyph: an upward arrow leaving a small tray. This avoids a
 /// text label in the narrow top-right header while still reading clearly as
 /// "save this image".
@@ -1773,7 +1892,7 @@ fn draw_move_icon(d: &mut impl RaylibDraw, r: Rectangle) {
         [Vector2::new(cx - head_w / 2.0, cy - arm), Vector2::new(cx + head_w / 2.0, cy - arm), Vector2::new(cx, cy - arm - head_l)],
         // Down
         [Vector2::new(cx - head_w / 2.0, cy + arm), Vector2::new(cx, cy + arm + head_l), Vector2::new(cx + head_w / 2.0, cy + arm)],
-        // Left
+        // Leftnex
         [Vector2::new(cx - arm, cy - head_w / 2.0), Vector2::new(cx - arm - head_l, cy), Vector2::new(cx - arm, cy + head_w / 2.0)],
         // Right
         [Vector2::new(cx + arm, cy - head_w / 2.0), Vector2::new(cx + arm, cy + head_w / 2.0), Vector2::new(cx + arm + head_l, cy)],

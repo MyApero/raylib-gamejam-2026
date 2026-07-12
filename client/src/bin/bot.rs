@@ -195,11 +195,6 @@ fn assist_position(n: u8, t: f32) -> (f32, f32) {
     )
 }
 
-fn assist_is_corner_hold(t: f32) -> bool {
-    let elapsed = t.fract() * ASSIST_PERIOD_SECS;
-    elapsed >= ASSIST_TRAVEL_SECS * 2.0 + ASSIST_CENTER_HOLD_SECS
-}
-
 fn reset_demo_account(ctx: &DbConnection) {
     let (reset_tx, reset_rx) = std::sync::mpsc::sync_channel(1);
     ctx.reducers
@@ -238,10 +233,6 @@ mod tests {
         assert_eq!(assist_position(1, 3.0 / PERIOD_SECS), CENTER);
         assert_eq!(assist_position(1, 5.9 / PERIOD_SECS), CENTER);
         assert_eq!(assist_position(1, 9.0 / PERIOD_SECS), (world_geometry::ISLAND_EDGE_REACH, 0.0));
-        assert!(!assist_is_corner_hold(8.9 / PERIOD_SECS));
-        assert!(assist_is_corner_hold(9.0 / PERIOD_SECS));
-        assert!(!assist_is_corner_hold(0.0));
-
         let unused_angle = 5.0 * PI / 3.0;
         let unused = (world_geometry::ISLAND_EDGE_REACH * unused_angle.cos(), world_geometry::ISLAND_EDGE_REACH * unused_angle.sin());
         assert!((1..=5).all(|n| assist_position(n, 0.0) != unused));
@@ -298,17 +289,8 @@ fn main() {
 
     let start = Instant::now();
     let mut last_heart_reset = Instant::now();
-    let mut was_assist_corner_hold = false;
     loop {
         let t = (start.elapsed().as_secs_f32() / PERIOD_SECS).fract();
-        let is_assist_corner_hold = matches!(shape, Shape::Assist(_)) && assist_is_corner_hold(t);
-        if is_assist_corner_hold && !was_assist_corner_hold {
-            // The bot has just completed its outward easing. Reset exactly
-            // once on entry to the corner hold so the next inward trip
-            // starts with a fresh color.
-            reset_demo_account(&ctx);
-        }
-        was_assist_corner_hold = is_assist_corner_hold;
         let (x, y) = shape.position(t);
         let _ = ctx.reducers.set_pos(x, y);
         if matches!(shape, Shape::Heart) {

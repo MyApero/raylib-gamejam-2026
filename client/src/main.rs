@@ -387,6 +387,8 @@ fn main() {
     // so only rows inserted *after* that point are treated as "new".
     let mut known_inventory_ids: HashSet<u64> = HashSet::new();
     let mut inventory_seeded = false;
+    let mut known_hexa_event_ids: HashSet<u64> = HashSet::new();
+    let mut hexa_events_seeded = false;
     // F9 level-up toast: `None` until the first frame `me` is known, so
     // connecting at, say, level 3 doesn't fire a spurious "level up" toast —
     // mirrors `inventory_seeded`'s seed-then-diff pattern above.
@@ -410,11 +412,6 @@ fn main() {
     // see `world::hexa_advance_display`'s doc comment), lerped frame to
     // frame from the server's authoritative `hexa_cluster` rows.
     let mut hexa_display: HashMap<Identity, Vector2> = HashMap::new();
-    // A cluster's figure is anchored when that exact membership first
-    // appears. Live cursor reports keep arriving while participants make
-    // tiny mouse movements; following the server's freshly recomputed
-    // centroid made the whole HEXA visibly jitter.
-    let mut hexa_fixed_centres: HashMap<u64, Vector2> = HashMap::new();
     while !rl.window_should_close() {
         if let Err(e) = ctx.frame_tick() {
             eprintln!("frame_tick: {e}");
@@ -527,6 +524,21 @@ fn main() {
         // when a new row for `me` appears. Runs before the HUD snapshot below
         // so a toast fired this frame is visible in this same frame's draw.
         if let Some(me) = me {
+            if !hexa_events_seeded {
+                known_hexa_event_ids = ctx.db.hexa_event().iter().map(|event| event.id).collect();
+                hexa_events_seeded = true;
+            } else {
+                for event in ctx.db.hexa_event().iter() {
+                    if known_hexa_event_ids.insert(event.id)
+                        && ctx.db.hexa_cluster().identity().find(&me).is_some_and(|row| row.ignited)
+                    {
+                        ui_state.show_hexa_success_popup();
+                        if let Some(s) = &sfx {
+                            s.merge.play();
+                        }
+                    }
+                }
+            }
             if !inventory_seeded {
                 if ctx.db.inventory().iter().any(|i| i.owner == me) {
                     known_inventory_ids = ctx.db.inventory().iter().map(|i| i.id).collect();
@@ -643,7 +655,12 @@ fn main() {
             // F9 level-up feedback: fire once per actual increase, not on
             // the first frame `me` becomes known (that would just be
             // reporting whatever level the player already was).
-            if last_level.is_some_and(|prev| level > prev) {
+            if last_level.is_some_and(|prev| prev < shared::constants::HEXA_UNLOCK_LEVEL && level >= shared::constants::HEXA_UNLOCK_LEVEL) {
+                ui_state.show_hexa_unlocked_toast();
+                if let Some(s) = &sfx {
+                    s.levelup.play();
+                }
+            } else if last_level.is_some_and(|prev| level > prev) {
                 ui_state.show_levelup_toast(level, world::sat_cap(level), hue);
                 if let Some(s) = &sfx {
                     s.levelup.play();
@@ -678,6 +695,7 @@ fn main() {
                 short_id: &short_id,
                 level,
                 xp,
+                camera_target: camera.target,
                 online,
                 total,
                 locked,
@@ -763,6 +781,12 @@ fn main() {
                     // island would land off-target after any prior scroll.
                     camera.offset = Vector2::new(360.0, 360.0);
                 }
+            }
+            if actions.center_world {
+                let (target, zoom) = world_fit(&ctx, camera.target, camera.zoom);
+                camera.target = target;
+                camera.zoom = zoom;
+                camera.offset = Vector2::new(360.0, 360.0);
             }
             if actions.export_screenshot {
                 if let Some(island) = my_island(&ctx, me) {
@@ -1159,41 +1183,32 @@ fn main() {
         // findable even zoomed far out.
         let other_cursor_scale = (camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
 
-        // F13 (Hexa event): server-authoritative cluster membership — group
-        // `hexa_cluster` rows by `cluster_id`, then place each member on
-        // `hexagon_vertex_positions` at ITS OWN `vertex_index` (paired
+        // F13 (Hexa event): the server-authoritative central formation.
+        // Place each member on `hexagon_vertex_positions` at ITS OWN
+        // `vertex_index` (paired
         // per-row, not by list position, so a momentarily incomplete
         // subscription snapshot can't misassign slots). `me`'s own row is
         // included here like everyone else's — per the author, the LOCAL
         // player's own cursor should visibly move to its hexagon slot too,
         // not stay glued to the mouse while everyone else's snaps (see the
         // local-cursor draw call below).
-        let mut hexa_groups: HashMap<u64, Vec<HexaCluster>> = HashMap::new();
-        for row in ctx.db.hexa_cluster().iter() {
-            hexa_groups.entry(row.cluster_id).or_default().push(row);
-        }
+        let hexa_rows: Vec<HexaCluster> = ctx.db.hexa_cluster().iter().collect();
         // Flattened (key, hexagon target, raw fallback) triples across every
         // cluster, fed straight to `hexa_advance_display` — raw is the
         // actual unsnapped cursor spot (own live mouse, or the other
         // player's own `(cx, cy)`), what a first-seen member glides IN
         // from instead of teleporting straight to its vertex.
         let mut cluster_members: Vec<(Identity, Vector2, Vector2)> = Vec::new();
-        // World-space cluster centroid per snapped member — the rotated
+        // Fixed world-centre target per snapped member — the rotated
         // cursor draw (`draw_cursor_snapped`) needs to know where to aim.
         let mut hexa_centres: HashMap<Identity, Vector2> = HashMap::new();
         // World-space hexagon edges (drawn inside `d2` below, same trick
         // `draw_gift_icon` uses). `ignited` mirrors the server's own
         // `member_count >= HEXA_SIZE` check.
         let mut hexa_polygons: Vec<(Vec<Vector2>, bool)> = Vec::new();
-        world::hexa_begin_fixed_centres(&mut hexa_fixed_centres, hexa_groups.keys().copied());
-        for rows in hexa_groups.into_values() {
-            let Some(first) = rows.first() else { continue };
-            let members: Vec<(Identity, u32)> = rows.iter().map(|r| (r.identity, r.vertex_index)).collect();
-            let centre = world::hexa_fixed_centre(
-                &mut hexa_fixed_centres,
-                first.cluster_id,
-                Vector2::new(first.cx, first.cy),
-            );
+        if let Some(first) = hexa_rows.first() {
+            let members: Vec<(Identity, u32)> = hexa_rows.iter().map(|r| (r.identity, r.vertex_index)).collect();
+            let centre = Vector2::zero();
             let (frame, vertices) = world::hexa_cluster_frame(
                 centre,
                 first.member_count as usize,
@@ -1452,6 +1467,7 @@ fn main() {
                 short_id: &short_id,
                 level,
                 xp,
+                camera_target: camera.target,
                 online,
                 total,
                 locked,

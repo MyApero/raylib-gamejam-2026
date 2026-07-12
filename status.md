@@ -7,7 +7,22 @@ Evidence tags (mandatory on every checked item):
 - `REASONED` — read the code and traced the logic visually.
 - `ASSUMED` — unchecked hypothesis; must be verified before the next batch starts.
 
-**Current batch:** F13 Hexa event — author follow-up (2026-07-11, same day),
+**Current batch:** F13 fixed-centre revision (2026-07-12). The author moved HEXA
+from arbitrary same-hue cursor clusters to one six-seat easter egg at the world
+origin. Server detection now requires level 3+, online/fresh, unlocked, and within
+`HEXA_RADIUS` of `(0,0)`; hue is irrelevant. Existing occupants keep their seat,
+newcomers take the nearest free angular seat, and the formation is capped at six.
+Every `hexa_cluster`/`hexa_event` centre is exactly `(0,0)`, eliminating centroid
+jitter. Both clients dropped the per-membership fixed-centre cache and render at the
+origin directly. Crossing level 3 shows "HEXA UNLOCKED! Meet your friends at the
+centre of the world!" Lock refreshes the formation immediately. Ordinary pairwise
+merging remains unchanged and uses raw cursor proximity (`MERGE_DIST`), independent
+of the HEXA display snap. Server tests, native client tests, and the full emscripten
+web build pass.
+
+---
+
+**Previous batch:** F13 Hexa event — author follow-up (2026-07-11, same day),
 superseding two of the first pass's rendering design calls. Author feedback
 verbatim: "I'm expecting my cursor to literally go at that place when doing
 HEXA" and "it would be rendered by the client but the server would tell
