@@ -1,4 +1,4 @@
-# Hexaworld (Community pixel map)
+# hexel (Community pixel map)
 
 ## Player
 
@@ -78,4 +78,3 @@ Bouton pour ouvrir l'inventaire
 Champ de texte pour son pseudo
 
 Bouton Lock pour pas être merged automatiquement avec les autres
-

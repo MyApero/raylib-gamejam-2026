@@ -1493,7 +1493,7 @@ pub fn claim_admin(ctx: &ReducerContext, password: String) -> Result<(), String>
     Ok(())
 }
 
-/// F10 (Hexaworld.md's Admin section): "can freeze the game so no one can
+/// F10 (hexel.md's Admin section): "can freeze the game so no one can
 /// interact anymore" — the panic button `check_not_frozen` enforces against
 /// every player-facing mutating reducer. Admin-only, and deliberately not
 /// itself gated by `check_not_frozen`, so the admin can always unfreeze.

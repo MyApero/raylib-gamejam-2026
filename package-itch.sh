@@ -3,7 +3,7 @@
 #
 # The zip's root has index.html = the SINGLE-game page (client/web/game.html);
 # the dual-iframe client/web/index.html is only a LOCAL two-player test harness
-# and must NOT be the submission page. Output: hexaworld-itch.zip.
+# and must NOT be the submission page. Output: hexel-itch.zip.
 #
 # itch.io upload settings: "This file will be played in the browser",
 # viewport exactly 720x720, enable the fullscreen button, set mobile-friendly.

@@ -95,9 +95,10 @@ cursor for free, no bot-specific client code. See plan.md's F12 entry.)
 
 - [x] The Saturation slider should go to 100 but block at the max you unlocked. Tooltip explaining (You need more XP to unlock more saturation)
 
-- [ ] hexel name at the center of the header
+- [x] hexel name at the center of the header
 - [x] Eyedropper button: click/tap it, then select a painted tile; middle-click remains a shortcut
 - [x] State to just move (third state with pencil and eraser)
 - [ ] Admin account with which you can connect and draw anywhere
 
 - [ ] Export My Island button at the top right. Island, Name, Link to their project, raylib.mister-esman.uk
+- [ ] Keys for HUD (C for Colors, L for Lock, I for My Isle, O for Account, R for Eraser, M for Move, P for Paint, H for Help)
