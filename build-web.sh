@@ -7,8 +7,20 @@ EMSDK_DIR="${EMSDK_DIR:-./emsdk}"
 # shellcheck disable=SC1091
 . "$EMSDK_DIR/emsdk_env.sh"
 
-export EMCC_CFLAGS="-O3 -sUSE_GLFW=3 -sASSERTIONS=1 -sWASM=1 -sASYNCIFY -sGL_ENABLE_GET_PROC_ADDRESS=1"
-export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(cd "$EMSDK_DIR" && pwd)/upstream/emscripten/cache/sysroot/include"
+# -sINITIAL_MEMORY=64MB (default is 16MB): the sound rework embeds ~2.8MB
+# of audio and decodes several MP3s to raw PCM at startup (`Sfx::load`'s
+# `new_wave_from_memory` calls, unlike `Music` which streams) — that blew
+# past the 16MB default and crashed the tab. Deliberately NOT
+# -sALLOW_MEMORY_GROWTH=1: growable wasm memory backs its buffer with a
+# resizable ArrayBuffer, which some browsers' TextDecoder.decode() rejects
+# outright ("The provided ArrayBuffer value must not be resizable"),
+# breaking every embind/UTF8 string call. A larger fixed size sidesteps
+# both problems.
+export EMCC_CFLAGS="-O3 -sUSE_GLFW=3 -sASSERTIONS=1 -sWASM=1 -sASYNCIFY -sGL_ENABLE_GET_PROC_ADDRESS=1 -sINITIAL_MEMORY=67108864"
+if [ -x "$EMSDK_DIR/upstream/emscripten/emcc" ]; then
+    source "$EMSDK_DIR/emsdk_env.sh"
+fi
+export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(em-config CACHE)/sysroot/include"
 
 # Debug builds crash binaryen's wasm-emscripten-finalize (DWARF info clashes
 # with ASYNCIFY + wasm exception handling) — always build release.
