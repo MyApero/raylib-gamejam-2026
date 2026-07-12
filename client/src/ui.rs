@@ -165,9 +165,14 @@ pub struct UiState {
     account_open: bool,
     import_input: String,
     import_focused: bool,
-    /// Set on the first click of "Reset account"; a second click within
+    /// Set on the first click of "New account"; a second click within
     /// `RESET_CONFIRM_WINDOW` actually fires it, otherwise it auto-disarms.
     reset_armed_at: Option<Instant>,
+    /// Author follow-up (2026-07-12): same double-click-confirm pattern as
+    /// `reset_armed_at`, for the Account overlay's "Delete account" button
+    /// (non-admin self-service, mirrors the admin edit modal's own delete
+    /// confirm).
+    delete_armed_at: Option<Instant>,
     /// Brief "copied" acknowledgement after the Copy ID button is clicked —
     /// the JS clipboard call is fire-and-forget from Rust's side (no success
     /// signal comes back), so this just confirms the click registered.
@@ -217,11 +222,6 @@ pub struct UiState {
     /// first click of "Delete isle & account", fired on a second click within
     /// `RESET_CONFIRM_WINDOW`.
     admin_delete_armed_at: Option<Instant>,
-    /// Author follow-up (2026-07-12): admin's replacement for "My Isle" (they
-    /// have no island of their own — see `claim_admin`) — currently just the
-    /// "Refresh isle placement" button. Mutually exclusive with every other
-    /// modal, same footprint.
-    pub config_open: bool,
 }
 
 /// Which of the admin edit modal's three text fields currently owns keyboard
@@ -301,6 +301,7 @@ impl UiState {
             import_input: String::new(),
             import_focused: false,
             reset_armed_at: None,
+            delete_armed_at: None,
             copy_clicked_at: None,
             island_popup: None,
             like_anims: Vec::new(),
@@ -315,7 +316,6 @@ impl UiState {
             admin_xp_input: String::new(),
             admin_edit_focus: AdminEditField::None,
             admin_delete_armed_at: None,
-            config_open: false,
             swatch_hsl: HashMap::new(),
         }
     }
@@ -371,7 +371,6 @@ impl UiState {
             || self.hexa_success_open
             || self.island_popup.as_ref().is_some_and(|p| p.is_own)
             || self.admin_edit.is_some()
-            || self.config_open
     }
 
     /// Closes all modals — the group is mutually exclusive by
@@ -388,7 +387,6 @@ impl UiState {
         self.admin_edit = None;
         self.admin_edit_focus = AdminEditField::None;
         self.admin_delete_armed_at = None;
-        self.config_open = false;
         self.dragging = Drag::None;
     }
 
@@ -590,10 +588,9 @@ pub struct HudInfo<'a> {
     /// display buffer from this every frame it isn't focused.
     pub link_id: Option<u32>,
     /// Author follow-up (2026-07-12): true once the caller has claimed the
-    /// admin role (`Config.admin`) — swaps the "My Isle" footer button for
-    /// "Config" (admin has no island of their own, see `claim_admin`), gates
-    /// `Tool::AdminEdit`'s reachability from the paint/erase/move cycle, and
-    /// unlocks the Config panel's "Refresh isle placement" button.
+    /// admin role (`Config.admin`) — gates `Tool::AdminEdit`'s reachability
+    /// from the paint/erase/move cycle and the `K` shortcut for
+    /// `admin_force_rerank` (see `handle_input`).
     pub is_admin: bool,
 }
 
@@ -616,6 +613,9 @@ pub struct Actions {
     /// the Import button or Enter.
     pub import_token: Option<String>,
     pub reset_account: bool,
+    /// Author follow-up (2026-07-12): the Account overlay's (double-click-
+    /// confirmed) "Delete account" button — non-admin self-service.
+    pub delete_account: bool,
     /// F8: like the island in the currently-open island-info popup.
     pub like_island: Option<u32>,
     /// Author-requested: undo a like from the popup's now-toggling button.
@@ -650,9 +650,9 @@ pub struct Actions {
     /// Author follow-up: the admin edit modal's (double-click-confirmed)
     /// Delete button — deletes the island AND its owner's account.
     pub admin_delete_island: Option<u32>,
-    /// Author follow-up: the Config panel's "Refresh isle placement" button —
-    /// re-sorts island slots by the leaderboard (likes, then tiles painted)
-    /// right now instead of waiting for the periodic re-rank.
+    /// Author follow-up: the `K` shortcut (admin-only) — re-sorts island
+    /// slots by the leaderboard (likes, then tiles painted) right now
+    /// instead of waiting for the periodic re-rank.
     pub admin_force_rerank: bool,
 }
 
@@ -846,6 +846,14 @@ fn reset_btn_rect() -> Rectangle {
     Rectangle::new(o.x + 20.0, o.y + 280.0, 240.0, 36.0)
 }
 
+/// Author follow-up (2026-07-12): non-admin self-service account deletion —
+/// sits below the New Account button and its description in the same
+/// Account overlay.
+fn delete_account_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 370.0, 260.0, 36.0)
+}
+
 /// Author follow-up (2026-07-12): admin edit modal — three stacked text
 /// fields (name/likes/xp), same field-box styling as `link_edit_rect`.
 fn admin_name_field_rect() -> Rectangle {
@@ -871,13 +879,6 @@ fn admin_save_btn_rect() -> Rectangle {
 fn admin_delete_btn_rect() -> Rectangle {
     let o = overlay_rect();
     Rectangle::new(o.x + 20.0, o.y + 340.0, 320.0, 40.0)
-}
-
-/// Author follow-up: Config panel (admin's "My Isle" replacement) — a single
-/// button for now.
-fn config_refresh_btn_rect() -> Rectangle {
-    let o = overlay_rect();
-    Rectangle::new(o.x + 20.0, o.y + 60.0, 320.0, 40.0)
 }
 
 /// F9: own-island popup only — numeric input for the itch.io rate id. Fills
@@ -1083,6 +1084,9 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     if state.reset_armed_at.is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW) {
         state.reset_armed_at = None;
     }
+    if state.delete_armed_at.is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW) {
+        state.delete_armed_at = None;
+    }
     if state.copy_clicked_at.is_some_and(|t| t.elapsed() >= TOAST_DURATION) {
         state.copy_clicked_at = None;
     }
@@ -1172,6 +1176,12 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             state.tool = state.tool.cycle(info.is_admin);
         }
     }
+    // Author follow-up (2026-07-12): admin-only shortcut for
+    // `admin_force_rerank` — replaces the earlier Config-panel button, which
+    // only ever held this one action and wasn't worth a whole modal.
+    if info.is_admin && rl.is_key_pressed(KeyboardKey::KEY_K) && !state.text_field_focused() {
+        actions.admin_force_rerank = true;
+    }
     if clicked && point_in(mouse, eraser_btn_rect()) {
         if state.tool == Tool::Eyedropper {
             if state.finish_eyedropper() {
@@ -1259,17 +1269,8 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         return actions;
     }
     if clicked && point_in(mouse, my_island_btn_rect()) {
-        if info.is_admin {
-            // Author follow-up: admin has no island of their own (see
-            // `claim_admin`), so the same footer slot opens the Config
-            // panel instead of `open_own_island` (which `my_island` would
-            // just resolve to `None` for anyway).
-            state.close_all_modals();
-            state.config_open = true;
-        } else {
-            actions.open_own_island = true;
-            state.close_all_modals();
-        }
+        actions.open_own_island = true;
+        state.close_all_modals();
     }
 
     // Footer quick-access rate-id field (see `footer_link_edit_rect`): only
@@ -1382,6 +1383,17 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 state.reset_armed_at = None;
             } else {
                 state.reset_armed_at = Some(Instant::now());
+            }
+        }
+        // Author follow-up (2026-07-12): non-admin self-service — admin has
+        // no island/account of their own to delete this way (see
+        // `claim_admin`), so the button isn't drawn (or clickable) for them.
+        if !info.is_admin && clicked && point_in(mouse, delete_account_btn_rect()) {
+            if state.delete_armed_at.is_some() {
+                actions.delete_account = true;
+                state.delete_armed_at = None;
+            } else {
+                state.delete_armed_at = Some(Instant::now());
             }
         }
         return actions;
@@ -1501,17 +1513,6 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             } else {
                 state.admin_delete_armed_at = Some(Instant::now());
             }
-        }
-        return actions;
-    }
-
-    if state.config_open {
-        if modal_dismiss_clicked(mouse, clicked) {
-            state.config_open = false;
-            return actions;
-        }
-        if clicked && point_in(mouse, config_refresh_btn_rect()) {
-            actions.admin_force_rerank = true;
         }
         return actions;
     }
@@ -1650,8 +1651,6 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         }
     } else if state.admin_edit.is_some() {
         draw_admin_edit(d, state);
-    } else if state.config_open {
-        draw_config_panel(d);
     } else if state.help_open {
         draw_help_overlay(d);
     } else if let Some((title, color)) = hovered_recent_footer(state, mouse) {
@@ -1669,8 +1668,6 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
             Tool::Eyedropper => ("Paint", &["Click to return to", "the paint tool"]),
         };
         draw_button_tooltip(d, title, lines, mouse);
-    } else if info.is_admin && point_in(mouse, my_island_btn_rect()) {
-        draw_button_tooltip(d, "Config", &["Admin tools: refresh the", "leaderboard placement"], mouse);
     } else if let Some((title, lines)) = hovered_button_tooltip(mouse) {
         draw_button_tooltip(d, title, lines, mouse);
     }
@@ -1842,33 +1839,6 @@ fn draw_admin_edit(d: &mut impl RaylibDraw, state: &UiState) {
     );
 }
 
-/// Author follow-up (2026-07-12): admin's replacement for the "My Isle"
-/// panel (they have no island of their own — `claim_admin` deletes it).
-/// Currently just the manual leaderboard-reslot trigger.
-fn draw_config_panel(d: &mut impl RaylibDraw) {
-    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
-
-    let o = overlay_rect();
-    d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
-    d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
-    d.draw_text("Config", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
-
-    let close = overlay_close_rect();
-    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
-
-    let rb = config_refresh_btn_rect();
-    d.draw_rectangle_rec(rb, Color::new(40, 40, 48, 255));
-    d.draw_text("Refresh isle placement", rb.x as i32 + 20, rb.y as i32 + 12, 16, Color::RAYWHITE);
-    d.draw_text(
-        "Re-sorts every island's slot by the leaderboard\n(likes, then tiles painted) right now, instead of\nwaiting for the periodic re-rank.",
-        rb.x as i32,
-        rb.y as i32 + rb.height as i32 + 10,
-        12,
-        Color::GRAY,
-    );
-}
-
 const TOOLTIP_W: f32 = 220.0;
 const TOOLTIP_PAD: f32 = 8.0;
 const TOOLTIP_LINE_H: f32 = 18.0;
@@ -1885,7 +1855,7 @@ const BUTTON_TOOLTIPS: &[(fn() -> Rectangle, &str, &[&str])] = &[
     (recent_btn_rect, "Recent colors", &["Open your raw HSL", "color history"]),
     (lock_btn_rect, "Lock", &["Blocks cursor merging", "and central HEXA"]),
     (brush_btn_rect, "Eyedropper", &["Click or tap, then select", "a painted tile", "Merging is disabled while active"]),
-    (account_btn_rect, "Account", &["Copy or import your ID,", "reset your account"]),
+    (account_btn_rect, "Account", &["Copy or import your ID,", "start a new or delete your account"]),
     (
         footer_link_edit_rect,
         "Link your island",
@@ -2209,8 +2179,7 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
 
     let mb = my_island_btn_rect();
     d.draw_rectangle_rec(mb, Color::new(40, 40, 48, 255));
-    let mb_label = if info.is_admin { "Config" } else { "My Isle" };
-    d.draw_text(mb_label, mb.x as i32 + 6, mb.y as i32 + 9, 10, Color::RAYWHITE);
+    d.draw_text("My Isle", mb.x as i32 + 6, mb.y as i32 + 9, 10, Color::RAYWHITE);
 }
 
 /// Author-requested: each letter of the footer's "Colors" button in its own
@@ -2730,19 +2699,42 @@ fn draw_account_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo
     let armed = state.reset_armed_at.is_some();
     d.draw_rectangle_rec(rb, if armed { Color::new(140, 50, 50, 255) } else { Color::new(60, 40, 40, 255) });
     d.draw_text(
-        if armed { "Click again to confirm reset" } else { "Reset account" },
+        if armed { "Click again to confirm new account" } else { "New account" },
         rb.x as i32 + 10,
         rb.y as i32 + 11,
         14,
         Color::RAYWHITE,
     );
     d.draw_text(
-        "Wipes XP and unlocked colors, rolls a new starting hue.\nKeeps your ID, name, and island art.",
+        "Wipes XP and unlocked colors, rolls a new starting hue.\nKeeps your ID, name, and island art. Copy your token above first.",
         rb.x as i32,
         rb.y as i32 + rb.height as i32 + 10,
         12,
         Color::GRAY,
     );
+
+    // Author follow-up (2026-07-12): non-admin self-service account
+    // deletion — reuses the same double-click-confirm pattern as New
+    // Account above (and the admin edit modal's own Delete button).
+    if !info.is_admin {
+        let db = delete_account_btn_rect();
+        let del_armed = state.delete_armed_at.is_some();
+        d.draw_rectangle_rec(db, if del_armed { Color::new(140, 50, 50, 255) } else { Color::new(60, 40, 40, 255) });
+        d.draw_text(
+            if del_armed { "Click again to confirm delete" } else { "Delete account" },
+            db.x as i32 + 10,
+            db.y as i32 + 11,
+            14,
+            Color::RAYWHITE,
+        );
+        d.draw_text(
+            "Permanently deletes your island, XP, and colors.\nCannot be undone. Copy your token above first if you\nmight want to come back.",
+            db.x as i32,
+            db.y as i32 + db.height as i32 + 10,
+            12,
+            Color::new(220, 90, 90, 255),
+        );
+    }
 }
 
 /// Signed ±`tol` slider: a center tick at offset 0 plus a handle that can

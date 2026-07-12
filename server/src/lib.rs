@@ -1354,6 +1354,24 @@ pub fn reset_account(ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }
 
+/// Author follow-up (2026-07-12): self-service counterpart to
+/// `admin_delete_island` — a player deleting their OWN island/account,
+/// reusing the same `delete_island_and_owner` cleanup (island cells, likes,
+/// link clicks, inventory, the island row, and the `User` row itself). Unlike
+/// `reset_account` (same identity, wiped stats), this leaves nothing behind
+/// for `ctx.sender()` at all — a reconnect with the same token gets treated
+/// as brand new by `client_connected` (fresh name/hue/island slot), same as
+/// any other identity the server has never seen. Gated by `check_not_frozen`
+/// like every other player-facing reducer (unlike the admin moderation
+/// tools, which deliberately bypass it).
+#[spacetimedb::reducer]
+pub fn delete_account(ctx: &ReducerContext) -> Result<(), String> {
+    check_not_frozen(ctx)?;
+    let island = ctx.db.island().owner().find(ctx.sender()).ok_or("you do not own an island")?;
+    delete_island_and_owner(ctx, &island);
+    Ok(())
+}
+
 /// F8: like a foreign island once (XP to the owner); the (island, liker)
 /// uniqueness plan.md asks for is enforced here rather than at the DB level
 /// (see `IslandLike`'s comment). Self-likes are rejected — an island's own

@@ -58,7 +58,13 @@ Then from your dev machine, point publish/generate/client at the VPS instead of 
 ./server/publish.sh
 ```
 
-## Admin account / "draw anywhere" (F16)
+## Admin
+
+```sh
+spacetime call hexel claim_admin "<admin_password>" -s local
+```
+
+### Admin account / "draw anywhere" (F16)
 
 ```bash
 # local dev instance
@@ -71,28 +77,18 @@ cargo run -p client --bin admin_probe -- "<the admin password>" http://<vps-host
 
 Paste the printed `token` value into the web client's "Paste an ID" field
 
-## Admin (F10)
+### Bots
 
-Claiming the role is still CLI-only (`claim_admin`/`admin_probe`, above) —
-everything past that now has in-game UI (author follow-up, 2026-07-12), on
-both clients:
+```bash
+cargo build -p client --bin bot --release
 
-- Admin has no island of their own — `claim_admin` deletes whatever island
-  `client_connected` had already handed that identity, and seeds their
-  `Inventory` with a full 30-hue spread (every 12°) so every color is
-  paintable immediately, not just via `admin_paint_cell`/`admin_erase_cell`
-  server-side.
-- The footer's "My Isle" button becomes "Config" for admin (they have no
-  island to show) — currently just "Refresh isle placement", a manual
-  trigger for the same re-sort `rerank_fire` runs periodically.
-- The Paint/Erase/Move footer tool cycles into a 4th state, admin-only:
-  Edit. While active, tapping/clicking another player's island opens a
-  modal to edit their display name/XP and the island's like count (Save),
-  or delete the island AND the owner's account entirely (double-click-
-  confirmed Delete) — mobile-friendly by design (no right-click/long-press).
+for n in {1..500}; do
+  ./target/release/bot "assist-$n" >"/tmp/hexa-bots/$n.log" 2>&1 &
+  sleep 0.02
+done
+```
 
-Still CLI-only, called against whichever server you're pointed at (swap
-`-s local` for the production server name):
+### Miscellaneous
 
 ```bash
 # freeze/unfreeze all player interaction (painting, merging, moving, liking,
@@ -113,11 +109,13 @@ spacetime call hexel delete_island_cells <island_id> -s local
 spacetime call hexel admin_set_xp_by_name "<display name>" 300 -s local
 ```
 
-
-
 ### Backups
 
+./server/backup_common.sh
+
 #### Save
+
+./server/save_backup.sh
 
 ```sh
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -130,6 +128,8 @@ tar -C "$DATA_DIR" --exclude=cache --exclude=spacetime.pid \
 ```
 
 #### Restore
+
+./server/restore_backup.sh
 
 ```sh
 # 1. Safety snapshot of current state before overwriting it (skippable)

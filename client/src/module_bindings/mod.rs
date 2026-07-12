@@ -17,6 +17,7 @@ pub mod claim_gift_reducer;
 pub mod click_link_reducer;
 pub mod config_table;
 pub mod config_type;
+pub mod delete_account_reducer;
 pub mod delete_island_cells_reducer;
 pub mod disable_island_border_reducer;
 pub mod erase_community_cell_reducer;
@@ -78,6 +79,7 @@ pub use claim_gift_reducer::claim_gift;
 pub use click_link_reducer::click_link;
 pub use config_table::*;
 pub use config_type::Config;
+pub use delete_account_reducer::delete_account;
 pub use delete_island_cells_reducer::delete_island_cells;
 pub use disable_island_border_reducer::disable_island_border;
 pub use erase_community_cell_reducer::erase_community_cell;
@@ -167,6 +169,7 @@ pub enum Reducer {
     ClickLink {
         island_id: u32,
     },
+    DeleteAccount,
     DeleteIslandCells {
         island_id: u32,
     },
@@ -247,6 +250,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::ClaimAdmin { .. } => "claim_admin",
             Reducer::ClaimGift { .. } => "claim_gift",
             Reducer::ClickLink { .. } => "click_link",
+            Reducer::DeleteAccount => "delete_account",
             Reducer::DeleteIslandCells { .. } => "delete_island_cells",
             Reducer::DisableIslandBorder => "disable_island_border",
             Reducer::EraseCommunityCell { .. } => "erase_community_cell",
@@ -324,6 +328,9 @@ impl __sdk::Reducer for Reducer {
                 __sats::bsatn::to_vec(&click_link_reducer::ClickLinkArgs {
                     island_id: island_id.clone(),
                 })
+            }
+            Reducer::DeleteAccount => {
+                __sats::bsatn::to_vec(&delete_account_reducer::DeleteAccountArgs {})
             }
             Reducer::DeleteIslandCells { island_id } => {
                 __sats::bsatn::to_vec(&delete_island_cells_reducer::DeleteIslandCellsArgs {

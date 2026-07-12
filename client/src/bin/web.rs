@@ -1261,6 +1261,9 @@ fn frame(state: &mut State) {
         if actions.reset_account {
             call_reducer("reset_account", serde_json::json!([]));
         }
+        if actions.delete_account {
+            call_reducer("delete_account", serde_json::json!([]));
+        }
         if let Some(island_id) = actions.like_island {
             call_reducer("like_island", serde_json::json!([island_id]));
         }

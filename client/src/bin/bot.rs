@@ -5,6 +5,8 @@
 //! supervisor reconnects it a moment later.
 //!
 //! Usage: `cargo run -p client --bin bot --release -- heart|hexagon|center|assist-N`
+//! (`assist-1` through `assist-5` are the animated showcase bots; higher
+//! numbers are stationary load-test clients.)
 //!
 //! F12: positions are WORLD CARTESIAN units (1.0 = one hex outer radius,
 //! world origin = admin's slot-0 island center — see plan.md's geometry
@@ -56,6 +58,11 @@ const ASSIST_TRAVEL_SECS: f32 = 3.0;
 const ASSIST_CENTER_HOLD_SECS: f32 = 3.0;
 const ASSIST_CORNER_HOLD_SECS: f32 = 3.0;
 const ASSIST_PERIOD_SECS: f32 = ASSIST_TRAVEL_SECS * 2.0 + ASSIST_CENTER_HOLD_SECS + ASSIST_CORNER_HOLD_SECS;
+/// The first five assistants are the curated HEXA demo. Additional assistants
+/// exist to populate a local world with many real client connections/islands
+/// without flooding the server with cursor updates.
+const SHOWCASE_ASSIST_BOTS: u16 = 5;
+const MAX_ASSIST_BOTS: u16 = 5_000;
 /// Position update rate — matches roughly what a human mouse-drag produces.
 const TICK: Duration = Duration::from_millis(50);
 /// The heart bot periodically starts over with only its fresh seed color.
@@ -66,9 +73,9 @@ enum Shape {
     Heart,
     Hexagon,
     Center,
-    /// Five independently authenticated demo bots leave one HEXA slot open
-    /// for a human participant.
-    Assist(u8),
+    /// The first five are independently authenticated showcase bots; higher
+    /// numbers are stationary load-test clients, each with its own identity.
+    Assist(u16),
 }
 
 impl Shape {
@@ -77,7 +84,11 @@ impl Shape {
             "heart" => Some(Self::Heart),
             "hexagon" => Some(Self::Hexagon),
             "center" => Some(Self::Center),
-            _ => s.strip_prefix("assist-").and_then(|n| n.parse().ok()).filter(|&n| (1..=5).contains(&n)).map(Self::Assist),
+            _ => s
+                .strip_prefix("assist-")
+                .and_then(|n| n.parse().ok())
+                .filter(|&n| (1..=MAX_ASSIST_BOTS).contains(&n))
+                .map(Self::Assist),
         }
     }
 
@@ -112,8 +123,17 @@ impl Shape {
             Self::Heart => heart_position(t),
             Self::Hexagon => hexagon_position(t),
             Self::Center => center_position(t),
-            Self::Assist(n) => assist_position(n, t),
+            Self::Assist(n) if n <= SHOWCASE_ASSIST_BOTS => assist_position(n, t),
+            Self::Assist(n) => load_test_position(n),
         }
+    }
+
+    /// Load-test assistants deliberately set their cursor once, then stay
+    /// quiet. Their connections still create and keep an island, which is
+    /// what the renderer stress test needs; sending hundreds of `set_pos`
+    /// reducers every 50 ms would primarily benchmark the server instead.
+    fn is_stationary_load_client(self) -> bool {
+        matches!(self, Self::Assist(n) if n > SHOWCASE_ASSIST_BOTS)
     }
 }
 
@@ -170,7 +190,7 @@ fn center_position(t: f32) -> (f32, f32) {
     (CENTER.0 + CENTER_LOOP_RADIUS * a.cos(), CENTER.1 + CENTER_LOOP_RADIUS * a.sin())
 }
 
-fn assist_position(n: u8, t: f32) -> (f32, f32) {
+fn assist_position(n: u16, t: f32) -> (f32, f32) {
     // Use five of the actual six hexagon corners, rather than distributing
     // five points around a pentagon. Slot 5 remains visibly available for
     // the presenter.
@@ -193,6 +213,17 @@ fn assist_position(n: u8, t: f32) -> (f32, f32) {
         CENTER.0 + (corner.0 - CENTER.0) * radius_fraction,
         CENTER.1 + (corner.1 - CENTER.1) * radius_fraction,
     )
+}
+
+/// Spread stationary load-test cursors in a sunflower pattern outside the
+/// central island. Their islands themselves are positioned server-side from
+/// their slots, independently of these cursor coordinates.
+fn load_test_position(n: u16) -> (f32, f32) {
+    debug_assert!(n > SHOWCASE_ASSIST_BOTS);
+    let index = (n - SHOWCASE_ASSIST_BOTS - 1) as f32;
+    let angle = index * 2.399_963_1; // golden angle, avoids visible spokes
+    let radius = PATH_RADIUS + 4.0 * index.sqrt();
+    (CENTER.0 + radius * angle.cos(), CENTER.1 + radius * angle.sin())
 }
 
 fn reset_demo_account(ctx: &DbConnection) {
@@ -237,6 +268,13 @@ mod tests {
         let unused = (world_geometry::ISLAND_EDGE_REACH * unused_angle.cos(), world_geometry::ISLAND_EDGE_REACH * unused_angle.sin());
         assert!((1..=5).all(|n| assist_position(n, 0.0) != unused));
     }
+
+    #[test]
+    fn higher_numbered_assistants_are_stationary_load_clients() {
+        assert!(Shape::Assist(6).is_stationary_load_client());
+        assert!(!Shape::Assist(5).is_stationary_load_client());
+        assert_ne!(load_test_position(6), load_test_position(7));
+    }
 }
 
 fn main() {
@@ -245,7 +283,7 @@ fn main() {
         .as_deref()
         .and_then(Shape::parse)
         .unwrap_or_else(|| {
-            eprintln!("usage: bot <heart|hexagon|center|assist-1..assist-5>");
+            eprintln!("usage: bot <heart|hexagon|center|assist-1..assist-{MAX_ASSIST_BOTS}>");
             std::process::exit(2);
         });
 
@@ -282,17 +320,21 @@ fn main() {
     // asynchronous: wait for the server result before sending any position
     // updates, otherwise a rejected reset is silent and the movement loop
     // can begin with the previous run's hue.
-    if matches!(shape, Shape::Assist(_)) {
+    if matches!(shape, Shape::Assist(n) if n <= SHOWCASE_ASSIST_BOTS) {
         reset_demo_account(&ctx);
     }
     let _ = ctx.reducers.set_name(shape.display_name());
+    let (initial_x, initial_y) = shape.position(0.0);
+    let _ = ctx.reducers.set_pos(initial_x, initial_y);
 
     let start = Instant::now();
     let mut last_heart_reset = Instant::now();
     loop {
         let t = (start.elapsed().as_secs_f32() / PERIOD_SECS).fract();
         let (x, y) = shape.position(t);
-        let _ = ctx.reducers.set_pos(x, y);
+        if !shape.is_stationary_load_client() {
+            let _ = ctx.reducers.set_pos(x, y);
+        }
         if matches!(shape, Shape::Heart) {
             if last_heart_reset.elapsed() >= HEART_INVENTORY_RESET {
                 // reset_account clears all discovered colors and gives the

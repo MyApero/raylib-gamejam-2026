@@ -790,6 +790,9 @@ fn main() {
             if actions.reset_account {
                 let _ = ctx.reducers.reset_account();
             }
+            if actions.delete_account {
+                let _ = ctx.reducers.delete_account();
+            }
             if let Some(island_id) = actions.like_island {
                 let _ = ctx.reducers.like_island(island_id);
             }
