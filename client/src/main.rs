@@ -1443,6 +1443,12 @@ fn main() {
                 }
                 let mine = me == Some(island.owner);
                 let unpainted_fill = world::unpainted_island_fill(island.owner == Identity::ZERO);
+                // Below `OVERVIEW_ZOOM_THRESHOLD` the island's cells are
+                // sub-pixel anyway — draw one flat hex for the whole island
+                // instead of 721 individual (and invisible) ones.
+                if camera.zoom < world::constants::OVERVIEW_ZOOM_THRESHOLD {
+                    world::draw_hex(&mut d2, center, ISLAND_RADIUS as f32, unpainted_fill, None);
+                } else {
                 // F9.5 (FPS at scale): point-lookup each rendered cell by its
                 // packed id via the SDK's own unique-index cache instead of
                 // collecting a HashMap from EVERY island_cell row in the
@@ -1457,6 +1463,7 @@ fn main() {
                         world::hsv_color(h, s, v)
                     });
                     world::draw_hex(&mut d2, cell_world, 1.0, fill, show_tile_outline.then_some(Color::new(40, 40, 46, 255)));
+                }
                 }
                 // Author-caught: sat/val used to be a fixed (85, 95),
                 // making the border a different shade than the owner's

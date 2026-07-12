@@ -102,6 +102,13 @@ pub mod constants {
     /// skipped — the author's "borderless far zoom" note picked ~4-6px, the
     /// executor settled on 5, later re-tuned by hand-testing to 20.
     pub const BORDERLESS_ZOOM_THRESHOLD: f32 = 20.0;
+    /// Below this zoom, an island's 721 interior cells are drawn as a
+    /// single flat hex instead of one `draw_hex` call per cell — at this
+    /// scale the individual cells are sub-pixel anyway, so the detail pass
+    /// is pure wasted draw calls once the world has many islands on
+    /// screen at once. Starting guess, same as `BORDERLESS_ZOOM_THRESHOLD`
+    /// — re-tune by hand-testing if the switch is too abrupt/early.
+    pub const OVERVIEW_ZOOM_THRESHOLD: f32 = 1.9;
     /// F9.6 item 6: keyboard pan speed, world units/sec at zoom 1.0
     /// (divided by the current zoom so it feels like a constant SCREEN
     /// speed, same trick as the border-thickness fix above). Q/E zoom rate

@@ -1874,6 +1874,13 @@ fn frame(state: &mut State) {
             }
             let mine = me == Some(island.owner_hex.as_str());
             let unpainted_fill = world::unpainted_island_fill(island.owner_hex == world::COMMUNITY_OWNER_HEX);
+            // Mirrors `main.rs`: below `OVERVIEW_ZOOM_THRESHOLD` the
+            // island's cells are sub-pixel anyway — draw one flat hex for
+            // the whole island instead of 721 individual (and invisible)
+            // ones.
+            if camera.zoom < world::constants::OVERVIEW_ZOOM_THRESHOLD {
+                world::draw_hex(&mut d2, center, ISLAND_RADIUS as f32, unpainted_fill, None);
+            } else {
             // F9.5 (FPS at scale): point-lookup each rendered cell by its
             // packed id in the already-id-keyed `island_cells` map instead of
             // collecting a fresh (island_id, q, r) -> color HashMap from
@@ -1887,6 +1894,7 @@ fn frame(state: &mut State) {
                     world::hsv_color(h, s, v)
                 });
                 world::draw_hex(&mut d2, cell_world, 1.0, fill, show_tile_outline.then_some(Color::new(40, 40, 46, 255)));
+            }
             }
             // Author-caught: mirrors `main.rs` — sat/val is now
             // `START_SAT`/`START_VAL` exactly (was a fixed 85/95 lookalike
