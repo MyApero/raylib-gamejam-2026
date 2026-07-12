@@ -168,16 +168,26 @@
         var ws = null;
         var requestId = 10;
         var failedBeforeOpen = 0;
+        // Author follow-up (2026-07-12): set by a rejected trial import
+        // connection (see `importToken` below), read-once by `frame()`, same
+        // pattern as `queue`.
+        var importError = null;
 
-        function connect() {
-          var token = localStorage.getItem(TOKEN_KEY);
+        // Shared by `connect()` and `importToken()`'s trial connection —
+        // both need the exact same local-vs-public host/port resolution.
+        function wsUrl(token) {
           var scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
           var isLocal = LOCAL_HOST_RE.test(window.location.hostname);
           var host = isLocal ? window.location.hostname : PUBLIC_HOST;
           var port = isLocal ? ':' + LOCAL_PORT : '';
-          var url = scheme + '://' + host + port
-                  + '/v1/database/' + DB + '/subscribe'
-                  + (token ? '?token=' + encodeURIComponent(token) : '');
+          return scheme + '://' + host + port
+               + '/v1/database/' + DB + '/subscribe'
+               + (token ? '?token=' + encodeURIComponent(token) : '');
+        }
+
+        function connect() {
+          var token = localStorage.getItem(TOKEN_KEY);
+          var url = wsUrl(token);
           var opened = false;
           status = 'connecting';
           ws = new WebSocket(url, PROTOCOL);
@@ -224,11 +234,14 @@
           // browser clock (for presence checks), and every server message
           // received since the previous frame.
           frame: function () {
+            var err = importError;
+            importError = null;
             return JSON.stringify({
               status: status,
               identity: identity,
               now_micros: Date.now() * 1000,
               msgs: queue.splice(0),
+              import_error: err,
             });
           },
           callReducer: function (name, argsJson) {
@@ -257,14 +270,46 @@
               fallback();
             }
           },
-          // Reconnecting as an imported identity needs a fresh socket
-          // (auth is a connect-time query param, not a mid-session call), so
-          // this stores the token and reloads the page rather than trying to
-          // hot-swap `ws` in place.
+          // Author follow-up (2026-07-12): the old version stored the pasted
+          // token and reloaded immediately — if the token turned out to be
+          // invalid/expired, the reload's own `connect()` would fail twice
+          // and silently drop it (see `failedBeforeOpen` above), leaving the
+          // player looking at a freshly-minted anonymous account with no
+          // explanation and the account they meant to import gone from the
+          // input field too. Instead, open a SEPARATE trial socket with the
+          // pasted token first (auth is a connect-time query param, so
+          // validating it needs its own connection either way) and only
+          // touch `TOKEN_KEY`/reload once that trial socket actually proves
+          // the token live by receiving a real IdentityToken back — a
+          // rejection reports `importError` (read by `frame()`, surfaced as
+          // a toast on the Rust side) and leaves the CURRENT session's token
+          // and connection completely untouched.
           importToken: function (token) {
             if (!token) return;
-            localStorage.setItem(TOKEN_KEY, token);
-            window.location.reload();
+            var trialWs = new WebSocket(wsUrl(token), PROTOCOL);
+            var settled = false;
+            var timeout = setTimeout(function () {
+              if (settled) return;
+              settled = true;
+              importError = 'Import failed: no response from server.';
+              try { trialWs.close(); } catch (e) {}
+            }, 8000);
+            trialWs.onmessage = function (ev) {
+              if (settled || typeof ev.data !== 'string') return;
+              if (ev.data.lastIndexOf('{"IdentityToken"', 0) === 0) {
+                settled = true;
+                clearTimeout(timeout);
+                localStorage.setItem(TOKEN_KEY, token);
+                trialWs.close();
+                window.location.reload();
+              }
+            };
+            trialWs.onclose = function () {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timeout);
+              importError = 'Import failed: that ID was rejected (invalid or expired).';
+            };
           },
           // The Rust frame has already rendered the clean share card when
           // this runs. Turning the game canvas into a Blob keeps the web

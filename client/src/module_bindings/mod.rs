@@ -6,9 +6,12 @@
 #![allow(unused, clippy::all)]
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
+pub mod admin_delete_island_reducer;
 pub mod admin_erase_cell_reducer;
+pub mod admin_force_rerank_reducer;
 pub mod admin_paint_cell_reducer;
 pub mod admin_set_xp_by_name_reducer;
+pub mod admin_update_island_reducer;
 pub mod claim_admin_reducer;
 pub mod claim_gift_reducer;
 pub mod click_link_reducer;
@@ -64,9 +67,12 @@ pub mod unlike_island_reducer;
 pub mod user_table;
 pub mod user_type;
 
+pub use admin_delete_island_reducer::admin_delete_island;
 pub use admin_erase_cell_reducer::admin_erase_cell;
+pub use admin_force_rerank_reducer::admin_force_rerank;
 pub use admin_paint_cell_reducer::admin_paint_cell;
 pub use admin_set_xp_by_name_reducer::admin_set_xp_by_name;
+pub use admin_update_island_reducer::admin_update_island;
 pub use claim_admin_reducer::claim_admin;
 pub use claim_gift_reducer::claim_gift;
 pub use click_link_reducer::click_link;
@@ -130,32 +136,99 @@ pub use user_type::User;
 /// to indicate which reducer caused the event.
 
 pub enum Reducer {
-    AdminEraseCell { q: i32, r: i32 },
-    AdminPaintCell { q: i32, r: i32 },
-    AdminSetXpByName { name: String, xp: u64 },
-    ClaimAdmin { password: String },
-    ClaimGift { gift_id: u64 },
-    ClickLink { island_id: u32 },
-    DeleteIslandCells { island_id: u32 },
+    AdminDeleteIsland {
+        island_id: u32,
+    },
+    AdminEraseCell {
+        q: i32,
+        r: i32,
+    },
+    AdminForceRerank,
+    AdminPaintCell {
+        q: i32,
+        r: i32,
+    },
+    AdminSetXpByName {
+        name: String,
+        xp: u64,
+    },
+    AdminUpdateIsland {
+        island_id: u32,
+        name: String,
+        likes: u32,
+        xp: u64,
+    },
+    ClaimAdmin {
+        password: String,
+    },
+    ClaimGift {
+        gift_id: u64,
+    },
+    ClickLink {
+        island_id: u32,
+    },
+    DeleteIslandCells {
+        island_id: u32,
+    },
     DisableIslandBorder,
-    EraseCommunityCell { q_local: i32, r_local: i32 },
-    EraseIslandCell { q_local: i32, r_local: i32 },
-    EraseMarginCell { q: i32, r: i32 },
-    LikeIsland { island_id: u32 },
-    MergeWithCell { cell_kind: u8, cell_id: u32 },
-    PaintCommunityCell { q_local: i32, r_local: i32 },
-    PaintIslandCell { q_local: i32, r_local: i32 },
-    PaintMarginCell { q: i32, r: i32 },
+    EraseCommunityCell {
+        q_local: i32,
+        r_local: i32,
+    },
+    EraseIslandCell {
+        q_local: i32,
+        r_local: i32,
+    },
+    EraseMarginCell {
+        q: i32,
+        r: i32,
+    },
+    LikeIsland {
+        island_id: u32,
+    },
+    MergeWithCell {
+        cell_kind: u8,
+        cell_id: u32,
+    },
+    PaintCommunityCell {
+        q_local: i32,
+        r_local: i32,
+    },
+    PaintIslandCell {
+        q_local: i32,
+        r_local: i32,
+    },
+    PaintMarginCell {
+        q: i32,
+        r: i32,
+    },
     ResetAccount,
-    SetBrush { hue: u16, sat: u8, val: u8 },
-    SetFrozen { frozen: bool },
+    SetBrush {
+        hue: u16,
+        sat: u8,
+        val: u8,
+    },
+    SetFrozen {
+        frozen: bool,
+    },
     SetIslandBorder,
-    SetIslandLink { rate_id: u32 },
-    SetLock { locked: bool },
-    SetName { name: String },
-    SetPos { cx: f32, cy: f32 },
+    SetIslandLink {
+        rate_id: u32,
+    },
+    SetLock {
+        locked: bool,
+    },
+    SetName {
+        name: String,
+    },
+    SetPos {
+        cx: f32,
+        cy: f32,
+    },
     ShowIslandBorder,
-    UnlikeIsland { island_id: u32 },
+    UnlikeIsland {
+        island_id: u32,
+    },
 }
 
 impl __sdk::InModule for Reducer {
@@ -165,9 +238,12 @@ impl __sdk::InModule for Reducer {
 impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
+            Reducer::AdminDeleteIsland { .. } => "admin_delete_island",
             Reducer::AdminEraseCell { .. } => "admin_erase_cell",
+            Reducer::AdminForceRerank => "admin_force_rerank",
             Reducer::AdminPaintCell { .. } => "admin_paint_cell",
             Reducer::AdminSetXpByName { .. } => "admin_set_xp_by_name",
+            Reducer::AdminUpdateIsland { .. } => "admin_update_island",
             Reducer::ClaimAdmin { .. } => "claim_admin",
             Reducer::ClaimGift { .. } => "claim_gift",
             Reducer::ClickLink { .. } => "click_link",
@@ -197,11 +273,19 @@ impl __sdk::Reducer for Reducer {
     #[allow(clippy::clone_on_copy)]
     fn args_bsatn(&self) -> Result<Vec<u8>, __sats::bsatn::EncodeError> {
         match self {
+            Reducer::AdminDeleteIsland { island_id } => {
+                __sats::bsatn::to_vec(&admin_delete_island_reducer::AdminDeleteIslandArgs {
+                    island_id: island_id.clone(),
+                })
+            }
             Reducer::AdminEraseCell { q, r } => {
                 __sats::bsatn::to_vec(&admin_erase_cell_reducer::AdminEraseCellArgs {
                     q: q.clone(),
                     r: r.clone(),
                 })
+            }
+            Reducer::AdminForceRerank => {
+                __sats::bsatn::to_vec(&admin_force_rerank_reducer::AdminForceRerankArgs {})
             }
             Reducer::AdminPaintCell { q, r } => {
                 __sats::bsatn::to_vec(&admin_paint_cell_reducer::AdminPaintCellArgs {
@@ -215,6 +299,17 @@ impl __sdk::Reducer for Reducer {
                     xp: xp.clone(),
                 })
             }
+            Reducer::AdminUpdateIsland {
+                island_id,
+                name,
+                likes,
+                xp,
+            } => __sats::bsatn::to_vec(&admin_update_island_reducer::AdminUpdateIslandArgs {
+                island_id: island_id.clone(),
+                name: name.clone(),
+                likes: likes.clone(),
+                xp: xp.clone(),
+            }),
             Reducer::ClaimAdmin { password } => {
                 __sats::bsatn::to_vec(&claim_admin_reducer::ClaimAdminArgs {
                     password: password.clone(),

@@ -49,20 +49,39 @@ enum Drag {
 /// which makes plain left-drag pan the camera instead of painting/merging
 /// (no Shift/right-click needed). Cycled by `X` or the footer button, in
 /// this order: Paint -> Erase -> Move -> Paint.
+/// Author follow-up (2026-07-12): a fourth state, AdminEdit, only reachable
+/// from the cycle while `HudInfo::is_admin` is true (see `Tool::cycle`) — a
+/// deliberately mobile-friendly way to trigger the admin edit modal (see
+/// `AdminEditIsland`/`open_admin_edit`) instead of a right-click or
+/// long-press, neither of which has a touch equivalent. While active, a
+/// plain tap/click on another player's island opens that modal instead of
+/// painting (`main.rs`/`bin/web.rs` route it ahead of the normal paint-stroke
+/// block, mirroring how `Eyedropper` already preempts painting).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tool {
     Paint,
     Erase,
     Move,
+    AdminEdit,
     Eyedropper,
 }
 
 impl Tool {
-    fn cycle(self) -> Tool {
+    /// `admin` gates whether `Move` cycles into the admin-only `AdminEdit`
+    /// state or wraps straight back to `Paint` — a non-admin (or an admin
+    /// who has since lost the role) must never land on `AdminEdit`.
+    fn cycle(self, admin: bool) -> Tool {
         match self {
             Tool::Paint => Tool::Erase,
             Tool::Erase => Tool::Move,
-            Tool::Move => Tool::Paint,
+            Tool::Move => {
+                if admin {
+                    Tool::AdminEdit
+                } else {
+                    Tool::Paint
+                }
+            }
+            Tool::AdminEdit => Tool::Paint,
             Tool::Eyedropper => Tool::Paint,
         }
     }
@@ -186,6 +205,44 @@ pub struct UiState {
     /// color; an absent entry means "still at the canonical default" (see
     /// `default_sat`/`DEFAULT_VAL`).
     swatch_hsl: HashMap<u16, (u8, u8)>,
+    /// Author follow-up (2026-07-12): admin-only edit modal for another
+    /// player's island, opened by `Tool::AdminEdit` — mutually exclusive with
+    /// every other modal, same footprint. `None` while closed.
+    pub admin_edit: Option<AdminEditIsland>,
+    admin_name_input: String,
+    admin_likes_input: String,
+    admin_xp_input: String,
+    admin_edit_focus: AdminEditField,
+    /// Same double-click-confirm pattern as `reset_armed_at`: armed on the
+    /// first click of "Delete isle & account", fired on a second click within
+    /// `RESET_CONFIRM_WINDOW`.
+    admin_delete_armed_at: Option<Instant>,
+    /// Author follow-up (2026-07-12): admin's replacement for "My Isle" (they
+    /// have no island of their own — see `claim_admin`) — currently just the
+    /// "Refresh isle placement" button. Mutually exclusive with every other
+    /// modal, same footprint.
+    pub config_open: bool,
+}
+
+/// Which of the admin edit modal's three text fields currently owns keyboard
+/// input, if any — mirrors the single-`bool`-per-field pattern used
+/// elsewhere in this module (`name_focused`, `import_focused`, ...), just
+/// consolidated into one enum since exactly one of three fields can be
+/// focused at a time here.
+#[derive(Clone, Copy, PartialEq)]
+enum AdminEditField {
+    None,
+    Name,
+    Likes,
+    Xp,
+}
+
+/// Identifies which island the admin edit modal is open for. The three text
+/// fields are a one-time snapshot seeded by `open_admin_edit`, same as
+/// `IslandInfo`'s `owner_label`/`age_label` — a deliberate single-admin
+/// moderation action, not a live-synced form.
+pub struct AdminEditIsland {
+    pub island_id: u32,
 }
 
 /// One floating like/unlike pop — see `UiState::spawn_like_anim`.
@@ -252,6 +309,13 @@ impl UiState {
             tool: Tool::Paint,
             eyedropper_restore_unlock: false,
             help_open: false,
+            admin_edit: None,
+            admin_name_input: String::new(),
+            admin_likes_input: String::new(),
+            admin_xp_input: String::new(),
+            admin_edit_focus: AdminEditField::None,
+            admin_delete_armed_at: None,
+            config_open: false,
             swatch_hsl: HashMap::new(),
         }
     }
@@ -306,11 +370,13 @@ impl UiState {
             || self.help_open
             || self.hexa_success_open
             || self.island_popup.as_ref().is_some_and(|p| p.is_own)
+            || self.admin_edit.is_some()
+            || self.config_open
     }
 
-    /// Closes all four modals — the group is mutually exclusive by
+    /// Closes all modals — the group is mutually exclusive by
     /// convention, enforced here in the one place that needs to open a
-    /// different one, instead of every call site repeating the same four
+    /// different one, instead of every call site repeating the same
     /// assignments.
     fn close_all_modals(&mut self) {
         self.overlay_open = false;
@@ -319,6 +385,10 @@ impl UiState {
         self.help_open = false;
         self.hexa_success_open = false;
         self.island_popup = None;
+        self.admin_edit = None;
+        self.admin_edit_focus = AdminEditField::None;
+        self.admin_delete_armed_at = None;
+        self.config_open = false;
         self.dragging = Drag::None;
     }
 
@@ -333,6 +403,18 @@ impl UiState {
         self.link_edit_focused = false;
         self.island_popup = Some(info);
     }
+
+    /// Author follow-up (2026-07-12): opens the admin edit modal for
+    /// `island_id`, seeding the three text fields from the owner's current
+    /// name/likes/xp — closes every other (mutually exclusive) modal first.
+    pub fn open_admin_edit(&mut self, island_id: u32, name: &str, likes: u32, xp: u64) {
+        self.close_all_modals();
+        self.admin_edit = Some(AdminEditIsland { island_id });
+        self.admin_name_input = name.to_string();
+        self.admin_likes_input = likes.to_string();
+        self.admin_xp_input = xp.to_string();
+    }
+
 
     /// Re-reads the two fields that can change while the popup sits open
     /// (author-caught: the Like button used to look stuck on "Like" after a
@@ -507,6 +589,12 @@ pub struct HudInfo<'a> {
     /// quick-access link field (`footer_link_edit_rect`), which syncs its
     /// display buffer from this every frame it isn't focused.
     pub link_id: Option<u32>,
+    /// Author follow-up (2026-07-12): true once the caller has claimed the
+    /// admin role (`Config.admin`) — swaps the "My Isle" footer button for
+    /// "Config" (admin has no island of their own, see `claim_admin`), gates
+    /// `Tool::AdminEdit`'s reachability from the paint/erase/move cycle, and
+    /// unlocks the Config panel's "Refresh isle placement" button.
+    pub is_admin: bool,
 }
 
 #[derive(Default)]
@@ -556,6 +644,16 @@ pub struct Actions {
     /// hidden. Kept distinct from `set_island_border`, which also repins the
     /// color to the current brush.
     pub show_island_border: bool,
+    /// Author follow-up (2026-07-12): the admin edit modal's Save button —
+    /// `(island_id, name, likes, xp)`, all three fields at once.
+    pub admin_save_island: Option<(u32, String, u32, u64)>,
+    /// Author follow-up: the admin edit modal's (double-click-confirmed)
+    /// Delete button — deletes the island AND its owner's account.
+    pub admin_delete_island: Option<u32>,
+    /// Author follow-up: the Config panel's "Refresh isle placement" button —
+    /// re-sorts island slots by the leaderboard (likes, then tiles painted)
+    /// right now instead of waiting for the periodic re-rank.
+    pub admin_force_rerank: bool,
 }
 
 fn footer_bg() -> Rectangle {
@@ -748,6 +846,40 @@ fn reset_btn_rect() -> Rectangle {
     Rectangle::new(o.x + 20.0, o.y + 280.0, 240.0, 36.0)
 }
 
+/// Author follow-up (2026-07-12): admin edit modal — three stacked text
+/// fields (name/likes/xp), same field-box styling as `link_edit_rect`.
+fn admin_name_field_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 80.0, 320.0, 32.0)
+}
+
+fn admin_likes_field_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 150.0, 320.0, 32.0)
+}
+
+fn admin_xp_field_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 220.0, 320.0, 32.0)
+}
+
+fn admin_save_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 280.0, 160.0, 40.0)
+}
+
+fn admin_delete_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 340.0, 320.0, 40.0)
+}
+
+/// Author follow-up: Config panel (admin's "My Isle" replacement) — a single
+/// button for now.
+fn config_refresh_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 20.0, o.y + 60.0, 320.0, 40.0)
+}
+
 /// F9: own-island popup only — numeric input for the itch.io rate id. Fills
 /// the row's full width now that there's no separate Set button (submits
 /// automatically as you type, see `handle_input`).
@@ -817,6 +949,21 @@ fn handle_link_edit_typing(rl: &mut RaylibHandle, input: &mut String, actions: &
         if let Ok(id) = input.trim().parse::<u32>() {
             actions.set_island_link = Some(id);
         }
+    }
+}
+
+/// Author follow-up (2026-07-12): digits-only typing for the admin edit
+/// modal's Likes/XP fields — unlike `handle_link_edit_typing`, these don't
+/// auto-submit per keystroke (the modal has an explicit Save button that
+/// commits all three fields together), so this just accumulates the buffer.
+fn handle_digits_typing(rl: &mut RaylibHandle, input: &mut String, max_len: usize) {
+    while let Some(c) = rl.get_char_pressed() {
+        if c.is_ascii_digit() && input.len() < max_len {
+            input.push(c);
+        }
+    }
+    if rl.is_key_pressed(KeyboardKey::KEY_BACKSPACE) {
+        input.pop();
     }
 }
 
@@ -1010,13 +1157,19 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     // (not `E`, which item 6 gives to keyboard zoom-in), swallowed while a
     // text field owns keyboard input so typing a name containing "x"
     // doesn't cycle it.
+    // Defensive: `AdminEdit` must never be reachable/stay selected for a
+    // non-admin (e.g. a session that loses the role mid-game) — the cycle
+    // itself already guards entry, this guards against a stale selection.
+    if !info.is_admin && state.tool == Tool::AdminEdit {
+        state.tool = Tool::Paint;
+    }
     if rl.is_key_pressed(KeyboardKey::KEY_X) && !state.text_field_focused() {
         if state.tool == Tool::Eyedropper {
             if state.finish_eyedropper() {
                 actions.set_lock = Some(false);
             }
         } else {
-            state.tool = state.tool.cycle();
+            state.tool = state.tool.cycle(info.is_admin);
         }
     }
     if clicked && point_in(mouse, eraser_btn_rect()) {
@@ -1025,7 +1178,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 actions.set_lock = Some(false);
             }
         } else {
-            state.tool = state.tool.cycle();
+            state.tool = state.tool.cycle(info.is_admin);
         }
     }
     if clicked && point_in(mouse, brush_btn_rect()) {
@@ -1106,8 +1259,17 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         return actions;
     }
     if clicked && point_in(mouse, my_island_btn_rect()) {
-        actions.open_own_island = true;
-        state.close_all_modals();
+        if info.is_admin {
+            // Author follow-up: admin has no island of their own (see
+            // `claim_admin`), so the same footer slot opens the Config
+            // panel instead of `open_own_island` (which `my_island` would
+            // just resolve to `None` for anyway).
+            state.close_all_modals();
+            state.config_open = true;
+        } else {
+            actions.open_own_island = true;
+            state.close_all_modals();
+        }
     }
 
     // Footer quick-access rate-id field (see `footer_link_edit_rect`): only
@@ -1279,6 +1441,81 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         return actions;
     }
 
+    // Author follow-up (2026-07-12): admin edit modal — three plain text
+    // fields (name/likes/xp, digits-only for the latter two) committed
+    // together by Save, plus a double-click-confirmed Delete (same pattern
+    // as `reset_armed_at` above).
+    if let Some(admin_edit) = &state.admin_edit {
+        let island_id = admin_edit.island_id;
+        if modal_dismiss_clicked(mouse, clicked) {
+            state.admin_edit = None;
+            state.admin_edit_focus = AdminEditField::None;
+            state.admin_delete_armed_at = None;
+            return actions;
+        }
+        if state.admin_delete_armed_at.is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW) {
+            state.admin_delete_armed_at = None;
+        }
+        if clicked {
+            state.admin_edit_focus = if point_in(mouse, admin_name_field_rect()) {
+                AdminEditField::Name
+            } else if point_in(mouse, admin_likes_field_rect()) {
+                AdminEditField::Likes
+            } else if point_in(mouse, admin_xp_field_rect()) {
+                AdminEditField::Xp
+            } else {
+                AdminEditField::None
+            };
+        }
+        match state.admin_edit_focus {
+            AdminEditField::Name => {
+                while let Some(c) = rl.get_char_pressed() {
+                    if !c.is_control() && state.admin_name_input.chars().count() < 20 {
+                        state.admin_name_input.push(c);
+                    }
+                }
+                if rl.is_key_pressed(KeyboardKey::KEY_BACKSPACE) {
+                    state.admin_name_input.pop();
+                }
+            }
+            AdminEditField::Likes => handle_digits_typing(rl, &mut state.admin_likes_input, 9),
+            AdminEditField::Xp => handle_digits_typing(rl, &mut state.admin_xp_input, 12),
+            AdminEditField::None => {}
+        }
+        if clicked && point_in(mouse, admin_save_btn_rect()) {
+            let name = state.admin_name_input.trim();
+            let likes = state.admin_likes_input.trim().parse::<u32>().ok();
+            let xp = state.admin_xp_input.trim().parse::<u64>().ok();
+            if !name.is_empty() {
+                if let (Some(likes), Some(xp)) = (likes, xp) {
+                    actions.admin_save_island = Some((island_id, name.to_string(), likes, xp));
+                }
+            }
+        }
+        if clicked && point_in(mouse, admin_delete_btn_rect()) {
+            if state.admin_delete_armed_at.is_some() {
+                actions.admin_delete_island = Some(island_id);
+                state.admin_edit = None;
+                state.admin_edit_focus = AdminEditField::None;
+                state.admin_delete_armed_at = None;
+            } else {
+                state.admin_delete_armed_at = Some(Instant::now());
+            }
+        }
+        return actions;
+    }
+
+    if state.config_open {
+        if modal_dismiss_clicked(mouse, clicked) {
+            state.config_open = false;
+            return actions;
+        }
+        if clicked && point_in(mouse, config_refresh_btn_rect()) {
+            actions.admin_force_rerank = true;
+        }
+        return actions;
+    }
+
     if state.recent_open {
         if modal_dismiss_clicked(mouse, clicked) {
             state.recent_open = false;
@@ -1411,6 +1648,10 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         } else {
             draw_island_tooltip(d, popup, mouse);
         }
+    } else if state.admin_edit.is_some() {
+        draw_admin_edit(d, state);
+    } else if state.config_open {
+        draw_config_panel(d);
     } else if state.help_open {
         draw_help_overlay(d);
     } else if let Some((title, color)) = hovered_recent_footer(state, mouse) {
@@ -1420,12 +1661,16 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         draw_button_tooltip(d, title, &[hex.as_str(), hsl.as_str()], mouse);
     } else if point_in(mouse, eraser_btn_rect()) {
         let (title, lines): (&str, &[&str]) = match state.tool {
+            Tool::Paint if info.is_admin => ("Paint", &["Click to cycle: Paint ->", "Eraser -> Move -> Edit"]),
             Tool::Paint => ("Paint", &["Click to cycle: Paint ->", "Eraser -> Move"]),
             Tool::Erase => ("Eraser", &["Revert a cell to its", "original color"]),
             Tool::Move => ("Move", &["Left-drag pans the camera", "instead of painting"]),
+            Tool::AdminEdit => ("Edit", &["Tap another island to", "edit its player/stats"]),
             Tool::Eyedropper => ("Paint", &["Click to return to", "the paint tool"]),
         };
         draw_button_tooltip(d, title, lines, mouse);
+    } else if info.is_admin && point_in(mouse, my_island_btn_rect()) {
+        draw_button_tooltip(d, "Config", &["Admin tools: refresh the", "leaderboard placement"], mouse);
     } else if let Some((title, lines)) = hovered_button_tooltip(mouse) {
         draw_button_tooltip(d, title, lines, mouse);
     }
@@ -1547,6 +1792,81 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
     d.draw_rectangle_rec(tgb, if popup.border_hidden { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
     let toggle_label = if popup.border_hidden { "Border: Hidden" } else { "Border: Shown" };
     d.draw_text(toggle_label, tgb.x as i32 + 24, tgb.y as i32 + 10, 14, Color::RAYWHITE);
+}
+
+/// Shared row layout for the admin edit modal's three text fields — label
+/// above, boxed value below, gold border while focused (same visual
+/// language as every other text field in this file).
+fn draw_admin_field(d: &mut impl RaylibDraw, label: &str, rect: Rectangle, value: &str, focused: bool) {
+    d.draw_text(label, rect.x as i32, rect.y as i32 - 18, 14, Color::LIGHTGRAY);
+    d.draw_rectangle_rec(rect, Color::new(28, 28, 34, 255));
+    d.draw_rectangle_lines_ex(rect, 1.0, if focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
+    d.draw_text(value, rect.x as i32 + 6, rect.y as i32 + 7, 14, Color::RAYWHITE);
+}
+
+/// Author follow-up (2026-07-12): admin-only moderation modal, opened by
+/// `Tool::AdminEdit` (see `open_admin_edit`) instead of the normal foreign-
+/// island tooltip/link. Three plain text fields (name/likes/xp) committed
+/// together by Save, plus a double-click-confirmed destructive Delete.
+fn draw_admin_edit(d: &mut impl RaylibDraw, state: &UiState) {
+    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
+
+    let o = overlay_rect();
+    d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
+    d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
+    d.draw_text("Edit Player / Island", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+
+    let close = overlay_close_rect();
+    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
+    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
+
+    draw_admin_field(d, "Player name:", admin_name_field_rect(), &state.admin_name_input, state.admin_edit_focus == AdminEditField::Name);
+    draw_admin_field(d, "Likes:", admin_likes_field_rect(), &state.admin_likes_input, state.admin_edit_focus == AdminEditField::Likes);
+    draw_admin_field(d, "XP:", admin_xp_field_rect(), &state.admin_xp_input, state.admin_edit_focus == AdminEditField::Xp);
+
+    let save = admin_save_btn_rect();
+    d.draw_rectangle_rec(save, Color::new(40, 70, 48, 255));
+    d.draw_text("Save", save.x as i32 + 54, save.y as i32 + 11, 16, Color::RAYWHITE);
+
+    let del = admin_delete_btn_rect();
+    let armed = state.admin_delete_armed_at.is_some();
+    d.draw_rectangle_rec(del, if armed { Color::new(140, 50, 50, 255) } else { Color::new(60, 40, 40, 255) });
+    let del_label = if armed { "Click again to confirm delete" } else { "Delete isle & account" };
+    d.draw_text(del_label, del.x as i32 + 10, del.y as i32 + 11, 14, Color::RAYWHITE);
+    d.draw_text(
+        "Deletes every painted cell and the owner's\naccount entirely. Cannot be undone.",
+        del.x as i32,
+        del.y as i32 + del.height as i32 + 10,
+        12,
+        Color::GRAY,
+    );
+}
+
+/// Author follow-up (2026-07-12): admin's replacement for the "My Isle"
+/// panel (they have no island of their own — `claim_admin` deletes it).
+/// Currently just the manual leaderboard-reslot trigger.
+fn draw_config_panel(d: &mut impl RaylibDraw) {
+    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
+
+    let o = overlay_rect();
+    d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
+    d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
+    d.draw_text("Config", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+
+    let close = overlay_close_rect();
+    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
+    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
+
+    let rb = config_refresh_btn_rect();
+    d.draw_rectangle_rec(rb, Color::new(40, 40, 48, 255));
+    d.draw_text("Refresh isle placement", rb.x as i32 + 20, rb.y as i32 + 12, 16, Color::RAYWHITE);
+    d.draw_text(
+        "Re-sorts every island's slot by the leaderboard\n(likes, then tiles painted) right now, instead of\nwaiting for the periodic re-rank.",
+        rb.x as i32,
+        rb.y as i32 + rb.height as i32 + 10,
+        12,
+        Color::GRAY,
+    );
 }
 
 const TOOLTIP_W: f32 = 220.0;
@@ -1841,6 +2161,10 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
             d.draw_rectangle_lines_ex(eb, 2.0, Color::new(90, 160, 230, 255));
             draw_move_icon(d, eb);
         }
+        Tool::AdminEdit => {
+            d.draw_rectangle_lines_ex(eb, 2.0, Color::GOLD);
+            draw_admin_edit_icon(d, eb);
+        }
         Tool::Eyedropper => draw_pencil_icon(d, eb),
     }
 
@@ -1885,7 +2209,8 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
 
     let mb = my_island_btn_rect();
     d.draw_rectangle_rec(mb, Color::new(40, 40, 48, 255));
-    d.draw_text("My Isle", mb.x as i32 + 6, mb.y as i32 + 9, 10, Color::RAYWHITE);
+    let mb_label = if info.is_admin { "Config" } else { "My Isle" };
+    d.draw_text(mb_label, mb.x as i32 + 6, mb.y as i32 + 9, 10, Color::RAYWHITE);
 }
 
 /// Author-requested: each letter of the footer's "Colors" button in its own
@@ -2072,6 +2397,22 @@ fn draw_move_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     }
     d.draw_circle(cx as i32, cy as i32, 2.0, icon_color);
     d.draw_circle_lines(cx as i32, cy as i32, 2.0, outline);
+}
+
+/// Author follow-up (2026-07-12): icon for the admin-only `Tool::AdminEdit`
+/// state — a magnifying glass ("inspect"), distinct from the paint/erase/
+/// move glyphs. Axis-aligned except for the handle, which is a single line
+/// (not a rotated rect/triangle) — see `draw_pencil_icon`'s doc comment on
+/// why this file avoids rotated custom geometry.
+fn draw_admin_edit_icon(d: &mut impl RaylibDraw, r: Rectangle) {
+    let cx = r.x + r.width / 2.0 - 1.5;
+    let cy = r.y + r.height / 2.0 - 1.5;
+    let icon_color = Color::new(235, 235, 240, 255);
+    let ring_r = 5.5;
+    d.draw_ring(Vector2::new(cx, cy), ring_r - 1.5, ring_r, 0.0, 360.0, 24, icon_color);
+    let handle_start = Vector2::new(cx + ring_r * 0.7, cy + ring_r * 0.7);
+    let handle_end = Vector2::new(handle_start.x + 5.0, handle_start.y + 5.0);
+    d.draw_line_ex(handle_start, handle_end, 2.5, icon_color);
 }
 
 /// Paintbrush glyph with a color
@@ -2354,7 +2695,7 @@ fn draw_account_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo
 
     let cb = copy_btn_rect();
     d.draw_rectangle_rec(cb, Color::new(40, 40, 48, 255));
-    d.draw_text("Copy full ID", cb.x as i32 + 16, cb.y as i32 + 11, 14, Color::RAYWHITE);
+    d.draw_text("Copy my token", cb.x as i32 + 16, cb.y as i32 + 11, 14, Color::RAYWHITE);
     if state.copy_clicked_at.is_some_and(|t| t.elapsed() < TOAST_DURATION) {
         d.draw_text(
             "copied (or check the popup)",

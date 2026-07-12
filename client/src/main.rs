@@ -299,6 +299,16 @@ fn open_island_info(ctx: &DbConnection, ui_state: &mut ui::UiState, island_id: u
     });
 }
 
+/// Author follow-up (2026-07-12): builds and opens the admin edit modal for
+/// `island_id` — mirrors `open_island_info`'s "look the row up, hand it to
+/// `ui_state`" shape. A no-op if the island or its owner has since vanished.
+fn open_admin_edit(ctx: &DbConnection, ui_state: &mut ui::UiState, island_id: u32) {
+    let Some(island) = ctx.db.island().id().find(&island_id) else { return };
+    let Some(owner) = ctx.db.user().identity().find(&island.owner) else { return };
+    let name = owner.name.clone().unwrap_or_default();
+    ui_state.open_admin_edit(island_id, &name, island.likes, owner.xp);
+}
+
 /// In-flight long-press-to-merge gesture: started on LMB press, cancelled by
 /// movement past the tolerance or button release, fires once at the hold
 /// threshold. Also tracks the F8 island-info target, which fires instead on
@@ -744,6 +754,7 @@ fn main() {
                 show_token_import: false,
                 rerank_secs,
                 link_id: my_island(&ctx, me).and_then(|isl| isl.itch_rate_id),
+                is_admin: is_admin(&ctx, me),
             };
             let actions = ui::handle_input(&mut rl, &mut ui_state, &info);
             // Note: last-3 tracking happens inside `ui::handle_input` itself
@@ -796,6 +807,15 @@ fn main() {
             }
             if actions.show_island_border {
                 let _ = ctx.reducers.show_island_border();
+            }
+            if let Some((island_id, name, likes, xp)) = actions.admin_save_island {
+                let _ = ctx.reducers.admin_update_island(island_id, name, likes, xp);
+            }
+            if let Some(island_id) = actions.admin_delete_island {
+                let _ = ctx.reducers.admin_delete_island(island_id);
+            }
+            if actions.admin_force_rerank {
+                let _ = ctx.reducers.admin_force_rerank();
             }
             if let Some((island_id, rate_id)) = actions.click_link {
                 open_url(&format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"));
@@ -1000,6 +1020,27 @@ fn main() {
             }
         }
 
+        // Author follow-up (2026-07-12): Tool::AdminEdit is a persistent
+        // (not one-shot) mode, deliberately mobile-friendly unlike a
+        // right-click or long-press — a plain tap/click on another player's
+        // island opens the admin edit modal. Painting is already excluded
+        // for this tool (the paint-stroke block above only fires for
+        // Paint/Erase), so this is the tool's only effect.
+        if map_input_allowed
+            && over_map_area
+            && ui_state.tool == ui::Tool::AdminEdit
+            && rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+        {
+            if let Some(me) = me {
+                let (wq, wr) = world::world_to_axial(mouse_world);
+                if let Some((island, _, _)) = island_at(&ctx, wq, wr) {
+                    if island.owner != me && island.owner != Identity::ZERO {
+                        open_admin_edit(&ctx, &mut ui_state, island.id);
+                    }
+                }
+            }
+        }
+
         // F9.6 item 2: middle-click eyedropper. A clean press+release within
         // `MIDDLE_CLICK_TOL_PX` picks the hovered tile's color; if the caller
         // already owns that hue (within `HUE_TOLERANCE`, same window
@@ -1041,7 +1082,12 @@ fn main() {
         if !map_input_allowed {
             long_press = None;
         } else if let Some(me) = me {
+            // Author follow-up: `AdminEdit` is handled entirely by its own
+            // block above (a plain tap opens the modal) — it must not also
+            // arm this gesture, which would leave `pending_info_click`
+            // resolving into the old open-the-link behavior on release.
             if ui_state.tool != ui::Tool::Eyedropper
+                && ui_state.tool != ui::Tool::AdminEdit
                 && !panning
                 && over_map_area
                 && rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
@@ -1537,6 +1583,7 @@ fn main() {
                 show_token_import: false,
                 rerank_secs,
                 link_id: my_island(&ctx, me).and_then(|isl| isl.itch_rate_id),
+                is_admin: is_admin(&ctx, me),
             };
             if let Some(name) = export_name.as_deref() {
                 ui::draw_export_frame(&mut d, name);

@@ -1465,6 +1465,15 @@ pub fn show_island_border(ctx: &ReducerContext) -> Result<(), String> {
 /// now the permanent, ownerless community island (see `paint_community_cell`
 /// below), so admin is purely a role (freeze/moderation powers) with no
 /// physical placement.
+/// Author follow-up (2026-07-12): admin gets neither an island nor a color
+/// restriction. `client_connected` always hands a brand-new identity an
+/// island (admin's identity is no exception — it looked like an ordinary
+/// player right up until this call), so the FIRST successful claim tears
+/// that island down (same cleanup `admin_delete_island` below and
+/// `reap_dead_players` use) and reseeds the caller's `Inventory` with a full
+/// spread of hues so every color is immediately paintable through the
+/// existing swatch/slider UI, not just server-side. Both are one-time,
+/// gated behind the same "not already admin" branch as the `config` write.
 #[spacetimedb::reducer]
 pub fn claim_admin(ctx: &ReducerContext, password: String) -> Result<(), String> {
     if hash_password(&password) != constants::ADMIN_PASSWORD_SHA256 {
@@ -1475,6 +1484,29 @@ pub fn claim_admin(ctx: &ReducerContext, password: String) -> Result<(), String>
         return Ok(());
     }
     ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
+
+    if let Some(island) = ctx.db.island().owner().find(ctx.sender()) {
+        delete_island_and_owner(ctx, &island);
+    }
+    for inv in ctx.db.inventory().owner().filter(&ctx.sender()).collect::<Vec<_>>() {
+        ctx.db.inventory().id().delete(inv.id);
+    }
+    // 30 hues, 12 degrees apart — comfortably under 2*HUE_TOLERANCE so every
+    // possible brush hue lands within `HUE_TOLERANCE` of some owned entry
+    // (see `set_brush`'s unlock check).
+    let mut hue = 0u16;
+    while hue < 360 {
+        ctx.db.inventory().insert(Inventory {
+            id: 0,
+            owner: ctx.sender(),
+            hue,
+            obtained_at: ctx.timestamp,
+            obtained_with: None,
+            from_gift: false,
+        });
+        hue += 12;
+    }
+
     ctx.db.config().id().update(Config { admin: Some(ctx.sender()), ..config });
     Ok(())
 }
@@ -1632,6 +1664,72 @@ pub fn admin_erase_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), Stri
     take_paint_token(ctx)?;
     let id = geometry::margin_cell_id(q, r);
     ctx.db.margin_cell().id().delete(id);
+    Ok(())
+}
+
+/// Shared moderation cleanup: wipes an island's painted cells, likes, link
+/// clicks, and its owner's inventory, then deletes the island and the owner's
+/// `User` row entirely. Used by `claim_admin` (clearing the ordinary-player
+/// island `client_connected` handed the soon-to-be-admin before they proved
+/// the password) and `admin_delete_island` (explicit moderation) — mirrors
+/// `reap_dead_players`'s cleanup, but doesn't require the island to already
+/// be empty first.
+fn delete_island_and_owner(ctx: &ReducerContext, island: &Island) {
+    for cell in ctx.db.island_cell().island_id().filter(&island.id).collect::<Vec<_>>() {
+        ctx.db.island_cell().id().delete(cell.id);
+    }
+    for like in ctx.db.island_like().island_id().filter(&island.id).collect::<Vec<_>>() {
+        ctx.db.island_like().id().delete(like.id);
+    }
+    for click in ctx.db.island_link_click().island_id().filter(&island.id).collect::<Vec<_>>() {
+        ctx.db.island_link_click().id().delete(click.id);
+    }
+    for inv in ctx.db.inventory().owner().filter(&island.owner).collect::<Vec<_>>() {
+        ctx.db.inventory().id().delete(inv.id);
+    }
+    ctx.db.island().id().delete(island.id);
+    ctx.db.user().identity().delete(island.owner);
+}
+
+/// Author follow-up (2026-07-12): admin edit modal's Delete button — wipes
+/// the island AND its owner's account entirely (name/xp/inventory/
+/// identity gone, slot freed for reuse by `lowest_free_slot`). The community
+/// island (slot 0, `Identity::ZERO` owner) has no real account behind it and
+/// is rejected, same as `like_island`'s backstop.
+#[spacetimedb::reducer]
+pub fn admin_delete_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
+    require_admin(ctx)?;
+    let island = ctx.db.island().id().find(island_id).ok_or("unknown island")?;
+    if island.owner == Identity::ZERO {
+        return Err("cannot delete the community island".to_string());
+    }
+    delete_island_and_owner(ctx, &island);
+    Ok(())
+}
+
+/// Author follow-up (2026-07-12): admin edit modal's Save button — directly
+/// sets the owner's display name/xp and the island's like count. Unlike
+/// `admin_set_xp_by_name` (a by-name CLI debug tool, kept as-is), this
+/// targets an exact `island_id`/owner so it works even when names collide,
+/// and also covers likes. Saturation is re-clamped to the new xp's level cap,
+/// same as `admin_set_xp_by_name`.
+#[spacetimedb::reducer]
+pub fn admin_update_island(ctx: &ReducerContext, island_id: u32, name: String, likes: u32, xp: u64) -> Result<(), String> {
+    require_admin(ctx)?;
+    if name.is_empty() {
+        return Err("Names must not be empty".to_string());
+    }
+    let island = ctx.db.island().id().find(island_id).ok_or("unknown island")?;
+    if island.owner == Identity::ZERO {
+        return Err("cannot edit the community island".to_string());
+    }
+    let user = ctx.db.user().identity().find(island.owner).ok_or("unknown owner")?;
+    let sat = user.sat.min(sat_cap(level_of(xp)));
+    ctx.db.user().identity().update(User { name: Some(name), xp, sat, ..user });
+    ctx.db.island().id().update(Island { likes, ..island });
+    // A promotion while the player is already waiting at the centre should
+    // make them HEXA-eligible immediately, mirrors `admin_set_xp_by_name`.
+    refresh_central_hexa(ctx);
     Ok(())
 }
 
@@ -1864,22 +1962,20 @@ pub fn rerank_warn(ctx: &ReducerContext, _arg: RerankWarnSchedule) -> Result<(),
     Ok(())
 }
 
-/// F8 re-rank, step 2/2 (one-shot, fired by `rerank_warn`): re-sorts islands
-/// by likes desc, then painted-tile count desc (author-requested: the
-/// "hidden leaderboard" — hexel.md — should reward active painters, not
-/// just liked ones), then owner name asc (author-requested), ties finally by
-/// `created_at`, and rewrites `island.slot` accordingly. Slot 0 (reserved for
-/// the P2/F10 admin island) is never touched — only slots 1.. are re-sorted.
-/// Cell coordinates are island-relative, so moving an island is just this one
-/// row write; no island_cell/margin_cell row ever needs to change.
-#[spacetimedb::reducer]
-pub fn rerank_fire(ctx: &ReducerContext, _arg: RerankFireSchedule) -> Result<(), String> {
-    if ctx.sender() != ctx.database_identity() {
-        return Err("rerank_fire may not be invoked by clients".to_string());
-    }
+/// F8 re-rank: re-sorts islands by likes desc, then painted-tile count desc
+/// (author-requested: the "hidden leaderboard" — hexel.md — should reward
+/// active painters, not just liked ones), then owner name asc (author-
+/// requested), ties finally by `created_at`, and rewrites `island.slot`
+/// accordingly. Slot 0 (reserved for the community island) is never touched
+/// — only slots 1.. are re-sorted. Cell coordinates are island-relative, so
+/// moving an island is just this one row write; no island_cell/margin_cell
+/// row ever needs to change. Shared by `rerank_fire` (the periodic timer) and
+/// `admin_force_rerank` (author follow-up: a manual trigger for the Config
+/// panel's "Refresh isle placement" button).
+fn perform_rerank(ctx: &ReducerContext) {
     // One O(n) pass over every painted cell instead of a per-island scan
     // (which would be O(islands * cells)) — cheap enough to build fresh on
-    // every re-rank tick (every `RERANK_PERIOD_SECS`, not per-frame).
+    // every re-rank.
     let mut tile_counts: HashMap<u32, u32> = HashMap::new();
     for cell in ctx.db.island_cell().iter() {
         *tile_counts.entry(cell.island_id).or_insert(0) += 1;
@@ -1909,6 +2005,28 @@ pub fn rerank_fire(ctx: &ReducerContext, _arg: RerankFireSchedule) -> Result<(),
     if let Some(config) = ctx.db.config().id().find(0) {
         ctx.db.config().id().update(Config { next_rerank_at: None, ..config });
     }
+}
+
+/// F8 re-rank, step 2/2 (one-shot, fired by `rerank_warn`): see
+/// `perform_rerank` for the actual sort/reslot logic.
+#[spacetimedb::reducer]
+pub fn rerank_fire(ctx: &ReducerContext, _arg: RerankFireSchedule) -> Result<(), String> {
+    if ctx.sender() != ctx.database_identity() {
+        return Err("rerank_fire may not be invoked by clients".to_string());
+    }
+    perform_rerank(ctx);
+    Ok(())
+}
+
+/// Author follow-up (2026-07-12): Config panel's "Refresh isle placement"
+/// button — runs the same re-sort `rerank_fire` does, immediately, instead of
+/// waiting for the next periodic cycle. Does not touch the periodic timer
+/// itself (`rerank_warn_schedule`/`rerank_fire_schedule` keep ticking on
+/// their own independent cadence).
+#[spacetimedb::reducer]
+pub fn admin_force_rerank(ctx: &ReducerContext) -> Result<(), String> {
+    require_admin(ctx)?;
+    perform_rerank(ctx);
     Ok(())
 }
 

@@ -71,6 +71,12 @@ struct FrameData {
     now_micros: i64,
     #[serde(default)]
     msgs: Vec<String>,
+    /// Author follow-up (2026-07-12): set once by `window.stdb.frame()` the
+    /// frame after a trial import connection (see `importToken` in
+    /// game.html) gets rejected — read-once, same as `msgs`, so a stale
+    /// error can't linger and pop up again on some unrelated later frame.
+    #[serde(default)]
+    import_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -790,6 +796,17 @@ fn open_island_info(state: &mut State, island_id: u32) {
     state.ui_state.open_island_info(ui::IslandInfo { island_id, owner_label, likes, age_label, link_id, is_own, already_liked, border_hidden, border_color });
 }
 
+/// Author follow-up (2026-07-12): mirrors `main.rs`'s `open_admin_edit`,
+/// reading from the local `Tables` cache instead of `ctx.db`.
+fn open_admin_edit(state: &mut State, island_id: u32) {
+    let Some(island) = state.tables.islands.get(&island_id) else { return };
+    let Some(owner) = state.tables.users.get(&island.owner_hex) else { return };
+    let name = owner.name.clone().unwrap_or_default();
+    let likes = island.likes;
+    let xp = owner.xp;
+    state.ui_state.open_admin_edit(island_id, &name, likes, xp);
+}
+
 /// In-flight long-press-to-merge gesture — mirrors `main.rs`'s `LongPress`.
 /// Also tracks the F8 island-info target, fired instead on a plain click —
 /// see `main.rs`'s comment on the same struct.
@@ -926,6 +943,12 @@ fn frame(state: &mut State) {
     }
     for msg in &data.msgs {
         handle_message(state, msg);
+    }
+    // Author follow-up (2026-07-12): a rejected Import — the current account
+    // and connection are untouched (see `importToken` in game.html), so this
+    // is just user feedback, not a reconnect.
+    if let Some(err) = data.import_error {
+        state.ui_state.show_info_toast(err);
     }
 
     let me = state.my_identity.clone();
@@ -1216,6 +1239,7 @@ fn frame(state: &mut State) {
             show_token_import: true,
             rerank_secs,
             link_id: my_island(&state.tables, me).and_then(|(isl, _)| isl.itch_rate_id),
+            is_admin: is_admin(&state.tables, me),
         };
         let actions = ui::handle_input(&mut state.rl, &mut state.ui_state, &info);
         if let Some((h, s, v)) = actions.set_brush {
@@ -1254,6 +1278,15 @@ fn frame(state: &mut State) {
         }
         if actions.show_island_border {
             call_reducer("show_island_border", serde_json::json!([]));
+        }
+        if let Some((island_id, name, likes, xp)) = actions.admin_save_island {
+            call_reducer("admin_update_island", serde_json::json!([island_id, name, likes, xp]));
+        }
+        if let Some(island_id) = actions.admin_delete_island {
+            call_reducer("admin_delete_island", serde_json::json!([island_id]));
+        }
+        if actions.admin_force_rerank {
+            call_reducer("admin_force_rerank", serde_json::json!([]));
         }
         if let Some((island_id, rate_id)) = actions.click_link {
             // plan.md F9: web opens the rate page via `window.open`, unlike
@@ -1466,6 +1499,30 @@ fn frame(state: &mut State) {
         }
     }
 
+    // Author follow-up (2026-07-12): mirrors `main.rs`'s AdminEdit click
+    // block — a persistent, mobile-friendly tool state (not a right-click/
+    // long-press) whose only effect is opening the admin edit modal on tap.
+    if map_input_allowed
+        && !gesturing
+        && over_map_area
+        && state.ui_state.tool == ui::Tool::AdminEdit
+        && state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+    {
+        if let Some(me) = me {
+            let (wq, wr) = world::world_to_axial(mouse_world);
+            if let Some((island_id, _, _)) = island_at(&state.tables, wq, wr) {
+                let editable = state
+                    .tables
+                    .islands
+                    .get(&island_id)
+                    .is_some_and(|isl| isl.owner_hex != me && isl.owner_hex != world::COMMUNITY_OWNER_HEX);
+                if editable {
+                    open_admin_edit(state, island_id);
+                }
+            }
+        }
+    }
+
     // Middle-click shortcut for the eyedropper. The footer tool above is
     // the click/tap path used by touch devices and trackpads.
     if !map_input_allowed {
@@ -1499,7 +1556,10 @@ fn frame(state: &mut State) {
     if !map_input_allowed || gesturing {
         state.long_press = None;
     } else if let Some(me) = me {
+        // Author follow-up: `AdminEdit` is handled entirely by its own
+        // block above — mirrors `main.rs`'s exclusion here.
         if state.ui_state.tool != ui::Tool::Eyedropper
+            && state.ui_state.tool != ui::Tool::AdminEdit
             && !panning
             && over_map_area
             && state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
@@ -1913,6 +1973,7 @@ fn frame(state: &mut State) {
             show_token_import: true,
             rerank_secs,
             link_id: my_island(&state.tables, me).and_then(|(isl, _)| isl.itch_rate_id),
+            is_admin: is_admin(&state.tables, me),
         };
         if let Some(name) = export_name.as_deref() {
             ui::draw_export_frame(&mut d, name);

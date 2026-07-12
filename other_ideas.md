@@ -105,3 +105,6 @@ cursor for free, no bot-specific client code. See plan.md's F12 entry.)
 - [x] Header: "HELP: PRESS ESC"
 - [ ] recent colors should be saved in server
 - [ ] Load screen while connecting to spacetimeDB, if it fails, suggest to deploy yourself
+- [ ] see leaderboard slot
+- [ ] hexel in bold
+- [ ] click on hexel go to itch io page

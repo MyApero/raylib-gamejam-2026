@@ -55,11 +55,8 @@ spacetime start --listen-addr 0.0.0.0:3000
 Then from your dev machine, point publish/generate/client at the VPS instead of local:
 
 ```bash
-spacetime publish -s <vps-host>:3000 --module-path server hexel
-spacetime generate --lang rust --out-dir client/src/module_bindings --module-path server
+./server/publish.sh
 ```
-
-And update `HOST` in `client/src/main.rs` to `http://<vps-host>:3000`
 
 ## Admin account / "draw anywhere" (F16)
 
@@ -76,13 +73,28 @@ Paste the printed `token` value into the web client's "Paste an ID" field
 
 ## Admin (F10)
 
-No in-game admin UI — these are CLI-only ops tools, called against whichever
-server you're pointed at (swap `-s local` for the production server name):
+Claiming the role is still CLI-only (`claim_admin`/`admin_probe`, above) —
+everything past that now has in-game UI (author follow-up, 2026-07-12), on
+both clients:
+
+- Admin has no island of their own — `claim_admin` deletes whatever island
+  `client_connected` had already handed that identity, and seeds their
+  `Inventory` with a full 30-hue spread (every 12°) so every color is
+  paintable immediately, not just via `admin_paint_cell`/`admin_erase_cell`
+  server-side.
+- The footer's "My Isle" button becomes "Config" for admin (they have no
+  island to show) — currently just "Refresh isle placement", a manual
+  trigger for the same re-sort `rerank_fire` runs periodically.
+- The Paint/Erase/Move footer tool cycles into a 4th state, admin-only:
+  Edit. While active, tapping/clicking another player's island opens a
+  modal to edit their display name/XP and the island's like count (Save),
+  or delete the island AND the owner's account entirely (double-click-
+  confirmed Delete) — mobile-friendly by design (no right-click/long-press).
+
+Still CLI-only, called against whichever server you're pointed at (swap
+`-s local` for the production server name):
 
 ```bash
-# claim admin for the identity `spacetime call` is currently using
-spacetime call hexel claim_admin "<the admin password>" -s local
-
 # freeze/unfreeze all player interaction (painting, merging, moving, liking,
 # link editing, border editing) — a panic button for active abuse; the admin
 # reducers themselves stay callable while frozen
@@ -95,7 +107,9 @@ spacetime call hexel set_frozen false -s local
 spacetime call hexel delete_island_cells <island_id> -s local
 
 # demo/debug only: assign an exact XP total to one uniquely named player.
-# 300 XP is level 3, which unlocks the central HEXA feature.
+# 300 XP is level 3, which unlocks the central HEXA feature. The in-game
+# Edit modal (above) is the general-purpose way to do this now; this stays
+# for scripting/by-name convenience.
 spacetime call hexel admin_set_xp_by_name "<display name>" 300 -s local
 ```
 
