@@ -1,4 +1,4 @@
-use shared::hue_dist;
+use shared::{hue_dist, sat_cap};
 use spacetimedb::rand::Rng;
 use spacetimedb::{Identity, ReducerContext, ScheduleAt, Table, TimeDuration, Timestamp};
 use std::collections::HashMap;
@@ -42,7 +42,9 @@ mod constants {
     pub const XP_TIME: u64 = 1;
     pub const TIME_XP_PERIOD_SECS: i64 = 60;
     pub const LEVEL_XP: u64 = 100;
-    pub const START_SAT: u8 = 40;
+    /// Single source of truth in the `shared` crate — see its doc comment
+    /// for why this is no longer hand-mirrored.
+    pub use shared::constants::{START_SAT, START_VAL};
     /// F8: how often islands re-rank, and how long the client-facing
     /// countdown warns before slots actually get rewritten.
     pub const RERANK_PERIOD_SECS: i64 = 300;
@@ -598,6 +600,10 @@ pub struct MergeEvent {
     hue_a: u16,
     hue_b: u16,
     merged_hue: u16,
+    #[default(0)]
+    merged_sat: u8,
+    #[default(0)]
+    merged_val: u8,
 }
 
 /// Author decision (F6 follow-up): the merge toast used to fall back to a
@@ -646,10 +652,6 @@ fn lowest_free_slot(ctx: &ReducerContext) -> u32 {
 
 fn level_of(xp: u64) -> u64 {
     xp / constants::LEVEL_XP
-}
-
-fn sat_cap(level: u64) -> u8 {
-    (40 + 3 * level).min(100) as u8
 }
 
 /// Deterministic-enough starting hue: hashes the identity's bytes. Not
@@ -736,6 +738,7 @@ pub fn set_pos(ctx: &ReducerContext, cx: f32, cy: f32) -> Result<(), String> {
         .identity()
         .find(ctx.sender())
         .ok_or("unknown user")?;
+    let caller_hue = user.hue;
     let caller = ctx.sender();
     ctx.db.user().identity().update(User {
         cx,
@@ -744,7 +747,7 @@ pub fn set_pos(ctx: &ReducerContext, cx: f32, cy: f32) -> Result<(), String> {
         ..user
     });
 
-    // Cursor-merge detection: nearest unlocked, differently-hued online user
+    // Cursor-merge detection: nearest unlocked, sufficiently-different online user
     // within MERGE_DIST. Deliberately NOT gated on `last_seen` freshness
     // (unlike HEXA eligibility/time-XP below) — the client only sends
     // `set_pos` when the mouse moves, so a player standing still for more
@@ -753,7 +756,11 @@ pub fn set_pos(ctx: &ReducerContext, cx: f32, cy: f32) -> Result<(), String> {
     // disconnect) is enough to know they're really there.
     let mut nearest: Option<(Identity, u16, f32)> = None;
     for other in ctx.db.user().iter() {
-        if other.identity == caller || !other.online || other.locked {
+        if other.identity == caller
+            || !other.online
+            || other.locked
+            || hue_dist(caller_hue, other.hue) <= constants::HUE_TOLERANCE
+        {
             continue;
         }
         let d2 = (other.cx - cx).powi(2) + (other.cy - cy).powi(2);
@@ -767,8 +774,16 @@ pub fn set_pos(ctx: &ReducerContext, cx: f32, cy: f32) -> Result<(), String> {
 
     if let Some((partner, partner_hue, _)) = nearest {
         let me = ctx.db.user().identity().find(caller).ok_or("unknown user")?;
-        if !me.locked && me.hue != partner_hue {
+        if !me.locked && hue_dist(me.hue, partner_hue) > constants::HUE_TOLERANCE {
+            let partner_user = ctx.db.user().identity().find(partner).ok_or("unknown partner")?;
             let merged = merge::merge_hue(me.hue, partner_hue);
+            // Keep the shared result identical for both players. Using the
+            // lower current level cap still blends saturation, while avoiding
+            // an event color that one participant cannot actually select.
+            let merged_sat = (((me.sat as u16 + partner_user.sat as u16 + 1) / 2) as u8)
+                .min(sat_cap(level_of(me.xp)))
+                .min(sat_cap(level_of(partner_user.xp)));
+            let merged_val = ((me.val as u16 + partner_user.val as u16 + 1) / 2) as u8;
             ctx.db.merge_event().insert(MergeEvent {
                 id: 0,
                 at: ctx.timestamp,
@@ -777,8 +792,10 @@ pub fn set_pos(ctx: &ReducerContext, cx: f32, cy: f32) -> Result<(), String> {
                 hue_a: me.hue,
                 hue_b: partner_hue,
                 merged_hue: merged,
+                merged_sat,
+                merged_val,
             });
-            apply_merge(ctx, caller, partner, merged, true);
+            apply_merge(ctx, caller, partner, merged, merged_sat, merged_val, true);
         }
     }
 
@@ -943,14 +960,22 @@ fn refresh_central_hexa(ctx: &ReducerContext) {
 /// Shared merge procedure for both cursor-merge and tile-merge. `cursor`
 /// selects whether both sides' brush hue is updated (cursor-merge) or only
 /// the caller's (tile-merge).
-fn apply_merge(ctx: &ReducerContext, a: Identity, b: Identity, merged_hue: u16, cursor: bool) {
+fn apply_merge(
+    ctx: &ReducerContext,
+    a: Identity,
+    b: Identity,
+    merged_hue: u16,
+    merged_sat: u8,
+    merged_val: u8,
+    cursor: bool,
+) {
     for &who in &[a, b] {
         let already_has = ctx
             .db
             .inventory()
             .owner()
             .filter(&who)
-            .any(|inv| inv.hue == merged_hue);
+            .any(|inv| hue_dist(inv.hue, merged_hue) <= constants::HUE_TOLERANCE);
         if !already_has {
             let partner = if who == a { b } else { a };
             ctx.db.inventory().insert(Inventory {
@@ -972,13 +997,13 @@ fn apply_merge(ctx: &ReducerContext, a: Identity, b: Identity, merged_hue: u16, 
     if cursor {
         for &who in &[a, b] {
             if let Some(u) = ctx.db.user().identity().find(who) {
-                let sat = u.sat.min(sat_cap(level_of(u.xp)));
-                ctx.db.user().identity().update(User { hue: merged_hue, sat, ..u });
+                let sat = merged_sat.min(sat_cap(level_of(u.xp)));
+                ctx.db.user().identity().update(User { hue: merged_hue, sat, val: merged_val, ..u });
             }
         }
     } else if let Some(u) = ctx.db.user().identity().find(a) {
-        let sat = u.sat.min(sat_cap(level_of(u.xp)));
-        ctx.db.user().identity().update(User { hue: merged_hue, sat, ..u });
+        let sat = merged_sat.min(sat_cap(level_of(u.xp)));
+        ctx.db.user().identity().update(User { hue: merged_hue, sat, val: merged_val, ..u });
     }
 }
 
@@ -1259,10 +1284,15 @@ pub fn erase_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), Str
 pub fn merge_with_cell(ctx: &ReducerContext, cell_kind: u8, cell_id: u32) -> Result<(), String> {
     check_not_frozen(ctx)?;
     ctx.db.user().identity().find(ctx.sender()).ok_or("unknown user")?;
-    let (tile_hue, painter) = match cell_kind {
+    let (tile_hue, tile_sat, tile_val, painter) = match cell_kind {
         0 => {
             let cell = ctx.db.island_cell().id().find(cell_id).ok_or("no such cell")?;
-            ((cell.color >> 16) as u16 & 0x1FF, cell.painted_by)
+            (
+                (cell.color >> 16) as u16 & 0x1FF,
+                ((cell.color >> 8) & 0xFF) as u8,
+                (cell.color & 0xFF) as u8,
+                cell.painted_by,
+            )
         }
         _ => return Err("invalid cell_kind".to_string()),
     };
@@ -1287,7 +1317,7 @@ pub fn merge_with_cell(ctx: &ReducerContext, cell_kind: u8, cell_id: u32) -> Res
     }
     // Long-press "takes" the tile's exact color rather than blending it with
     // the caller's brush (unlike cursor-merge, which does blend).
-    apply_merge(ctx, ctx.sender(), painter, tile_hue, false);
+    apply_merge(ctx, ctx.sender(), painter, tile_hue, tile_sat, tile_val, false);
     Ok(())
 }
 
@@ -1317,7 +1347,7 @@ pub fn reset_account(ctx: &ReducerContext) -> Result<(), String> {
         xp: 0,
         hue,
         sat: constants::START_SAT,
-        val: 100,
+        val: constants::START_VAL,
         ..user
     });
     refresh_central_hexa(ctx);
@@ -1962,7 +1992,7 @@ pub fn client_connected(ctx: &ReducerContext) {
         last_seen: ctx.timestamp,
         hue,
         sat: constants::START_SAT,
-        val: 100,
+        val: constants::START_VAL,
         locked: false,
         xp: 0,
         paint_tokens: constants::PAINT_BUCKET_MAX,

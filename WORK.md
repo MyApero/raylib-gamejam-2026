@@ -61,6 +61,19 @@ spacetime generate --lang rust --out-dir client/src/module_bindings --module-pat
 
 And update `HOST` in `client/src/main.rs` to `http://<vps-host>:3000`
 
+## Admin account / "draw anywhere" (F16)
+
+```bash
+# local dev instance
+cargo run -p client --bin admin_probe -- "<server/.env admin password>"
+
+# your published VPS instead — point at whatever host/port its SpacetimeDB
+# actually listens on (see "VPS setup" above)
+cargo run -p client --bin admin_probe -- "<the admin password>" http://<vps-host>:3000
+```
+
+Paste the printed `token` value into the web client's "Paste an ID" field
+
 ## Admin (F10)
 
 No in-game admin UI — these are CLI-only ops tools, called against whichever

@@ -121,15 +121,16 @@ struct HexaEventRow {
     at_micros: i64,
 }
 
-/// Mirrors `main.rs`'s `MergeEvent` binding, trimmed to what
-/// this client actually reads — `merged_hue` is skipped since the joining
-/// `InventoryRow.hue` already carries it, same trimming precedent as
-/// `HexaEventRow` above.
+/// Mirrors the merge-event fields needed for raw-HSL recent colors and the
+/// pre-merge toast equation.
 struct MergeEventRow {
     a_hex: String,
     b_hex: String,
     hue_a: u16,
     hue_b: u16,
+    merged_hue: u16,
+    merged_sat: u8,
+    merged_val: u8,
     at_micros: i64,
 }
 
@@ -375,9 +376,8 @@ fn parse_hexa_event(v: &Value) -> Option<(u64, HexaEventRow)> {
 }
 
 /// Mirrors `main.rs`'s `MergeEvent` binding. Field order
-/// matches the server struct (`id, at, a, b, hue_a, hue_b, merged_hue`);
-/// `merged_hue` (positional index 6) is skipped, same reasoning as
-/// `MergeEventRow`'s doc comment.
+/// matches the server struct (`id, at, a, b, hue_a, hue_b, merged_hue,
+/// merged_sat, merged_val`).
 fn parse_merge_event(v: &Value) -> Option<(u64, MergeEventRow)> {
     let r = row_view(v)?;
     let id = r.field("id", 0)?.as_u64()?;
@@ -389,6 +389,9 @@ fn parse_merge_event(v: &Value) -> Option<(u64, MergeEventRow)> {
             b_hex: identity_hex(r.field("b", 3)?)?,
             hue_a: r.field("hue_a", 4)?.as_u64()? as u16,
             hue_b: r.field("hue_b", 5)?.as_u64()? as u16,
+            merged_hue: r.field("merged_hue", 6)?.as_u64()? as u16,
+            merged_sat: r.field("merged_sat", 7)?.as_u64()? as u8,
+            merged_val: r.field("merged_val", 8)?.as_u64()? as u8,
         },
     ))
 }
@@ -714,6 +717,7 @@ fn pick_color_at(
     ) {
         world::EyedropperPick::Selected { hue, sat, val } => {
             call_reducer("set_brush", serde_json::json!([hue, sat, val]));
+            ui_state.note_used_color(ui::RecentColor { hue, sat, val });
             true
         }
         world::EyedropperPick::Locked => {
@@ -820,6 +824,8 @@ struct State {
     ui_state: ui::UiState,
     known_inventory_ids: HashSet<u64>,
     inventory_seeded: bool,
+    known_merge_event_ids: HashSet<u64>,
+    merge_events_seeded: bool,
     known_hexa_event_ids: HashSet<u64>,
     hexa_events_seeded: bool,
     /// F13: mirrors `main.rs`'s `hexa_display` — persisted, lerped hexagon-
@@ -1014,6 +1020,19 @@ fn frame(state: &mut State) {
     // Inventory-insert watch (merge toast): toast + last3 nudge when a new
     // row for `me` appears. Mirrors `main.rs` exactly.
     if let Some(me) = me {
+        if !state.merge_events_seeded {
+            state.known_merge_event_ids = state.tables.merge_events.keys().copied().collect();
+            state.merge_events_seeded = true;
+        } else {
+            for (&id, event) in &state.tables.merge_events {
+                if state.known_merge_event_ids.insert(id) && (event.a_hex == me || event.b_hex == me) {
+                    state.ui_state.note_used_color(ui::RecentColor { hue: event.merged_hue, sat: event.merged_sat, val: event.merged_val });
+                    if let Some(s) = &state.sfx {
+                        s.merge.play();
+                    }
+                }
+            }
+        }
         if !state.hexa_events_seeded {
             state.known_hexa_event_ids = state.tables.hexa_events.keys().copied().collect();
             state.hexa_events_seeded = true;
@@ -1074,9 +1093,19 @@ fn frame(state: &mut State) {
                             .values()
                             .find(|e| e.at_micros == inv.obtained_at_micros && (e.a_hex == me || e.b_hex == me))
                             .map(|e| if e.a_hex == me { (e.hue_a, e.hue_b) } else { (e.hue_b, e.hue_a) });
-                        state.ui_state.show_merge_toast(inv.hue, &label, merge_from);
-                        if let Some(s) = &state.sfx {
-                            s.merge.play();
+                        let color = state
+                            .tables
+                            .merge_events
+                            .values()
+                            .find(|e| e.at_micros == inv.obtained_at_micros && (e.a_hex == me || e.b_hex == me))
+                            .map(|e| ui::RecentColor { hue: e.merged_hue, sat: e.merged_sat, val: e.merged_val })
+                            .or_else(|| state.tables.users.get(me).map(|u| ui::RecentColor { hue: inv.hue, sat: u.sat, val: u.val }))
+                            .unwrap_or(ui::RecentColor { hue: inv.hue, sat: world::sat_cap(0), val: 90 });
+                        state.ui_state.show_merge_toast(color, &label, merge_from);
+                        if merge_from.is_none() {
+                            if let Some(s) = &state.sfx {
+                                s.merge.play();
+                            }
                         }
                     }
                 }
@@ -1085,7 +1114,7 @@ fn frame(state: &mut State) {
         // F9.5 item 4: mirrors `main.rs` — seed the last-3 ring with the
         // caller's current hue the first frame it's known.
         if let Some(user) = state.tables.users.get(me) {
-            state.ui_state.seed_last3_once(user.hue);
+            state.ui_state.seed_recent_once(ui::RecentColor { hue: user.hue, sat: user.sat, val: user.val });
         }
     }
 
@@ -1186,6 +1215,7 @@ fn frame(state: &mut State) {
             hues: &hues,
             show_token_import: true,
             rerank_secs,
+            link_id: my_island(&state.tables, me).and_then(|(isl, _)| isl.itch_rate_id),
         };
         let actions = ui::handle_input(&mut state.rl, &mut state.ui_state, &info);
         if let Some((h, s, v)) = actions.set_brush {
@@ -1729,6 +1759,9 @@ fn frame(state: &mut State) {
     // F9.6 item 8: mirrors `main.rs` — skip the per-tile outline pass past
     // this zoom (visual noise at that size; a small render win too).
     let show_tile_outline = camera.zoom >= BORDERLESS_ZOOM_THRESHOLD;
+    // Grabbed before `begin_drawing` hands out its mutable borrow — mirrors
+    // `main.rs`.
+    let fps = state.rl.get_fps();
     let hover_takeable;
     let mut d = state.rl.begin_drawing(&state.thread);
     d.clear_background(Color::new(18, 18, 24, 255));
@@ -1760,7 +1793,8 @@ fn frame(state: &mut State) {
                 world::draw_hex(&mut d2, cell_world, 1.0, fill, show_tile_outline.then_some(Color::new(40, 40, 46, 255)));
             }
             // Author-caught: mirrors `main.rs` — sat/val is now
-            // `START_SAT`/100 exactly (was a fixed 85/95 lookalike shade).
+            // `START_SAT`/`START_VAL` exactly (was a fixed 85/95 lookalike
+            // shade).
             //
             // Author-requested: mirrors `main.rs` — an owner-set
             // `border_color`/`border_hidden` override takes priority over
@@ -1771,7 +1805,7 @@ fn frame(state: &mut State) {
                 let (h, s, v) = world::unpack_hsv(packed);
                 Some(world::hsv_color(h, s, v))
             } else {
-                seed_hues.get(island.owner_hex.as_str()).map(|&hue| world::hsv_color(hue, 40, 100))
+                seed_hues.get(island.owner_hex.as_str()).map(|&hue| world::hsv_color(hue, START_SAT, START_VAL))
             };
             if let Some(border_color) = border_color {
                 let r_f = ISLAND_RADIUS as f32;
@@ -1878,6 +1912,7 @@ fn frame(state: &mut State) {
             hues: &hues,
             show_token_import: true,
             rerank_secs,
+            link_id: my_island(&state.tables, me).and_then(|(isl, _)| isl.itch_rate_id),
         };
         if let Some(name) = export_name.as_deref() {
             ui::draw_export_frame(&mut d, name);
@@ -1922,7 +1957,11 @@ fn frame(state: &mut State) {
         {
             world::draw_hold_ring(&mut d, mouse_screen, frac);
         }
-        d.draw_fps(440, 4);
+        // Hidden on the title screen, colored to match the header's grey —
+        // mirrors `main.rs`.
+        if !state.ui_state.title_active {
+            world::draw_fps_grey(&mut d, 540, 8, fps);
+        }
     }
     // EndDrawing must complete before the browser reads the finished canvas.
     drop(d);
@@ -1961,6 +2000,8 @@ fn main() {
         ui_state: ui::UiState::new(),
         known_inventory_ids: HashSet::new(),
         inventory_seeded: false,
+        known_merge_event_ids: HashSet::new(),
+        merge_events_seeded: false,
         known_hexa_event_ids: HashSet::new(),
         hexa_events_seeded: false,
         hexa_display: HashMap::new(),

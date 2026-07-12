@@ -92,6 +92,16 @@ struct Toast {
     shown_at: Instant,
 }
 
+/// A concrete paint color, independent from the inventory entry whose
+/// ±7° hue window authorizes it. Recent colors preserve all three channels
+/// so selecting one reproduces exactly what was drawn/merged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecentColor {
+    pub hue: u16,
+    pub sat: u8,
+    pub val: u8,
+}
+
 pub struct UiState {
     /// Title screen (author-requested): shown from launch until the Draw
     /// button (or Enter) dismisses it. While set, `handle_input` swallows
@@ -107,7 +117,8 @@ pub struct UiState {
     name_loaded: bool,
     name_focused: bool,
     overlay_open: bool,
-    pub last3: VecDeque<u16>,
+    recent_open: bool,
+    pub recent_colors: VecDeque<RecentColor>,
     dragging: Drag,
     toast: Option<Toast>,
     /// A confirmed local Hexa reward opens this acknowledgement modal.
@@ -221,7 +232,8 @@ impl UiState {
             name_loaded: false,
             name_focused: false,
             overlay_open: false,
-            last3: VecDeque::new(),
+            recent_open: false,
+            recent_colors: VecDeque::new(),
             dragging: Drag::None,
             toast: None,
             hexa_success_open: false,
@@ -289,6 +301,7 @@ impl UiState {
     pub fn any_modal_open(&self) -> bool {
         self.title_active
             || self.overlay_open
+            || self.recent_open
             || self.account_open
             || self.help_open
             || self.hexa_success_open
@@ -301,6 +314,7 @@ impl UiState {
     /// assignments.
     fn close_all_modals(&mut self) {
         self.overlay_open = false;
+        self.recent_open = false;
         self.account_open = false;
         self.help_open = false;
         self.hexa_success_open = false;
@@ -342,14 +356,14 @@ impl UiState {
     /// PRE-merge hues, looked up by the caller against the matching
     /// `MergeEvent` row — for a real two-player cursor-merge; `None` for a
     /// tile-merge/eyedrop, which has no second live hue to show.
-    pub fn show_merge_toast(&mut self, hue: u16, partner_label: &str, merge_from: Option<(u16, u16)>) {
+    pub fn show_merge_toast(&mut self, color: RecentColor, partner_label: &str, merge_from: Option<(u16, u16)>) {
         self.toast = Some(Toast {
             text: format!("new color, obtained with {partner_label}"),
-            hue: Some(hue),
+            hue: Some(color.hue),
             merge_from,
             shown_at: Instant::now(),
         });
-        self.note_used_hue(hue);
+        self.note_used_color(color);
     }
 
     /// F9 level-up feedback. `current_hue` just drives the toast's flash
@@ -388,7 +402,7 @@ impl UiState {
     /// merge partner to name.
     pub fn show_gift_toast(&mut self, hue: u16) {
         self.toast = Some(Toast { text: "gift claimed — new color!".to_string(), hue: Some(hue), merge_from: None, shown_at: Instant::now() });
-        self.note_used_hue(hue);
+        self.note_used_color(RecentColor { hue, sat: default_sat(), val: DEFAULT_VAL });
     }
 
     /// F13: called by the caller when it sees a fresh `inventory` row that
@@ -397,7 +411,7 @@ impl UiState {
     /// (neither of which has an event to join).
     pub fn show_hexa_toast(&mut self, hue: u16) {
         self.toast = Some(Toast { text: "Hexa event! colors pooled with 5 others".to_string(), hue: Some(hue), merge_from: None, shown_at: Instant::now() });
-        self.note_used_hue(hue);
+        self.note_used_color(RecentColor { hue, sat: default_sat(), val: DEFAULT_VAL });
     }
 
     /// Prominent acknowledgement for completing the six-player formation.
@@ -417,11 +431,12 @@ impl UiState {
         }
     }
 
-    /// Most-recently-used first, deduped, capped at 3.
-    pub fn note_used_hue(&mut self, hue: u16) {
-        self.last3.retain(|&h| h != hue);
-        self.last3.push_front(hue);
-        self.last3.truncate(3);
+    /// Most-recently-used first, exact-HSL deduped, capped at the modal's
+    /// 9×11 capacity. The footer simply previews the first three entries.
+    pub fn note_used_color(&mut self, color: RecentColor) {
+        self.recent_colors.retain(|&c| c != color);
+        self.recent_colors.push_front(color);
+        self.recent_colors.truncate(99);
     }
 
     /// F9.5 item 4 (author-caught, `known_bugs.md`: "the selected color is
@@ -429,23 +444,23 @@ impl UiState {
     /// ring with the caller's own starting/current hue the first time it's
     /// known, so a brand-new connection shows something there instead of
     /// staying empty until the player's first merge or swatch click. A no-op
-    /// once `last3` has any entry, so the caller can just call this every
+    /// once the recent history has any entry, so the caller can call this every
     /// frame after `me` becomes known rather than tracking its own
     /// seed-once flag.
-    pub fn seed_last3_once(&mut self, hue: u16) {
-        if self.last3.is_empty() {
-            self.last3.push_front(hue);
+    pub fn seed_recent_once(&mut self, color: RecentColor) {
+        if self.recent_colors.is_empty() {
+            self.recent_colors.push_front(color);
         }
     }
 
     /// F9.5 item 4 (author-caught: "reset account doesn't reset the last 3
     /// selected colors"): `reset_account` wipes the caller's entire
-    /// inventory down to one fresh hue, but `note_used_hue` alone would just
+    /// inventory down to one fresh hue, but prepending alone would just
     /// prepend that hue onto the EXISTING ring, leaving up to two
     /// now-meaningless pre-reset colors still showing. Clears first.
     pub fn note_reset_hue(&mut self, hue: u16) {
-        self.last3.clear();
-        self.last3.push_front(hue);
+        self.recent_colors.clear();
+        self.recent_colors.push_front(RecentColor { hue, sat: default_sat(), val: DEFAULT_VAL });
     }
 
     /// A hue's own remembered sat/val, or the canonical default if the
@@ -488,6 +503,10 @@ pub struct HudInfo<'a> {
     /// Seconds remaining until the F8 re-rank fires, if `config.next_rerank_at`
     /// is set and still in the future — drives the countdown banner.
     pub rerank_secs: Option<i64>,
+    /// The caller's own island's itch.io rate id, if set — feeds the footer
+    /// quick-access link field (`footer_link_edit_rect`), which syncs its
+    /// display buffer from this every frame it isn't focused.
+    pub link_id: Option<u32>,
 }
 
 #[derive(Default)]
@@ -580,15 +599,17 @@ fn center_btn_rect() -> Rectangle {
 /// swatches/eraser/lock built outward to its left (see below). Account/My
 /// Isle no longer flank it — they now sit next to `center_btn_rect` instead.
 fn name_field_rect() -> Rectangle {
-    let w = 150.0;
-    Rectangle::new((SCREEN_W - w) / 2.0, SCREEN_H - FOOTER_H + 7.0, w, 30.0)
+    // Widened from 150: shrinking `footer_link_edit_rect` (a 7-digit id
+    // needs far less room than a name) freed up space to its right.
+    let w = 170.0;
+    Rectangle::new(342.0, SCREEN_H - FOOTER_H + 7.0, w, 30.0)
 }
 
 /// Author-requested: icon-only (see `draw_footer`), sitting directly left of
 /// the name field.
 fn lock_btn_rect() -> Rectangle {
-    let nf = name_field_rect();
-    Rectangle::new(nf.x - 8.0 - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
+    let bb = brush_btn_rect();
+    Rectangle::new(bb.x - 4.0 - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
 }
 
 /// Author-requested: icon-only (see `draw_footer`), left of the lock toggle.
@@ -605,13 +626,34 @@ fn eraser_btn_rect() -> Rectangle {
 /// one-shot click/tap selection; middle-click remains the desktop shortcut.
 fn brush_btn_rect() -> Rectangle {
     let nf = name_field_rect();
-    Rectangle::new(nf.x + nf.width + 8.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
+    Rectangle::new(nf.x - 8.0 - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
+}
+
+fn recent_btn_rect() -> Rectangle {
+    let eb = eraser_btn_rect();
+    Rectangle::new(eb.x - 4.0 - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
 }
 
 fn last3_rect(i: usize) -> Rectangle {
-    let eb = eraser_btn_rect();
-    let group_x0 = eb.x - 8.0 - (2.0 * 34.0 + 30.0);
+    let rb = recent_btn_rect();
+    let group_x0 = rb.x - 4.0 - (2.0 * 34.0 + 30.0);
     Rectangle::new(group_x0 + i as f32 * 34.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
+}
+
+const RECENT_SWATCH: f32 = 42.0;
+const RECENT_GAP: f32 = 6.0;
+const RECENT_COLS: usize = 11;
+
+fn recent_swatch_rect(i: usize) -> Rectangle {
+    let o = overlay_rect();
+    let col = (i % RECENT_COLS) as f32;
+    let row = (i / RECENT_COLS) as f32;
+    Rectangle::new(
+        o.x + 39.0 + col * (RECENT_SWATCH + RECENT_GAP),
+        o.y + 58.0 + row * (RECENT_SWATCH + RECENT_GAP),
+        RECENT_SWATCH,
+        RECENT_SWATCH,
+    )
 }
 
 /// Author-requested: a footer button to open the caller's own island-info
@@ -624,12 +666,12 @@ fn my_island_btn_rect() -> Rectangle {
     Rectangle::new(cb.x - 8.0 - 56.0, SCREEN_H - FOOTER_H + 7.0, 56.0, 30.0)
 }
 
-/// Author-requested: trimmed from 80 to 60 wide (its label fits fine); now
-/// sits left of `my_island_btn_rect`, both grouped next to the Centre
-/// button instead of next to the name field.
+/// Author-requested: moved out of the footer and into the header, sitting
+/// directly left of the Export button (matching its height/y so the two
+/// read as one row of header controls).
 fn account_btn_rect() -> Rectangle {
-    let mb = my_island_btn_rect();
-    Rectangle::new(mb.x - 8.0 - 60.0, SCREEN_H - FOOTER_H + 7.0, 60.0, 30.0)
+    let export = export_btn_rect();
+    Rectangle::new(export.x - 8.0 - 60.0, 3.0, 60.0, 22.0)
 }
 
 fn overlay_rect() -> Rectangle {
@@ -714,6 +756,20 @@ fn link_edit_rect() -> Rectangle {
     Rectangle::new(o.x + 20.0, o.y + 180.0, 310.0, 32.0)
 }
 
+/// Author-requested: footer quick-access shortcut for the itch.io rate id —
+/// fills the gap left by moving the Account button into the header, so a
+/// player can set/see their island's jam link without opening the full My
+/// Isle popup. Shares `link_edit_input`/`link_edit_focused` with
+/// `link_edit_rect` above (same buffer, same typing handler in
+/// `handle_input`) rather than tracking a second one.
+fn footer_link_edit_rect() -> Rectangle {
+    // 60 wide: a submission id is always exactly 7 digits (see
+    // `handle_link_edit_typing`'s cap), so it never needs the room a free-
+    // text field would.
+    let mb = my_island_btn_rect();
+    Rectangle::new(mb.x - 8.0 - 60.0, SCREEN_H - FOOTER_H + 7.0, 60.0, 30.0)
+}
+
 /// Own-island popup only — the "Your link" row, clickable once a link is
 /// set (see `handle_input`'s own-popup block).
 fn link_row_rect() -> Rectangle {
@@ -733,6 +789,35 @@ fn typed_link_id(state: &UiState) -> Option<u32> {
         return None;
     }
     typed.parse().ok()
+}
+
+/// F9: digits-only typing for `link_edit_input`, submitting every keystroke
+/// that parses (no separate Set button). Shared by both places that can
+/// focus the field — the My Isle popup's own row and the footer's
+/// quick-access shortcut (`footer_link_edit_rect`) — so the two can never
+/// drift out of sync with each other. Capped at 7 digits: a raylib gamejam
+/// submission rate id is always exactly 7 (see `typed_link_id`), so a
+/// longer typed string could never be valid anyway.
+// Takes the buffer by its own `&mut String` (not `&mut UiState`) so callers
+// can invoke this while another field of `state` (e.g. `island_popup`) is
+// still borrowed — the popup call site needs exactly that.
+fn handle_link_edit_typing(rl: &mut RaylibHandle, input: &mut String, actions: &mut Actions) {
+    let mut changed = false;
+    while let Some(c) = rl.get_char_pressed() {
+        if c.is_ascii_digit() && input.len() < 7 {
+            input.push(c);
+            changed = true;
+        }
+    }
+    if rl.is_key_pressed(KeyboardKey::KEY_BACKSPACE) {
+        input.pop();
+        changed = true;
+    }
+    if changed {
+        if let Ok(id) = input.trim().parse::<u32>() {
+            actions.set_island_link = Some(id);
+        }
+    }
 }
 
 /// Author-requested: own-island popup only — pin the border to the caller's
@@ -898,6 +983,9 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             .min_by_key(|&h| world::hue_dist(cur_hue, h))
             .unwrap_or(cur_hue);
     }
+    if state.pending_select.is_none() {
+        state.set_tile_hsl(state.base_hue, info.brush.1, info.brush.2);
+    }
     let mut actions = Actions::default();
     let mouse = rl.get_mouse_position();
     let clicked = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT);
@@ -966,21 +1054,20 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     // state.last3`, which can't happen while this loop still holds `.iter()`
     // borrowed from it.
     let mut last3_clicked = None;
-    for (i, &hue) in state.last3.iter().enumerate() {
+    for (i, &color) in state.recent_colors.iter().take(3).enumerate() {
         if clicked && point_in(mouse, last3_rect(i)) {
-            last3_clicked = Some(hue);
+            last3_clicked = Some(color);
         }
     }
     // Re-clicking the ALREADY-selected color is a no-op: forcing the brush
     // back to that hue's exact value would silently wipe out any live Hue
     // slider nudge (e.g. dialing in a merge) the player currently has going.
-    if let Some(hue) = last3_clicked {
-        if hue != state.base_hue {
-            let (sat, val) = state.tile_hsl(hue);
-            actions.set_brush = Some((hue, sat.min(info.sat_cap), val));
-            state.base_hue = hue;
-            state.pending_select = Some(hue);
-            state.note_used_hue(hue);
+    if let Some(color) = last3_clicked {
+        if (color.hue, color.sat.min(info.sat_cap), color.val) != info.brush {
+            actions.set_brush = Some((color.hue, color.sat.min(info.sat_cap), color.val));
+            state.base_hue = info.hues.iter().copied().min_by_key(|&h| world::hue_dist(h, color.hue)).unwrap_or(color.hue);
+            state.pending_select = Some(color.hue);
+            state.note_used_color(color);
         }
         // Picking a color implies you want to paint with it, not erase or move.
         if state.tool == Tool::Eyedropper && state.finish_eyedropper() {
@@ -999,6 +1086,12 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         // and immediately close the overlay it just opened.
         return actions;
     }
+    if clicked && point_in(mouse, recent_btn_rect()) {
+        let opening = !state.recent_open;
+        state.close_all_modals();
+        state.recent_open = opening;
+        return actions;
+    }
     if clicked && point_in(mouse, lock_btn_rect()) && state.tool != Tool::Eyedropper {
         actions.set_lock = Some(!info.locked);
     }
@@ -1015,6 +1108,25 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     if clicked && point_in(mouse, my_island_btn_rect()) {
         actions.open_own_island = true;
         state.close_all_modals();
+    }
+
+    // Footer quick-access rate-id field (see `footer_link_edit_rect`): only
+    // reachable here, since My Isle open takes the early return above and
+    // hands typing to its own copy of this same field/handler.
+    let footer_link_field = footer_link_edit_rect();
+    if clicked {
+        state.link_edit_focused = point_in(mouse, footer_link_field);
+    }
+    if state.link_edit_focused {
+        handle_link_edit_typing(rl, &mut state.link_edit_input, &mut actions);
+    } else {
+        // Keep the buffer synced to server truth while nothing is editing
+        // it, so the field never shows a stale id (e.g. right after
+        // reconnecting as a different account).
+        let synced = info.link_id.map_or(String::new(), |id| id.to_string());
+        if state.link_edit_input != synced {
+            state.link_edit_input = synced;
+        }
     }
 
     // Name field: click to focus/blur (blur commits), Enter commits+blurs.
@@ -1151,22 +1263,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 state.link_edit_focused = point_in(mouse, field);
             }
             if state.link_edit_focused {
-                let mut changed = false;
-                while let Some(c) = rl.get_char_pressed() {
-                    if c.is_ascii_digit() && state.link_edit_input.len() < 10 {
-                        state.link_edit_input.push(c);
-                        changed = true;
-                    }
-                }
-                if rl.is_key_pressed(KeyboardKey::KEY_BACKSPACE) {
-                    state.link_edit_input.pop();
-                    changed = true;
-                }
-                if changed {
-                    if let Ok(id) = state.link_edit_input.trim().parse::<u32>() {
-                        actions.set_island_link = Some(id);
-                    }
-                }
+                handle_link_edit_typing(rl, &mut state.link_edit_input, &mut actions);
             }
             if clicked && point_in(mouse, border_set_btn_rect()) {
                 actions.set_island_border = true;
@@ -1177,6 +1274,30 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 } else {
                     actions.disable_island_border = true;
                 }
+            }
+        }
+        return actions;
+    }
+
+    if state.recent_open {
+        if modal_dismiss_clicked(mouse, clicked) {
+            state.recent_open = false;
+            return actions;
+        }
+        let selected = state.recent_colors.iter().enumerate().find_map(|(i, &color)| {
+            (clicked && point_in(mouse, recent_swatch_rect(i))).then_some(color)
+        });
+        if let Some(color) = selected {
+            let sat = color.sat.min(info.sat_cap);
+            actions.set_brush = Some((color.hue, sat, color.val));
+            state.base_hue = info.hues.iter().copied().min_by_key(|&h| world::hue_dist(h, color.hue)).unwrap_or(color.hue);
+            state.pending_select = Some(color.hue);
+            state.note_used_color(color);
+            state.recent_open = false;
+            if state.tool == Tool::Eyedropper && state.finish_eyedropper() {
+                actions.set_lock = Some(false);
+            } else {
+                state.tool = Tool::Paint;
             }
         }
         return actions;
@@ -1212,7 +1333,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 actions.set_brush = Some((hue, sat.min(info.sat_cap), val));
                 state.base_hue = hue;
                 state.pending_select = Some(hue);
-                state.note_used_hue(hue);
+                state.note_used_color(RecentColor { hue, sat, val });
             }
             // Picking a color implies you want to paint with it, not erase or move.
             if state.tool == Tool::Eyedropper && state.finish_eyedropper() {
@@ -1280,6 +1401,8 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
     draw_footer(d, state, info);
     if state.overlay_open {
         draw_overlay(d, state, info, mouse);
+    } else if state.recent_open {
+        draw_recent_overlay(d, state, mouse);
     } else if state.account_open {
         draw_account_overlay(d, state, info);
     } else if let Some(popup) = &state.island_popup {
@@ -1290,8 +1413,11 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         }
     } else if state.help_open {
         draw_help_overlay(d);
-    } else if let Some(title) = hovered_last3_title(state, mouse) {
-        draw_button_tooltip(d, title, &[], mouse);
+    } else if let Some((title, color)) = hovered_recent_footer(state, mouse) {
+        let rendered = world::hsv_color(color.hue, color.sat, color.val);
+        let hex = color_hex(rendered);
+        let hsl = format!("H: {}  S: {}%  L: {}%", color.hue, color.sat, color.val);
+        draw_button_tooltip(d, title, &[hex.as_str(), hsl.as_str()], mouse);
     } else if point_in(mouse, eraser_btn_rect()) {
         let (title, lines): (&str, &[&str]) = match state.tool {
             Tool::Paint => ("Paint", &["Click to cycle: Paint ->", "Eraser -> Move"]),
@@ -1436,9 +1562,15 @@ const BUTTON_TOOLTIPS: &[(fn() -> Rectangle, &str, &[&str])] = &[
     (center_btn_rect, "Isle Centre", &["Go back to your island"]),
     (world_centre_btn_rect, "World Centre", &["Zoom out to see", "the whole world"]),
     (inventory_btn_rect, "Colors", &["Inventory: stores every", "color you've discovered"]),
+    (recent_btn_rect, "Recent colors", &["Open your raw HSL", "color history"]),
     (lock_btn_rect, "Lock", &["Blocks cursor merging", "and central HEXA"]),
     (brush_btn_rect, "Eyedropper", &["Click or tap, then select", "a painted tile", "Merging is disabled while active"]),
     (account_btn_rect, "Account", &["Copy or import your ID,", "reset your account"]),
+    (
+        footer_link_edit_rect,
+        "Link your island",
+        &["Paste your raylib gamejam", "submission's rate id here.", "Other players clicking your", "island get sent to that page."],
+    ),
     (my_island_btn_rect, "My Isle", &["Get info on your island", "and set your project link"]),
     (export_btn_rect, "Export", &["Save a shareable image", "of your island"]),
 ];
@@ -1454,8 +1586,12 @@ fn hovered_button_tooltip(mouse: Vector2) -> Option<(&'static str, &'static [&'s
 /// silently excluded like the name field.
 const LAST3_TITLES: [&str; 3] = ["Last color used", "Last last color used", "Last last last color used"];
 
-fn hovered_last3_title(state: &UiState, mouse: Vector2) -> Option<&'static str> {
-    LAST3_TITLES.iter().enumerate().find(|&(i, _)| i < state.last3.len() && point_in(mouse, last3_rect(i))).map(|(_, &t)| t)
+fn hovered_recent_footer(state: &UiState, mouse: Vector2) -> Option<(&'static str, RecentColor)> {
+    LAST3_TITLES
+        .iter()
+        .zip(state.recent_colors.iter().take(3))
+        .enumerate()
+        .find_map(|(i, (&title, &color))| point_in(mouse, last3_rect(i)).then_some((title, color)))
 }
 
 /// Same tooltip visual language as `draw_island_tooltip` (small, glued near
@@ -1625,13 +1761,21 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo) {
     // Fixed-position right-side label rather than measuring text width —
     // the draw handle has no default-font `measure_text` (that's only on
     // `RaylibHandle`, unavailable once `begin_drawing` hands out its borrow).
+    // Shifted left from 548 to make room for the Account button now living
+    // in the header (see `account_btn_rect`).
     d.draw_text(
         &format!("{} / {} online", info.online, info.total),
-        548,
+        430,
         6,
         14,
         Color::LIGHTGRAY,
     );
+    // Author-requested: moved out of the footer, sitting directly left of
+    // the Export button.
+    let ab = account_btn_rect();
+    d.draw_rectangle_rec(ab, Color::new(40, 40, 48, 255));
+    d.draw_text("Account", ab.x as i32 + 8, ab.y as i32 + 6, 10, Color::RAYWHITE);
+
     let export = export_btn_rect();
     d.draw_rectangle_rec(export, Color::new(40, 40, 48, 255));
     draw_export_icon(d, export);
@@ -1669,9 +1813,9 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     d.draw_rectangle_rec(wcb, Color::new(40, 40, 48, 255));
     draw_globe_icon(d, wcb);
 
-    for (i, &hue) in state.last3.iter().enumerate() {
+    for (i, &color) in state.recent_colors.iter().take(3).enumerate() {
         let r = last3_rect(i);
-        d.draw_rectangle_rec(r, swatch_color(hue, state, info));
+        d.draw_rectangle_rec(r, world::hsv_color(color.hue, color.sat, color.val));
         d.draw_rectangle_lines_ex(r, 1.0, Color::new(200, 200, 200, 180));
     }
 
@@ -1704,6 +1848,10 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     d.draw_rectangle_rec(lb, if info.locked { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
     draw_lock_icon(d, lb, info.locked);
 
+    let rb = recent_btn_rect();
+    d.draw_rectangle_rec(rb, Color::new(40, 40, 48, 255));
+    d.draw_text("+", rb.x as i32 + 9, rb.y as i32 + 3, 24, Color::RAYWHITE);
+
     let nf = name_field_rect();
     d.draw_rectangle_rec(nf, Color::new(28, 28, 34, 255));
     d.draw_rectangle_lines_ex(nf, 1.0, if state.name_focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
@@ -1719,9 +1867,21 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     }
     draw_brush_icon(d, bb, world::hsv_color(info.brush.0, info.brush.1, info.brush.2));
 
-    let ab = account_btn_rect();
-    d.draw_rectangle_rec(ab, Color::new(40, 40, 48, 255));
-    d.draw_text("Account", ab.x as i32 + 8, ab.y as i32 + 9, 10, Color::RAYWHITE);
+    // Author-requested: footer quick-access rate-id field, left of My Isle
+    // (see `footer_link_edit_rect`'s doc comment) — same colored-by-validity
+    // convention as the popup's own "Your link" row (`typed_link_id`).
+    let fl = footer_link_edit_rect();
+    d.draw_rectangle_rec(fl, Color::new(28, 28, 34, 255));
+    let fl_border = if state.link_edit_focused {
+        Color::GOLD
+    } else if typed_link_id(state).is_some() {
+        Color::new(120, 180, 255, 255)
+    } else {
+        Color::new(90, 90, 96, 255)
+    };
+    d.draw_rectangle_lines_ex(fl, 1.0, fl_border);
+    let fl_shown = if state.link_edit_input.is_empty() && !state.link_edit_focused { "id" } else { &state.link_edit_input };
+    d.draw_text(fl_shown, fl.x as i32 + 6, fl.y as i32 + 8, 12, Color::RAYWHITE);
 
     let mb = my_island_btn_rect();
     d.draw_rectangle_rec(mb, Color::new(40, 40, 48, 255));
@@ -2146,6 +2306,35 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse:
     }
 }
 
+fn draw_recent_overlay(d: &mut impl RaylibDraw, state: &UiState, mouse: Vector2) {
+    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
+    let o = overlay_rect();
+    d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
+    d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
+    d.draw_text("Recent colors", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+
+    let close = overlay_close_rect();
+    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
+    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
+
+    let mut hovered = None;
+    for (i, &color) in state.recent_colors.iter().enumerate() {
+        let r = recent_swatch_rect(i);
+        d.draw_rectangle_rec(r, world::hsv_color(color.hue, color.sat, color.val));
+        d.draw_rectangle_lines_ex(r, 1.0, Color::new(200, 200, 210, 180));
+        if point_in(mouse, r) {
+            draw_crosshair(d, r, Color::WHITE);
+            hovered = Some(color);
+        }
+    }
+    if let Some(color) = hovered {
+        let rendered = world::hsv_color(color.hue, color.sat, color.val);
+        let hex = color_hex(rendered);
+        let hsl = format!("H: {}  S: {}%  L: {}%", color.hue, color.sat, color.val);
+        draw_button_tooltip(d, "Recent color", &[hex.as_str(), hsl.as_str()], mouse);
+    }
+}
+
 /// Copy/import ID (Cookie-Clicker-style account portability) + reset. Shares
 /// the inventory overlay's footprint/backdrop/close button but never draws
 /// alongside it (`draw` picks one or the other).
@@ -2411,19 +2600,14 @@ fn draw_title_screen(d: &mut impl RaylibDraw, state: &UiState, mouse: Vector2) {
     d.draw_rectangle_rounded(r, 0.45, 8, fill);
     d.draw_rectangle_rounded_lines(r, 0.45, 8, Color::new(40, 40, 48, 255));
 
-    // Pencil icon + label, centered as one group.
-    let icon = 24.0;
-    let gap = 10.0;
     // Warmed by `handle_input` every title frame; the fallback only covers
     // a draw happening before any input pass ever ran.
     let label_w = TITLE_LABEL_W.get().copied().unwrap_or(66);
-    let group_w = icon + gap + label_w as f32;
-    let x = r.x + (r.width - group_w) / 2.0;
+    let x = r.x + (r.width - label_w as f32) / 2.0;
     let cy = r.y + r.height / 2.0;
-    draw_pencil_icon(d, Rectangle::new(x, cy - icon / 2.0, icon, icon));
     d.draw_text(
         "Draw",
-        (x + icon + gap) as i32,
+        (x) as i32,
         (cy - TITLE_LABEL_SIZE as f32 / 2.0) as i32,
         TITLE_LABEL_SIZE,
         Color::new(20, 20, 26, 255),
@@ -2444,5 +2628,23 @@ mod tests {
 
         assert!(!state.arm_eyedropper(true));
         assert!(!state.finish_eyedropper());
+    }
+
+    #[test]
+    fn recent_colors_keep_raw_hsl_dedupe_and_cap_at_grid_size() {
+        let mut state = UiState::new();
+        for hue in 0..105 {
+            state.note_used_color(RecentColor { hue, sat: 40, val: 90 });
+        }
+        assert_eq!(state.recent_colors.len(), 99);
+        assert_eq!(state.recent_colors.front().unwrap().hue, 104);
+        assert_eq!(state.recent_colors.back().unwrap().hue, 6);
+
+        let raw_variant = RecentColor { hue: 104, sat: 55, val: 72 };
+        state.note_used_color(raw_variant);
+        assert_eq!(state.recent_colors.len(), 99);
+        assert_eq!(state.recent_colors.front(), Some(&raw_variant));
+        state.note_used_color(raw_variant);
+        assert_eq!(state.recent_colors.len(), 99);
     }
 }

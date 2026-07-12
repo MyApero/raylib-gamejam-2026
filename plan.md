@@ -124,7 +124,9 @@ pointing here).
 | `XP_TIME` | 1 | passive XP per `TIME_XP_PERIOD_SECS` tick, to every present user (P1, F9) |
 | `TIME_XP_PERIOD_SECS` | 60 | time-XP tick interval (P1, F9) |
 | `LEVEL_XP` | 100 | level = xp / LEVEL_XP |
-| `SAT_CAP(level)` | `min(100, 40 + 3*level)` | max brush saturation, percent |
+| `START_SAT` | 35 | saturation a new player's brush starts at — deliberately below the level-0 `SAT_CAP` so there's headroom to raise it without leveling up |
+| `START_VAL` | 90 | lightness/value a new player's brush starts at — paired with `START_SAT`, also what an unpainted island's border renders (matches the owner's actual starting color) |
+| `SAT_CAP(level)` | `min(100, 40 + 5*level)` | max brush saturation, percent |
 | `LONG_PRESS_MS` | 400 | tile-merge hold duration |
 | `LONG_PRESS_SLOP_PX` | 8 | max pointer travel during a long press |
 | `RERANK_PERIOD` | 300 s | island re-ranking interval (P1) |

@@ -14,6 +14,8 @@ pub struct MergeEvent {
     pub hue_a: u16,
     pub hue_b: u16,
     pub merged_hue: u16,
+    pub merged_sat: u8,
+    pub merged_val: u8,
 }
 
 impl __sdk::InModule for MergeEvent {
@@ -31,6 +33,8 @@ pub struct MergeEventCols {
     pub hue_a: __sdk::__query_builder::Col<MergeEvent, u16>,
     pub hue_b: __sdk::__query_builder::Col<MergeEvent, u16>,
     pub merged_hue: __sdk::__query_builder::Col<MergeEvent, u16>,
+    pub merged_sat: __sdk::__query_builder::Col<MergeEvent, u8>,
+    pub merged_val: __sdk::__query_builder::Col<MergeEvent, u8>,
 }
 
 impl __sdk::__query_builder::HasCols for MergeEvent {
@@ -44,6 +48,8 @@ impl __sdk::__query_builder::HasCols for MergeEvent {
             hue_a: __sdk::__query_builder::Col::new(table_name, "hue_a"),
             hue_b: __sdk::__query_builder::Col::new(table_name, "hue_b"),
             merged_hue: __sdk::__query_builder::Col::new(table_name, "merged_hue"),
+            merged_sat: __sdk::__query_builder::Col::new(table_name, "merged_sat"),
+            merged_val: __sdk::__query_builder::Col::new(table_name, "merged_val"),
         }
     }
 }

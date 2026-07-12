@@ -24,6 +24,9 @@ pub mod constants {
     /// limit (cursor spam is cheap), this just avoids flooding the socket.
     pub const CURSOR_SEND_HZ: f32 = 20.0;
     pub const LEVEL_XP: u64 = 100;
+    /// Single source of truth in the `shared` crate — see its doc comment
+    /// for why this is no longer hand-mirrored.
+    pub use shared::constants::{START_SAT, START_VAL};
     /// How far (degrees, either direction) the Hue slider may nudge the
     /// selected inventory hue. Single source of truth in the `shared`
     /// crate — the server is the actual enforcement point, this just keeps
@@ -237,9 +240,10 @@ pub fn level_of(xp: u64) -> u64 {
     xp / constants::LEVEL_XP
 }
 
-pub fn sat_cap(level: u64) -> u8 {
-    (40 + 3 * level).min(100) as u8
-}
+/// Single source of truth in the `shared` crate — both server and client
+/// must agree on the level->cap curve (previously hand-mirrored and had
+/// already drifted: server at `+5*level`, client still at `+3*level`).
+pub use shared::sat_cap;
 
 /// Circular hue distance in degrees (handles the 359->0 wraparound). Single
 /// source of truth in the `shared` crate — both server and client must
@@ -445,6 +449,14 @@ pub fn draw_plus_hint(d: &mut impl RaylibDraw, m: Vector2) {
     d.draw_circle(cx as i32, cy as i32, 8.0, Color::new(20, 20, 24, 220));
     d.draw_line_ex(Vector2::new(cx - 4.0, cy), Vector2::new(cx + 4.0, cy), 2.0, Color::RAYWHITE);
     d.draw_line_ex(Vector2::new(cx, cy - 4.0), Vector2::new(cx, cy + 4.0), 2.0, Color::RAYWHITE);
+}
+
+/// FPS readout matching the header's grey ("PRESS ESC for help", `Color::GRAY`)
+/// instead of raylib's own `draw_fps`, which hardcodes a green/yellow/red
+/// threshold color that clashes with the header theme. Shared by both
+/// clients so the two draw the exact same text/color/size.
+pub fn draw_fps_grey(d: &mut impl RaylibDraw, x: i32, y: i32, fps: u32) {
+    d.draw_text(&format!("{fps} FPS"), x, y, 12, Color::GRAY);
 }
 
 /// F9.6 item 3: heart icon for the island popup/tooltip's like count —

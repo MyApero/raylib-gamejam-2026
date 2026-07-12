@@ -69,6 +69,25 @@ pub mod constants {
     /// XP appear on `User.xp`), kept here anyway next to `HEXA_SIZE`/
     /// `HEXA_RADIUS` since all three are the F13 "canonical constants" set.
     pub const XP_HEXA: u64 = 150;
+
+    /// Saturation a new player's brush starts at — deliberately below the
+    /// level-0 `sat_cap` (see `SAT_CAP_BASE`) so there's immediate headroom
+    /// to raise it without leveling up.
+    pub const START_SAT: u8 = 35;
+    /// Lightness/value a new player's brush starts at. Paired with
+    /// `START_SAT` as the two components of a new player's canonical
+    /// starting color — also what the island-border seed-hue fallback
+    /// renders, so an unpainted island's border always matches its owner's
+    /// actual first color.
+    pub const START_VAL: u8 = 90;
+    /// Level-0 floor of `sat_cap`, and the base every `LEVEL_SAT_PER_LEVEL`
+    /// increment stacks onto. Previously hand-copied into both the server
+    /// and client with the per-level increment drifting apart (server had
+    /// already moved to 5, client was still at 3) — single source of truth
+    /// now, see `sat_cap` below.
+    pub const SAT_CAP_BASE: u8 = 40;
+    /// Saturation cap granted per level, on top of `SAT_CAP_BASE`.
+    pub const LEVEL_SAT_PER_LEVEL: u8 = 5;
 }
 
 /// Circular hue distance in degrees (handles the 359->0 wraparound). Server
@@ -77,6 +96,14 @@ pub mod constants {
 pub fn hue_dist(a: u16, b: u16) -> i32 {
     let diff = (a as i32 - b as i32).unsigned_abs() as i32;
     diff.min(360 - diff)
+}
+
+/// Max brush saturation (percent) unlocked at `level`. Single source of
+/// truth for the server (enforcement point) and both clients (slider caps,
+/// eyedropper clamp) — see `constants::SAT_CAP_BASE`/`LEVEL_SAT_PER_LEVEL`.
+pub fn sat_cap(level: u64) -> u8 {
+    (constants::SAT_CAP_BASE as u64 + constants::LEVEL_SAT_PER_LEVEL as u64 * level)
+        .min(100) as u8
 }
 
 /// Standard ease-in-out cubic curve, shared by every client-side motion

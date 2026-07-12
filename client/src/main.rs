@@ -226,6 +226,7 @@ fn pick_color_at(
     ) {
         world::EyedropperPick::Selected { hue, sat, val } => {
             let _ = ctx.reducers.set_brush(hue, sat, val);
+            ui_state.note_used_color(ui::RecentColor { hue, sat, val });
             true
         }
         world::EyedropperPick::Locked => {
@@ -400,6 +401,8 @@ fn main() {
     // so only rows inserted *after* that point are treated as "new".
     let mut known_inventory_ids: HashSet<u64> = HashSet::new();
     let mut inventory_seeded = false;
+    let mut known_merge_event_ids: HashSet<u64> = HashSet::new();
+    let mut merge_events_seeded = false;
     let mut known_hexa_event_ids: HashSet<u64> = HashSet::new();
     let mut hexa_events_seeded = false;
     // F9 level-up toast: `None` until the first frame `me` is known, so
@@ -537,6 +540,19 @@ fn main() {
         // when a new row for `me` appears. Runs before the HUD snapshot below
         // so a toast fired this frame is visible in this same frame's draw.
         if let Some(me) = me {
+            if !merge_events_seeded {
+                known_merge_event_ids = ctx.db.merge_event().iter().map(|event| event.id).collect();
+                merge_events_seeded = true;
+            } else {
+                for event in ctx.db.merge_event().iter() {
+                    if known_merge_event_ids.insert(event.id) && (event.a == me || event.b == me) {
+                        ui_state.note_used_color(ui::RecentColor { hue: event.merged_hue, sat: event.merged_sat, val: event.merged_val });
+                        if let Some(s) = &sfx {
+                            s.merge.play();
+                        }
+                    }
+                }
+            }
             if !hexa_events_seeded {
                 known_hexa_event_ids = ctx.db.hexa_event().iter().map(|event| event.id).collect();
                 hexa_events_seeded = true;
@@ -603,9 +619,19 @@ fn main() {
                                 .iter()
                                 .find(|e| e.at == inv.obtained_at && (e.a == me || e.b == me))
                                 .map(|e| if e.a == me { (e.hue_a, e.hue_b) } else { (e.hue_b, e.hue_a) });
-                            ui_state.show_merge_toast(inv.hue, &label, merge_from);
-                            if let Some(s) = &sfx {
-                                s.merge.play();
+                            let color = ctx
+                                .db
+                                .merge_event()
+                                .iter()
+                                .find(|e| e.at == inv.obtained_at && (e.a == me || e.b == me))
+                                .map(|e| ui::RecentColor { hue: e.merged_hue, sat: e.merged_sat, val: e.merged_val })
+                                .or_else(|| ctx.db.user().identity().find(&me).map(|u| ui::RecentColor { hue: inv.hue, sat: u.sat, val: u.val }))
+                                .unwrap_or(ui::RecentColor { hue: inv.hue, sat: world::sat_cap(0), val: 90 });
+                            ui_state.show_merge_toast(color, &label, merge_from);
+                            if merge_from.is_none() {
+                                if let Some(s) = &sfx {
+                                    s.merge.play();
+                                }
                             }
                         }
                     }
@@ -616,7 +642,7 @@ fn main() {
             // the first frame it's known — a no-op once it has anything, so a
             // connection with no merge yet doesn't leave the footer empty.
             if let Some(user) = ctx.db.user().identity().find(&me) {
-                ui_state.seed_last3_once(user.hue);
+                ui_state.seed_recent_once(ui::RecentColor { hue: user.hue, sat: user.sat, val: user.val });
             }
         }
 
@@ -717,6 +743,7 @@ fn main() {
                 hues: &hues,
                 show_token_import: false,
                 rerank_secs,
+                link_id: my_island(&ctx, me).and_then(|isl| isl.itch_rate_id),
             };
             let actions = ui::handle_input(&mut rl, &mut ui_state, &info);
             // Note: last-3 tracking happens inside `ui::handle_input` itself
@@ -1316,6 +1343,9 @@ fn main() {
             .flatten()
             .unwrap_or(Color::new(150, 150, 156, 255));
 
+        // Grabbed before `begin_drawing` hands out its mutable borrow —
+        // `get_fps` lives on `RaylibHandle`, not the draw handle.
+        let fps = rl.get_fps();
         let hover_takeable;
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::new(18, 18, 24, 255));
@@ -1354,9 +1384,9 @@ fn main() {
                 }
                 // Author-caught: sat/val used to be a fixed (85, 95),
                 // making the border a different shade than the owner's
-                // actual starting color. Matches `START_SAT`/100 exactly so
-                // it reads as literally "their first color", not a
-                // lookalike.
+                // actual starting color. Matches `START_SAT`/`START_VAL`
+                // exactly so it reads as literally "their first color", not
+                // a lookalike.
                 //
                 // Author-requested: an owner can override this default via
                 // `set_island_border` (pins to their current brush color) or
@@ -1369,7 +1399,7 @@ fn main() {
                     let (h, s, v) = world::unpack_hsv(packed);
                     Some(world::hsv_color(h, s, v))
                 } else {
-                    seed_hues.get(&island.owner).map(|&hue| world::hsv_color(hue, 40, 100))
+                    seed_hues.get(&island.owner).map(|&hue| world::hsv_color(hue, START_SAT, START_VAL))
                 };
                 if let Some(border_color) = border_color {
                     let r_f = ISLAND_RADIUS as f32;
@@ -1506,6 +1536,7 @@ fn main() {
                 hues: &hues,
                 show_token_import: false,
                 rerank_secs,
+                link_id: my_island(&ctx, me).and_then(|isl| isl.itch_rate_id),
             };
             if let Some(name) = export_name.as_deref() {
                 ui::draw_export_frame(&mut d, name);
@@ -1547,8 +1578,13 @@ fn main() {
             }
             // Author-requested: sits in the header band (drawn here, not inside
             // `ui::draw_header`, so it's still visible before `me`/the HUD
-            // itself exists) rather than floating in its own corner.
-            d.draw_fps(440, 4);
+            // itself exists) rather than floating in its own corner. Hidden
+            // on the title screen (nothing but the wordmark/Draw button
+            // should show there) and colored to match the header's grey
+            // rather than raylib's own green/yellow/red `draw_fps`.
+            if !ui_state.title_active {
+                world::draw_fps_grey(&mut d, 440, 4, fps);
+            }
         }
         // EndDrawing must happen before raylib can read the completed frame.
         drop(d);
