@@ -1801,7 +1801,7 @@ fn frame(state: &mut State) {
     }
 
     // View-space culling bounds, padded well past the screen edges.
-    let pad = (ISLAND_RADIUS as f32) * 2.0 * 5.0;
+    let pad = world::constants::VIEW_CULL_PAD;
     let top_left = state.rl.get_screen_to_world2D(Vector2::new(0.0, 0.0), state.camera);
     let bottom_right = state.rl.get_screen_to_world2D(Vector2::new(720.0, 720.0), state.camera);
     let (view_min_x, view_max_x) = (top_left.x - pad, bottom_right.x + pad);
@@ -1935,18 +1935,15 @@ fn frame(state: &mut State) {
             }
             let mine = me == Some(island.owner_hex.as_str());
             let unpainted_fill = world::unpainted_island_fill(island.owner_hex == world::COMMUNITY_OWNER_HEX);
-            // Mirrors `main.rs`: below `OVERVIEW_ZOOM_THRESHOLD` the
-            // island's cells are sub-pixel anyway — draw one flat hex for
-            // the whole island instead of 721 individual (and invisible)
-            // ones.
-            if camera.zoom < world::constants::OVERVIEW_ZOOM_THRESHOLD {
-                world::draw_hex(&mut d2, center, ISLAND_RADIUS as f32, unpainted_fill, None);
-            } else {
             // F9.5 (FPS at scale): point-lookup each rendered cell by its
             // packed id in the already-id-keyed `island_cells` map instead of
             // collecting a fresh (island_id, q, r) -> color HashMap from
             // EVERY island_cell row in the world every frame — cost is now
             // proportional to in-view cells, not total painted cells.
+            // No flat-hex low-zoom LOD switch here (removed — see
+            // `VIEW_CULL_PAD`'s doc comment in world.rs): it visibly
+            // disappeared islands instead of simplifying them when
+            // dezooming.
             for &(dq, dr) in world::island_offsets() {
                 let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
                 let id = world::island_cell_id(island_id, dq, dr);
@@ -1955,7 +1952,6 @@ fn frame(state: &mut State) {
                     world::hsv_color(h, s, v)
                 });
                 world::draw_hex(&mut d2, cell_world, 1.0, fill, show_tile_outline.then_some(Color::new(40, 40, 46, 255)));
-            }
             }
             // Author-caught: mirrors `main.rs` — sat/val is now
             // `START_SAT`/`START_VAL` exactly (was a fixed 85/95 lookalike

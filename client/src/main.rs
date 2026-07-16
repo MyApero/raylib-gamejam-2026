@@ -1346,7 +1346,7 @@ fn main() {
 
         // View-space culling bounds, padded well past the screen edges so
         // panning/zooming out doesn't pop islands in and out abruptly.
-        let pad = (ISLAND_RADIUS as f32) * 2.0 * 5.0;
+        let pad = world::constants::VIEW_CULL_PAD;
         let top_left = rl.get_screen_to_world2D(Vector2::new(0.0, 0.0), camera);
         let bottom_right = rl.get_screen_to_world2D(Vector2::new(720.0, 720.0), camera);
         let (view_min_x, view_max_x) = (top_left.x - pad, bottom_right.x + pad);
@@ -1502,18 +1502,15 @@ fn main() {
                 }
                 let mine = me == Some(island.owner);
                 let unpainted_fill = world::unpainted_island_fill(island.owner == Identity::ZERO);
-                // Below `OVERVIEW_ZOOM_THRESHOLD` the island's cells are
-                // sub-pixel anyway — draw one flat hex for the whole island
-                // instead of 721 individual (and invisible) ones.
-                if camera.zoom < world::constants::OVERVIEW_ZOOM_THRESHOLD {
-                    world::draw_hex(&mut d2, center, ISLAND_RADIUS as f32, unpainted_fill, None);
-                } else {
                 // F9.5 (FPS at scale): point-lookup each rendered cell by its
                 // packed id via the SDK's own unique-index cache instead of
                 // collecting a HashMap from EVERY island_cell row in the
                 // world every frame — cost is now proportional to in-view
                 // cells (this loop already skipped non-in-view islands
                 // above), not total painted cells across the whole world.
+                // No flat-hex low-zoom LOD switch here (removed — see
+                // `VIEW_CULL_PAD`'s doc comment): it visibly disappeared
+                // islands instead of simplifying them when dezooming.
                 for &(dq, dr) in world::island_offsets() {
                     let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
                     let id = world::island_cell_id(island.id, dq, dr);
@@ -1522,7 +1519,6 @@ fn main() {
                         world::hsv_color(h, s, v)
                     });
                     world::draw_hex(&mut d2, cell_world, 1.0, fill, show_tile_outline.then_some(Color::new(40, 40, 46, 255)));
-                }
                 }
                 // Author-caught: sat/val used to be a fixed (85, 95),
                 // making the border a different shade than the owner's

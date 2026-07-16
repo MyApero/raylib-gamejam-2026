@@ -102,13 +102,19 @@ pub mod constants {
     /// skipped — the author's "borderless far zoom" note picked ~4-6px, the
     /// executor settled on 5, later re-tuned by hand-testing to 20.
     pub const BORDERLESS_ZOOM_THRESHOLD: f32 = 20.0;
-    /// Below this zoom, an island's 721 interior cells are drawn as a
-    /// single flat hex instead of one `draw_hex` call per cell — at this
-    /// scale the individual cells are sub-pixel anyway, so the detail pass
-    /// is pure wasted draw calls once the world has many islands on
-    /// screen at once. Starting guess, same as `BORDERLESS_ZOOM_THRESHOLD`
-    /// — re-tune by hand-testing if the switch is too abrupt/early.
-    pub const OVERVIEW_ZOOM_THRESHOLD: f32 = 1.9;
+    /// World-unit margin past the screen edges within which an off-screen
+    /// island still renders, so panning/zooming doesn't pop islands in and
+    /// out right at the viewport edge. Replaces the old flat-hex low-zoom
+    /// LOD switch (drawing one hex instead of an island's 721 cells below a
+    /// zoom threshold), which caused islands to visibly disappear rather
+    /// than simplify when dezooming — removed in favor of always drawing
+    /// real cells and tuning the cull margin instead. Author-requested:
+    /// shrunk from `ISLAND_RADIUS * 2.0 * 5.0` (150, generous anti-pop-in
+    /// margin) to make the off-screen cull itself visibly observable while
+    /// testing, then hand-tuned to `ISLAND_RADIUS * 1.5` (22.5) — tight
+    /// enough to see the cull happen, with enough slack that an island's
+    /// edge isn't clipped mid-pan/zoom.
+    pub const VIEW_CULL_PAD: f32 = ISLAND_RADIUS as f32 * 1.5;
     /// F9.6 item 6: keyboard pan speed, world units/sec at zoom 1.0
     /// (divided by the current zoom so it feels like a constant SCREEN
     /// speed, same trick as the border-thickness fix above). Q/E zoom rate
