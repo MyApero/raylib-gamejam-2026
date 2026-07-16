@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
+use shared::constants::{START_SAT, START_VAL};
 use spacetimedb_commitlog::Decoder;
 use spacetimedb_commitlog::payload::txdata::{self, Visitor};
 use spacetimedb_datastore::system_tables::*;
@@ -6,7 +7,7 @@ use spacetimedb_paths::FromPathUnchecked;
 use spacetimedb_paths::server::CommitLogDir;
 use spacetimedb_primitives::TableId;
 use spacetimedb_sats::buffer::BufReader;
-use spacetimedb_sats::{AlgebraicType, ProductType, ProductValue, bsatn};
+use spacetimedb_sats::{AlgebraicType, AlgebraicValue, ProductType, ProductValue, bsatn};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -19,8 +20,20 @@ const ST_TABLE_ID: TableId = TableId(1);
 const ST_COLUMN_ID: TableId = TableId(2);
 // Version 2 retains the island id and island placement mutations. Version 1
 // saved only a cell's island-local q/r, which is not enough to reconstruct
-// its world position once more than one island exists.
-const HISTORY_MAGIC: &[u8] = b"HEXELHIST\x02";
+// its world position once more than one island exists. Version 3 resolves
+// each island-insert event's border color (owner's `border_color` pin, else
+// their seed hue at that point in the log) into the previously-unused
+// `color` field of kind-5 records — replay used to fall back to a LIVE
+// lookup for this, which came up empty (flat gray border) for any island
+// since deleted (`admin_delete_island`/`delete_account` remove the owner's
+// `Inventory` rows too, so nothing live is left to resolve from). Must stay
+// in sync with `client/src/bin/web.rs`'s `RECOVERED_HISTORY_MAGIC`.
+const HISTORY_MAGIC: &[u8] = b"HEXELHIST\x03";
+// Mirrors `client/src/bin/web.rs`'s `UNKNOWN_BORDER_COLOR` — a kind-5
+// record's `color` when neither an explicit `border_color` pin nor the
+// owner's seed hue could be resolved at extraction time (never a valid
+// packed HSV value, so it's an unambiguous sentinel).
+const UNKNOWN_BORDER_COLOR: u32 = u32::MAX;
 
 #[derive(Clone, Copy)]
 struct HistoryEvent {
@@ -195,6 +208,53 @@ struct State {
     output_bytes: u64,
     pending_inserts: Vec<HistoryEvent>,
     pending_deletes: Vec<HistoryEvent>,
+    /// Each owner's current SEED hue (`inventory` row with
+    /// `obtained_with.is_none()`), kept live as the log is walked — mirrors
+    /// the client's own `seed_hues` lookup, needed so an `island` insert
+    /// event can resolve its border's seed-hue fallback as of THAT point in
+    /// history. Keyed by the seed row's OWN `id`, not just its hue: the
+    /// commitlog visits every INSERT in a transaction before any DELETE
+    /// (see `flush_replay_events`'s comment), so `reset_account` — which
+    /// deletes the old seed row and inserts a new one in the SAME
+    /// transaction — would otherwise have the delete (of the OLD row) fire
+    /// after the insert (of the NEW row) and wipe the entry that insert just
+    /// set. Storing the id lets the delete handler recognize "this is the
+    /// row I'm currently tracking" and leave a fresher same-transaction
+    /// insert alone. NOT persisted across a checkpoint resume: a resumed run
+    /// starts this map empty, so any `island` insert processed before the
+    /// map has re-observed that owner's seed row resolves to
+    /// `UNKNOWN_BORDER_COLOR` instead. Only matters when resuming a partial
+    /// run; a from-scratch extraction always sees every `inventory` insert
+    /// in order.
+    owner_seed_hue: BTreeMap<AlgebraicValue, (u64, u16)>,
+}
+
+fn pack_hsv(h: u16, s: u8, v: u8) -> u32 {
+    ((h as u32) << 16) | ((s as u32) << 8) | (v as u32)
+}
+
+/// `None` always encodes as an empty product (SATS' unit type), regardless
+/// of which sum tag SpacetimeDB happens to assign "some" vs "none" — this
+/// checks the payload shape instead of hardcoding a tag index.
+fn option_is_none(value: &AlgebraicValue) -> Result<bool> {
+    match value {
+        AlgebraicValue::Sum(sum) => Ok(matches!(
+            sum.value.as_ref(),
+            AlgebraicValue::Product(product) if product.elements.is_empty()
+        )),
+        other => bail!("expected an Option field, found {other:?}"),
+    }
+}
+
+fn option_u32(value: &AlgebraicValue) -> Result<Option<u32>> {
+    match value {
+        AlgebraicValue::Sum(sum) => match sum.value.as_ref() {
+            AlgebraicValue::Product(product) if product.elements.is_empty() => Ok(None),
+            AlgebraicValue::U32(inner) => Ok(Some(*inner)),
+            other => bail!("expected an Option<u32> field, found {other:?}"),
+        },
+        other => bail!("expected an Option field, found {other:?}"),
+    }
 }
 
 impl State {
@@ -404,16 +464,112 @@ impl State {
                 r: i32_field("r")?,
                 color: u32_field("color")?,
             },
-            Some("island") => HistoryEvent {
-                kind: if is_insert { 5 } else { 4 },
-                island_id: u32_field("id")?,
-                q: u32_field("slot")? as i32,
-                r: 0,
-                color: 0,
-            },
+            Some("island") => {
+                // Resolved once here rather than left for replay to look up
+                // live: an island's owner and `border_color` pin at THIS
+                // point in history may no longer exist in the live database
+                // (deleted since), so the border color has to travel with
+                // the event itself. Only meaningful for inserts — a delete
+                // event's `color` is unused, same as before.
+                let color = if is_insert {
+                    let border_color = match field("border_color") {
+                        Some(value) => option_u32(value)?,
+                        None => bail!(
+                            "island row is missing border_color at transaction {}",
+                            self.current_offset
+                        ),
+                    };
+                    border_color.unwrap_or_else(|| {
+                        field("owner")
+                            .and_then(|owner| self.owner_seed_hue.get(owner))
+                            .map(|&(_, hue)| pack_hsv(hue, START_SAT, START_VAL))
+                            .unwrap_or(UNKNOWN_BORDER_COLOR)
+                    })
+                } else {
+                    0
+                };
+                HistoryEvent {
+                    kind: if is_insert { 5 } else { 4 },
+                    island_id: u32_field("id")?,
+                    q: u32_field("slot")? as i32,
+                    r: 0,
+                    color,
+                }
+            }
             _ => unreachable!("validated by table_is_replayable"),
         };
         Ok(Some(event))
+    }
+
+    /// Keeps `owner_seed_hue` current as the log is walked — called on every
+    /// row, a no-op for anything but `inventory`'s SEED row
+    /// (`obtained_with.is_none()`; exactly one exists per owner at a time,
+    /// replaced wholesale by `reset_account`'s reseed). Must run before
+    /// `record_replay_event` sees the SAME row so an `island` insert in the
+    /// same transaction as a brand-new owner's seed row (`client_connected`
+    /// inserts `inventory` before `island`) can already resolve it.
+    fn track_inventory_seed(
+        &mut self,
+        table_id: TableId,
+        row: &ProductValue,
+        operation: &str,
+    ) -> Result<()> {
+        if self.table_names.get(&table_id).map(String::as_str) != Some("inventory") {
+            return Ok(());
+        }
+        let columns = self.columns.get(&table_id).expect("schema was decoded");
+        let field = |name| {
+            columns
+                .iter()
+                .find_map(|(index, column)| (column.name == name).then(|| row.elements.get(*index)))
+                .flatten()
+        };
+        let is_seed = match field("obtained_with") {
+            Some(value) => option_is_none(value)?,
+            None => bail!(
+                "inventory row is missing obtained_with at transaction {}",
+                self.current_offset
+            ),
+        };
+        if !is_seed {
+            return Ok(());
+        }
+        let Some(owner) = field("owner").cloned() else {
+            bail!(
+                "inventory row is missing owner at transaction {}",
+                self.current_offset
+            );
+        };
+        let id = match field("id") {
+            Some(AlgebraicValue::U64(value)) => *value,
+            _ => bail!(
+                "inventory.id has an unexpected shape at transaction {}",
+                self.current_offset
+            ),
+        };
+        let hue = match field("hue") {
+            Some(AlgebraicValue::U16(value)) => *value,
+            _ => bail!(
+                "inventory.hue has an unexpected shape at transaction {}",
+                self.current_offset
+            ),
+        };
+        match operation {
+            "insert" => {
+                self.owner_seed_hue.insert(owner, (id, hue));
+            }
+            "delete" => {
+                // Only clear if this delete is for the row currently
+                // tracked — a same-transaction insert of a REPLACEMENT seed
+                // row (already applied above, since inserts are visited
+                // first) must survive the old row's trailing delete.
+                if self.owner_seed_hue.get(&owner).is_some_and(|&(current_id, _)| current_id == id) {
+                    self.owner_seed_hue.remove(&owner);
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
     }
 
     fn record_replay_event(
@@ -497,6 +653,7 @@ impl Visitor for State {
                 return Ok(());
             }
             let row = self.decode_dynamic(table_id, reader)?;
+            self.track_inventory_seed(table_id, &row, "insert")?;
             self.record_replay_event(table_id, &row, "insert")
         })()
         .map_err(Into::into)
@@ -533,6 +690,7 @@ impl Visitor for State {
                 return Ok(());
             }
             let row = self.decode_dynamic(table_id, reader)?;
+            self.track_inventory_seed(table_id, &row, "delete")?;
             self.record_replay_event(table_id, &row, "delete")
         })()
         .map_err(Into::into)

@@ -384,19 +384,31 @@ fn main() {
     });
     let subscription_ready = Arc::new(AtomicBool::new(false));
     let subscription_ready_callback = Arc::clone(&subscription_ready);
+    let connection_ready = Arc::new(AtomicBool::new(false));
+    let connection_failed = Arc::new(AtomicBool::new(false));
+    let connection_ready_callback = Arc::clone(&connection_ready);
+    let connection_failed_callback = Arc::clone(&connection_failed);
+    let connection_ready_error = Arc::clone(&connection_ready);
+    let connection_failed_error = Arc::clone(&connection_failed);
+    let connection_ready_disconnect = Arc::clone(&connection_ready);
+    let connection_failed_disconnect = Arc::clone(&connection_failed);
     let ctx = DbConnection::builder()
-        .on_connect(|_ctx, _identity, token| {
+        .on_connect(move |_ctx, _identity, token| {
+            connection_ready_callback.store(true, Ordering::Release);
+            connection_failed_callback.store(false, Ordering::Release);
             if let Err(e) = creds_store().save(token) {
                 eprintln!("Failed to save credentials: {e:?}");
             }
         })
-        .on_connect_error(|_ctx, err| {
+        .on_connect_error(move |_ctx, err| {
+            connection_ready_error.store(false, Ordering::Release);
+            connection_failed_error.store(true, Ordering::Release);
             eprintln!("Connection error: {err:?}");
-            std::process::exit(1);
         })
-        .on_disconnect(|_ctx, err| {
+        .on_disconnect(move |_ctx, err| {
+            connection_ready_disconnect.store(false, Ordering::Release);
+            connection_failed_disconnect.store(true, Ordering::Release);
             eprintln!("Disconnected: {err:?}");
-            std::process::exit(0);
         })
         .with_token(creds_store().load().expect("Error loading credentials"))
         .with_database_name(DB_NAME)
@@ -404,13 +416,14 @@ fn main() {
         .build()
         .expect("Failed to connect");
 
+    let subscription_failed_callback = Arc::clone(&connection_failed);
     ctx.subscription_builder()
         .on_applied(move |_ctx| {
             subscription_ready_callback.store(true, Ordering::Release);
         })
-        .on_error(|_ctx, err| {
+        .on_error(move |_ctx, err| {
+            subscription_failed_callback.store(true, Ordering::Release);
             eprintln!("Subscription failed: {err}");
-            std::process::exit(1);
         })
         .subscribe([
             "SELECT * FROM config",
@@ -528,6 +541,7 @@ fn main() {
     // delayed release event arrives, or they were never really down).
     let mut was_focused = true;
     let mut mouse_state_stale = false;
+    let mut frame_tick_error_reported = false;
     while !rl.window_should_close() {
         let focused_now = rl.is_window_focused();
         if focused_now && !was_focused {
@@ -542,16 +556,36 @@ fn main() {
             mouse_state_stale = false;
         }
         if let Err(e) = ctx.frame_tick() {
-            eprintln!("frame_tick: {e}");
-            break;
+            connection_failed.store(true, Ordering::Release);
+            connection_ready.store(false, Ordering::Release);
+            if !frame_tick_error_reported {
+                eprintln!("frame_tick: {e}");
+                frame_tick_error_reported = true;
+            }
+        } else {
+            frame_tick_error_reported = false;
         }
 
         let me = ctx.try_identity();
         let now = Timestamp::now();
-        if replay_clock.is_none()
-            && replay_request.is_some()
-            && subscription_ready.load(Ordering::Acquire)
-        {
+        let initial_subscription_ready = subscription_ready.load(Ordering::Acquire);
+        let startup_connected = connection_ready.load(Ordering::Acquire);
+        let startup_connection_failed = connection_failed.load(Ordering::Acquire);
+        let startup_ready = startup_connected
+            && !startup_connection_failed
+            && initial_subscription_ready
+            && me.is_some_and(|me| {
+                ctx.db.user().identity().find(&me).is_some()
+                    && my_island(&ctx, me).is_some()
+                    && ctx.db.inventory().iter().any(|row| row.owner == me)
+            });
+        ui_state.set_startup_progress(
+            startup_connected,
+            startup_connection_failed,
+            startup_ready,
+            ctx.db.island().count() as usize,
+        );
+        if replay_clock.is_none() && replay_request.is_some() && initial_subscription_ready {
             let mut timestamps = Vec::new();
             timestamps.extend(
                 ctx.db
@@ -1598,7 +1632,7 @@ fn main() {
 
         // View-space culling bounds, padded well past the screen edges so
         // panning/zooming out doesn't pop islands in and out abruptly.
-        let pad = (ISLAND_RADIUS as f32) * 2.0 * 5.0;
+        let pad = world::constants::VIEW_CULL_PAD;
         let top_left = rl.get_screen_to_world2D(Vector2::new(0.0, 0.0), camera);
         let bottom_right = rl.get_screen_to_world2D(Vector2::new(720.0, 720.0), camera);
         let (view_min_x, view_max_x) = (top_left.x - pad, bottom_right.x + pad);
@@ -1783,43 +1817,40 @@ fn main() {
                 }
                 let mine = me == Some(island.owner);
                 let unpainted_fill = world::unpainted_island_fill(island.owner == Identity::ZERO);
-                // Below `OVERVIEW_ZOOM_THRESHOLD` the island's cells are
-                // sub-pixel anyway — draw one flat hex for the whole island
-                // instead of 721 individual (and invisible) ones.
-                if !replay_mode && camera.zoom < world::constants::OVERVIEW_ZOOM_THRESHOLD {
-                    world::draw_hex(&mut d2, center, ISLAND_RADIUS as f32, unpainted_fill, None);
-                } else {
-                    // F9.5 (FPS at scale): point-lookup each rendered cell by its
-                    // packed id via the SDK's own unique-index cache instead of
-                    // collecting a HashMap from EVERY island_cell row in the
-                    // world every frame — cost is now proportional to in-view
-                    // cells (this loop already skipped non-in-view islands
-                    // above), not total painted cells across the whole world.
-                    for &(dq, dr) in world::island_offsets() {
-                        let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
-                        let id = world::island_cell_id(island.id, dq, dr);
-                        let fill = ctx
-                            .db
-                            .island_cell()
-                            .id()
-                            .find(&id)
-                            .filter(|c| {
-                                replay_clock.as_ref().is_none_or(|clock| {
-                                    clock.is_visible(c.painted_at.to_micros_since_unix_epoch())
-                                })
+                // F9.5 (FPS at scale): point-lookup each rendered cell by its
+                // packed id via the SDK's own unique-index cache instead of
+                // collecting a HashMap from EVERY island_cell row in the
+                // world every frame — cost is now proportional to in-view
+                // cells (this loop already skipped non-in-view islands
+                // above), not total painted cells across the whole world.
+                for &(dq, dr) in world::island_offsets() {
+                    let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
+                    let id = world::island_cell_id(island.id, dq, dr);
+                    let fill = ctx
+                        .db
+                        .island_cell()
+                        .id()
+                        .find(&id)
+                        .filter(|c| {
+                            replay_clock.as_ref().is_none_or(|clock| {
+                                clock.is_visible(c.painted_at.to_micros_since_unix_epoch())
                             })
-                            .map_or(unpainted_fill, |c| {
-                                let (h, s, v) = world::unpack_hsv(c.color);
-                                world::hsv_color(h, s, v)
-                            });
-                        world::draw_hex(
-                            &mut d2,
-                            cell_world,
-                            1.0,
-                            fill,
-                            show_tile_outline.then_some(Color::new(40, 40, 46, 255)),
-                        );
-                    }
+                        })
+                        .map(|c| {
+                            let (h, s, v) = world::unpack_hsv(c.color);
+                            world::hsv_color(h, s, v)
+                        })
+                        .or(unpainted_fill);
+                    let Some(fill) = fill else {
+                        continue;
+                    };
+                    world::draw_hex(
+                        &mut d2,
+                        cell_world,
+                        1.0,
+                        fill,
+                        show_tile_outline.then_some(Color::new(40, 40, 46, 255)),
+                    );
                 }
                 // Author-caught: sat/val used to be a fixed (85, 95),
                 // making the border a different shade than the owner's
@@ -2090,6 +2121,12 @@ fn main() {
                     }
                 }
             }
+        }
+        // The title/menu must exist before SpacetimeDB has even supplied an
+        // identity. Once identity is available the normal HUD branch above
+        // draws this same shared title function through `ui::draw`.
+        if ui_state.title_active && me.is_none() && !replay_mode {
+            ui::draw_title(&mut d, &ui_state, mouse_screen);
         }
         if export_name.is_none() && !replay_mode {
             if ui_state.tool == ui::Tool::Erase {

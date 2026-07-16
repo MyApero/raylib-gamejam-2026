@@ -647,6 +647,7 @@ name = "history-extractor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "shared",
  "spacetimedb-commitlog",
  "spacetimedb-datastore",
  "spacetimedb-fs-utils",
@@ -1216,6 +1217,10 @@ dependencies = [
  "digest",
  "keccak",
 ]
+
+[[package]]
+name = "shared"
+version = "0.1.0"
 
 [[package]]
 name = "shlex"

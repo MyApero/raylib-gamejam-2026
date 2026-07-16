@@ -56,8 +56,17 @@ use std::os::raw::c_char;
 use std::time::{Duration, Instant};
 
 const RECOVERED_HISTORY_PATH: &str = "/hexel-tile-history.bin";
-const RECOVERED_HISTORY_MAGIC: &[u8] = b"HEXELHIST\x02";
+// Version 3: a kind-5 (island insert) record's `color` field now carries the
+// island's resolved border color as of that point in history (owner's
+// `border_color` pin, else their seed hue) instead of always 0 — see
+// `tools/history-extractor`'s matching `HISTORY_MAGIC` bump for why replay
+// needs this baked in rather than resolved from live tables.
+const RECOVERED_HISTORY_MAGIC: &[u8] = b"HEXELHIST\x03";
 const RECOVERED_HISTORY_RECORD_BYTES: u64 = 25;
+// Mirrors `tools/history-extractor`'s `UNKNOWN_BORDER_COLOR` — never a valid
+// packed HSV value, so it unambiguously means "the extractor couldn't
+// resolve this island's border color at that point in history".
+const UNKNOWN_BORDER_COLOR: u32 = u32::MAX;
 
 unsafe extern "C" {
     fn emscripten_run_script_string(script: *const c_char) -> *const c_char;
@@ -85,6 +94,8 @@ const TIMELAPSE_EXPORT_DURATION_SECS: f32 = 15.0;
 /// client/web/game.html.
 #[derive(Deserialize, Default)]
 struct FrameData {
+    #[serde(default)]
+    status: String,
     #[serde(default)]
     identity: Option<String>,
     #[serde(default)]
@@ -932,6 +943,16 @@ struct RecoveredReplay {
     /// Current slot for every island at this point in the recovered event
     /// stream. This also follows re-ranks instead of using today's layout.
     island_slots: HashMap<u32, u32>,
+    /// Each island's border color as resolved by the extractor at its most
+    /// recent insert event up to this point in history (owner's
+    /// `border_color` pin, else their seed hue) — never cleared on a kind-4
+    /// delete, same as `island_cells`/`island_slots`: a stale entry is
+    /// harmless since `display_slot` already hides anything not currently
+    /// in `island_slots`, and `id` is `#[auto_inc]` so ids are never reused.
+    /// This is what makes a deleted island's border still render correctly
+    /// when scrubbing back to before its deletion — `state.tables.islands`
+    /// (live) has nothing left to look up by then.
+    island_border: HashMap<u32, u32>,
     /// `None` replays the whole world; `Some(id)` retains only that island.
     island_filter: Option<u32>,
 }
@@ -999,6 +1020,7 @@ impl RecoveredReplay {
             island_cells: HashMap::new(),
             margin_cells: HashMap::new(),
             island_slots: HashMap::new(),
+            island_border: HashMap::new(),
             island_filter,
         };
         replay.reset()?;
@@ -1016,6 +1038,7 @@ impl RecoveredReplay {
         self.island_cells.clear();
         self.margin_cells.clear();
         self.island_slots.clear();
+        self.island_border.clear();
         Ok(())
     }
 
@@ -1063,6 +1086,7 @@ impl RecoveredReplay {
                 }
                 5 if include_island => {
                     self.island_slots.insert(island_id, q as u32);
+                    self.island_border.insert(island_id, color);
                 }
                 0..=5 => {}
                 _ => return Err(format!("replay history has invalid event kind {kind}")),
@@ -1105,6 +1129,10 @@ struct State {
     rl: RaylibHandle,
     thread: RaylibThread,
     my_identity: Option<String>,
+    /// True only after an InitialSubscription message has been fully parsed
+    /// into `tables`. SpacetimeDB applies that initial snapshot atomically;
+    /// subsequent TransactionUpdates can then stream normally.
+    subscription_ready: bool,
     tables: Tables,
     camera: Camera2D,
     centered_on_island: bool,
@@ -1217,6 +1245,7 @@ fn handle_message(state: &mut State, raw: &str) {
         if let Some(db_update) = initial.get("database_update") {
             state.tables.apply(db_update);
         }
+        state.subscription_ready = true;
     } else if let Some(tx) = msg.get("TransactionUpdate") {
         // Received for our *own* reducer calls (we're the caller). A
         // rejected call (e.g. rate limit) carries `status: {"Failed": ..}`
@@ -1360,6 +1389,12 @@ fn frame(state: &mut State) {
     // One JS call pulls in everything the socket received since last frame.
     let raw = run_js("window.stdb ? window.stdb.frame() : '{}'");
     let data: FrameData = serde_json::from_str(&raw).unwrap_or_default();
+    let connection_open = data.status == "open";
+    if !connection_open {
+        // Do not let stale rows from a previous socket make Draw reappear
+        // during a reconnect; the replacement snapshot must land first.
+        state.subscription_ready = false;
+    }
     state.now_micros = data.now_micros;
     if state.my_identity.is_none() {
         state.my_identity = data.identity.as_deref().map(normalize_identity);
@@ -1367,6 +1402,23 @@ fn frame(state: &mut State) {
     for msg in &data.msgs {
         handle_message(state, msg);
     }
+    let startup_ready = connection_open
+        && state.subscription_ready
+        && state.my_identity.as_deref().is_some_and(|me| {
+            state.tables.users.contains_key(me)
+                && my_island(&state.tables, me).is_some()
+                && state
+                    .tables
+                    .inventory
+                    .values()
+                    .any(|row| row.owner_hex == me)
+        });
+    state.ui_state.set_startup_progress(
+        connection_open,
+        data.status == "closed",
+        startup_ready,
+        state.tables.islands.len(),
+    );
     // Author follow-up (2026-07-12): a rejected Import — the current account
     // and connection are untouched (see `importToken` in game.html), so this
     // is just user feedback, not a reconnect.
@@ -1374,62 +1426,8 @@ fn frame(state: &mut State) {
         state.ui_state.show_info_toast(err);
     }
 
-    let replay_mouse = state.rl.get_mouse_position();
-    let replay_click = state.replay_clock.is_some()
-        && state
-            .rl
-            .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT);
-    let record_replay =
-        replay_click && replay::record_rect().check_collision_point_rec(replay_mouse);
-    let gif_replay = replay_click && replay::gif_rect().check_collision_point_rec(replay_mouse);
-    let replay_own_island =
-        replay_click && replay::island_only_rect().check_collision_point_rec(replay_mouse);
-    if replay_own_island {
-        if let Some(me) = state.my_identity.clone() {
-            if let Some((_, island_id)) = my_island(&state.tables, &me) {
-                start_replay(state, Some(island_id));
-            } else {
-                state
-                    .ui_state
-                    .show_info_toast("no island is available for replay".to_string());
-            }
-        }
-    }
-    if record_replay && !state.replay_recording {
-        // A recording is an export of the complete selected replay, not just
-        // whatever segment happened to be on screen when Record was pressed.
-        let island_filter = state
-            .recovered_replay
-            .as_ref()
-            .and_then(|history| history.island_filter);
-        start_replay(state, island_filter);
-        state.replay_recording = true;
-        run_js("window.stdb && window.stdb.startReplayRecording()");
-    }
     let mut stop_replay_recording = false;
     let mut finish_gif_recording = false;
-    if gif_replay && !state.gif_recording {
-        // GIF mode always focuses an island. If the replay is currently the
-        // whole world, default to the signed-in player's island so export is
-        // one click after choosing Replay.
-        let island_filter = state
-            .recovered_replay
-            .as_ref()
-            .and_then(|history| history.island_filter)
-            .or_else(|| {
-                state
-                    .my_identity
-                    .as_deref()
-                    .and_then(|me| my_island(&state.tables, me).map(|(_, id)| id))
-            });
-        if let Some(island_id) = island_filter {
-            start_gif_export(state, island_id);
-        } else {
-            state
-                .ui_state
-                .show_info_toast("select an island before exporting a GIF".to_string());
-        }
-    }
     let close_replay = state
         .replay_clock
         .as_mut()
@@ -2515,7 +2513,7 @@ fn frame(state: &mut State) {
     }
 
     // View-space culling bounds, padded well past the screen edges.
-    let pad = (ISLAND_RADIUS as f32) * 2.0 * 5.0;
+    let pad = world::constants::VIEW_CULL_PAD;
     let top_left = state
         .rl
         .get_screen_to_world2D(Vector2::new(0.0, 0.0), state.camera);
@@ -2700,45 +2698,39 @@ fn frame(state: &mut State) {
                 let mine = me == Some(island.owner_hex.as_str());
                 let unpainted_fill =
                     world::unpainted_island_fill(island.owner_hex == world::COMMUNITY_OWNER_HEX);
-                // Mirrors `main.rs`: below `OVERVIEW_ZOOM_THRESHOLD` the
-                // island's cells are sub-pixel anyway — draw one flat hex for
-                // the whole island instead of 721 individual (and invisible)
-                // ones.
-                if recovered_history.is_some()
-                    || (!replay_mode && camera.zoom < world::constants::OVERVIEW_ZOOM_THRESHOLD)
-                {
-                    world::draw_hex(&mut d2, center, ISLAND_RADIUS as f32, unpainted_fill, None);
-                } else {
-                    // F9.5 (FPS at scale): point-lookup each rendered cell by its
-                    // packed id in the already-id-keyed `island_cells` map instead of
-                    // collecting a fresh (island_id, q, r) -> color HashMap from
-                    // EVERY island_cell row in the world every frame — cost is now
-                    // proportional to in-view cells, not total painted cells.
-                    for &(dq, dr) in world::island_offsets() {
-                        let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
-                        let id = world::island_cell_id(island_id, dq, dr);
-                        let fill = state
-                            .tables
-                            .island_cells
-                            .get(&id)
-                            .filter(|c| {
-                                state
-                                    .replay_clock
-                                    .as_ref()
-                                    .is_none_or(|clock| clock.is_visible(c.painted_at_micros))
-                            })
-                            .map_or(unpainted_fill, |c| {
-                                let (h, s, v) = world::unpack_hsv(c.color);
-                                world::hsv_color(h, s, v)
-                            });
-                        world::draw_hex(
-                            &mut d2,
-                            cell_world,
-                            1.0,
-                            fill,
-                            show_tile_outline.then_some(Color::new(40, 40, 46, 255)),
-                        );
-                    }
+                // F9.5 (FPS at scale): point-lookup each rendered cell by its
+                // packed id in the already-id-keyed `island_cells` map instead of
+                // collecting a fresh (island_id, q, r) -> color HashMap from
+                // EVERY island_cell row in the world every frame — cost is now
+                // proportional to in-view cells, not total painted cells.
+                for &(dq, dr) in world::island_offsets() {
+                    let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
+                    let id = world::island_cell_id(island_id, dq, dr);
+                    let fill = state
+                        .tables
+                        .island_cells
+                        .get(&id)
+                        .filter(|c| {
+                            state
+                                .replay_clock
+                                .as_ref()
+                                .is_none_or(|clock| clock.is_visible(c.painted_at_micros))
+                        })
+                        .map(|c| {
+                            let (h, s, v) = world::unpack_hsv(c.color);
+                            world::hsv_color(h, s, v)
+                        })
+                        .or(unpainted_fill);
+                    let Some(fill) = fill else {
+                        continue;
+                    };
+                    world::draw_hex(
+                        &mut d2,
+                        cell_world,
+                        1.0,
+                        fill,
+                        show_tile_outline.then_some(Color::new(40, 40, 46, 255)),
+                    );
                 }
                 // Author-caught: mirrors `main.rs` — sat/val is now
                 // `START_SAT`/`START_VAL` exactly (was a fixed 85/95 lookalike
@@ -2796,19 +2788,41 @@ fn frame(state: &mut State) {
                 let center = world::axial_to_world(fcx, fcy);
                 let island = state.tables.islands.get(&island_id);
                 let mine = island.is_some_and(|row| me == Some(row.owner_hex.as_str()));
-                let fill = island.map_or_else(
-                    || world::unpainted_island_fill(false),
-                    |row| world::unpainted_island_fill(row.owner_hex == world::COMMUNITY_OWNER_HEX),
-                );
-                world::draw_hex(&mut d2, center, ISLAND_RADIUS as f32, fill, None);
+                let fill = island.and_then(|row| {
+                    world::unpainted_island_fill(row.owner_hex == world::COMMUNITY_OWNER_HEX)
+                });
+                if let Some(fill) = fill {
+                    world::draw_hex(&mut d2, center, ISLAND_RADIUS as f32, fill, None);
+                }
 
                 // Replay deliberately ignores `border_hidden`; it is a
                 // presentation control for live play, not a history filter.
-                let border_color = island
-                    .and_then(|row| {
-                        row.border_color.map(|packed| {
-                            let (h, s, v) = world::unpack_hsv(packed);
-                            world::hsv_color(h, s, v)
+                //
+                // The historical color (baked in by the extractor at each
+                // island-insert event, see `RECOVERED_HISTORY_MAGIC`'s v3
+                // comment) is tried FIRST, not just as a fallback: it's the
+                // color that island's border actually had at this point in
+                // the scrub position, whereas the live-table lookups below
+                // reflect only the CURRENT database — which has nothing left
+                // to look up once an island has since been deleted
+                // (`admin_delete_island`/`delete_account` remove the owner's
+                // `Inventory` rows too). Live lookups stay as a fallback for
+                // the sentinel case (extractor couldn't resolve it either).
+                let border_color = history
+                    .island_border
+                    .get(&island_id)
+                    .copied()
+                    .filter(|&packed| packed != UNKNOWN_BORDER_COLOR)
+                    .map(|packed| {
+                        let (h, s, v) = world::unpack_hsv(packed);
+                        world::hsv_color(h, s, v)
+                    })
+                    .or_else(|| {
+                        island.and_then(|row| {
+                            row.border_color.map(|packed| {
+                                let (h, s, v) = world::unpack_hsv(packed);
+                                world::hsv_color(h, s, v)
+                            })
                         })
                     })
                     .or_else(|| {
@@ -2971,7 +2985,6 @@ fn frame(state: &mut State) {
                         history.applied_playback_events(),
                         history.playback_events(),
                     );
-                    replay::draw_web_controls(&mut d, state.replay_recording, state.gif_recording);
                 }
             } else {
                 let visible_tiles = state
@@ -3060,6 +3073,11 @@ fn frame(state: &mut State) {
                 }
             }
         }
+    }
+    // Identity arrives over the same socket as the initial subscription,
+    // so draw the title directly until the normal HUD branch can do it.
+    if state.ui_state.title_active && me.is_none() && !replay_mode {
+        ui::draw_title(&mut d, &state.ui_state, mouse_screen);
     }
     if export_name.is_none() && !replay_mode {
         if state.ui_state.tool == ui::Tool::Erase {
@@ -3158,6 +3176,7 @@ fn main() {
         rl,
         thread,
         my_identity: None,
+        subscription_ready: false,
         tables: Tables::new(),
         camera: Camera2D {
             offset: Vector2::new(360.0, 360.0),

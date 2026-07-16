@@ -102,13 +102,15 @@ pub mod constants {
     /// skipped — the author's "borderless far zoom" note picked ~4-6px, the
     /// executor settled on 5, later re-tuned by hand-testing to 20.
     pub const BORDERLESS_ZOOM_THRESHOLD: f32 = 20.0;
-    /// Below this zoom, an island's 721 interior cells are drawn as a
-    /// single flat hex instead of one `draw_hex` call per cell — at this
-    /// scale the individual cells are sub-pixel anyway, so the detail pass
-    /// is pure wasted draw calls once the world has many islands on
-    /// screen at once. Starting guess, same as `BORDERLESS_ZOOM_THRESHOLD`
-    /// — re-tune by hand-testing if the switch is too abrupt/early.
-    pub const OVERVIEW_ZOOM_THRESHOLD: f32 = 1.9;
+    /// World-unit margin past the screen edges within which an off-screen
+    /// island still renders, so panning/zooming doesn't pop islands in and
+    /// out right at the viewport edge. Author-requested: shrunk from
+    /// `ISLAND_RADIUS * 2.0 * 5.0` (150, generous anti-pop-in margin) to
+    /// make the off-screen cull itself visibly observable while testing,
+    /// then hand-tuned to `ISLAND_RADIUS * 1.2` (18) — tight enough to see
+    /// the cull happen, with a little slack so an island's edge isn't
+    /// clipped mid-pan.
+    pub const VIEW_CULL_PAD: f32 = ISLAND_RADIUS as f32 * 1.5;
     /// F9.6 item 6: keyboard pan speed, world units/sec at zoom 1.0
     /// (divided by the current zoom so it feels like a constant SCREEN
     /// speed, same trick as the border-thickness fix above). Q/E zoom rate
@@ -257,17 +259,16 @@ mod tests {
 pub const COMMUNITY_OWNER_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
-/// F14 (decision 20): the community island's unpainted tiles render white
-/// instead of the usual gray placeholder, marking it as the shared "Free
-/// Isle" canvas at a glance. Each client computes `is_community` from its own
+/// F14 (decision 20): the community island's unpainted tiles still render
+/// white, marking it as the shared "Free Isle" canvas at a glance. Ordinary
+/// islands no longer get a gray placeholder — an unpainted tile is simply not
+/// drawn, so the map's own background shows through and the island's border
+/// is enough to convey its shape (author feedback: the placeholder read as a
+/// stray "hole"). Each client computes `is_community` from its own
 /// sentinel-owner check (typed `Identity::ZERO` natively, `COMMUNITY_OWNER_HEX`
 /// on web) before calling this.
-pub fn unpainted_island_fill(is_community: bool) -> Color {
-    if is_community {
-        Color::new(255, 255, 255, 255)
-    } else {
-        Color::new(60, 60, 68, 255)
-    }
+pub fn unpainted_island_fill(is_community: bool) -> Option<Color> {
+    is_community.then_some(Color::new(255, 255, 255, 255))
 }
 
 pub fn level_of(xp: u64) -> u64 {

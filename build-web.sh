@@ -18,7 +18,7 @@ EMSDK_DIR="${EMSDK_DIR:-./emsdk}"
 # outright ("The provided ArrayBuffer value must not be resizable"),
 # breaking every embind/UTF8 string call. A larger fixed size sidesteps
 # both problems.
-HISTORY_SOURCE="tools/history-extractor/output/hexel-tile-history-v2.bin"
+HISTORY_SOURCE="tools/history-extractor/output/hexel-tile-history-v3.bin"
 HISTORY_WEB="client/web/hexel-tile-history.bin"
 if [ ! -f "$HISTORY_SOURCE" ]; then
     echo "Missing recovered history: $HISTORY_SOURCE" >&2

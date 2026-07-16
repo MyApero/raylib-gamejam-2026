@@ -13,8 +13,8 @@ pub const DEFAULT_DURATION_SECS: f32 = 30.0;
 /// world cannot lose outer islands to the ordinary 0.25 camera floor.
 pub const MIN_CAMERA_ZOOM: f32 = 0.01;
 const MIN_DURATION_SECS: f32 = 0.1;
-const MIN_SPEED: f32 = 0.125;
-const MAX_SPEED: f32 = 64.0;
+const MIN_SPEED: f32 = 0.01;
+const MAX_SPEED: f32 = 102.4;
 
 /// Parse `--replay`, `--replay=SECONDS`, or `HEXEL_REPLAY_SECONDS=SECONDS`.
 ///
@@ -66,6 +66,33 @@ pub struct ReplayClock {
     elapsed_secs: f32,
     speed: f32,
     paused: bool,
+    /// Set while the progress slider is being dragged, so a drag that
+    /// strays outside `progress_track_rect` vertically keeps tracking the
+    /// mouse until release instead of dropping the scrub.
+    scrubbing: bool,
+    /// Index into `STEP_PRESETS` for the `<`/`>` step buttons.
+    step_index: usize,
+}
+
+/// `<`/`>` step size, as a fraction of `duration_secs` — linear in real
+/// replay time since `cursor_micros` maps progress to timestamps linearly.
+/// Cycled by clicking the step-size button, wrapping back to the start.
+const STEP_PRESETS: [f32; 7] = [0.0001, 0.001, 0.01, 0.02, 0.05, 0.10, 0.25];
+const DEFAULT_STEP_INDEX: usize = 2;
+
+const STATUS_X: i32 = 10;
+const STATUS_WIDTH: i32 = 700;
+
+fn back_rect() -> Rectangle {
+    Rectangle::new(18.0, 50.0, 40.0, 30.0)
+}
+
+fn step_size_rect() -> Rectangle {
+    Rectangle::new(64.0, 50.0, 66.0, 30.0)
+}
+
+fn forward_rect() -> Rectangle {
+    Rectangle::new(136.0, 50.0, 40.0, 30.0)
 }
 
 fn slower_rect() -> Rectangle {
@@ -84,20 +111,15 @@ fn restart_rect() -> Rectangle {
     Rectangle::new(442.0, 50.0, 68.0, 30.0)
 }
 
-pub fn gif_rect() -> Rectangle {
-    Rectangle::new(516.0, 50.0, 50.0, 30.0)
-}
-
-pub fn record_rect() -> Rectangle {
-    Rectangle::new(574.0, 50.0, 68.0, 30.0)
-}
-
-pub fn island_only_rect() -> Rectangle {
-    Rectangle::new(650.0, 50.0, 60.0, 30.0)
-}
-
 fn close_rect() -> Rectangle {
     Rectangle::new(676.0, 15.0, 28.0, 28.0)
+}
+
+/// Hit area for the progress slider: taller than the thin line it draws
+/// (`draw_overlay_with_status`) so it is easy to grab, but capped above the
+/// `y = 50` button row so it never steals their clicks.
+fn progress_track_rect() -> Rectangle {
+    Rectangle::new((STATUS_X + 8) as f32, 30.0, (STATUS_WIDTH - 16) as f32, 20.0)
 }
 
 impl ReplayClock {
@@ -120,6 +142,8 @@ impl ReplayClock {
             elapsed_secs: 0.0,
             speed: 1.0,
             paused: false,
+            scrubbing: false,
+            step_index: DEFAULT_STEP_INDEX,
         }
     }
 
@@ -137,6 +161,33 @@ impl ReplayClock {
 
     pub fn toggle_pause(&mut self) {
         self.paused = !self.paused;
+    }
+
+    /// Jump straight to an arbitrary point, as dragging the progress slider
+    /// does. Pauses like scrubbing a video player, rather than fighting the
+    /// next `tick` for the same frame's position.
+    pub fn seek(&mut self, progress: f32) {
+        self.elapsed_secs = progress.clamp(0.0, 1.0) * self.duration_secs;
+        self.paused = true;
+    }
+
+    /// `>`: nudge forward by the current step size.
+    pub fn step_forward(&mut self) {
+        self.seek(self.progress() + STEP_PRESETS[self.step_index]);
+    }
+
+    /// `<`: nudge backward by the current step size.
+    pub fn step_backward(&mut self) {
+        self.seek(self.progress() - STEP_PRESETS[self.step_index]);
+    }
+
+    /// Cycles how big a `<`/`>` press moves, wrapping back to the start.
+    pub fn cycle_step_size(&mut self) {
+        self.step_index = (self.step_index + 1) % STEP_PRESETS.len();
+    }
+
+    pub fn step_fraction(&self) -> f32 {
+        STEP_PRESETS[self.step_index]
     }
 
     pub fn faster(&mut self) {
@@ -199,12 +250,26 @@ pub fn handle_input(rl: &mut RaylibHandle, clock: &mut ReplayClock) -> bool {
     {
         clock.slower();
     }
+    if rl.is_key_pressed(KeyboardKey::KEY_RIGHT) {
+        clock.step_forward();
+    }
+    if rl.is_key_pressed(KeyboardKey::KEY_LEFT) {
+        clock.step_backward();
+    }
     if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
         let mouse = rl.get_mouse_position();
         if close_rect().check_collision_point_rec(mouse) {
             return true;
         }
-        if slower_rect().check_collision_point_rec(mouse) {
+        if progress_track_rect().check_collision_point_rec(mouse) {
+            clock.scrubbing = true;
+        } else if back_rect().check_collision_point_rec(mouse) {
+            clock.step_backward();
+        } else if step_size_rect().check_collision_point_rec(mouse) {
+            clock.cycle_step_size();
+        } else if forward_rect().check_collision_point_rec(mouse) {
+            clock.step_forward();
+        } else if slower_rect().check_collision_point_rec(mouse) {
             clock.slower();
         } else if pause_rect().check_collision_point_rec(mouse) {
             clock.toggle_pause();
@@ -212,6 +277,14 @@ pub fn handle_input(rl: &mut RaylibHandle, clock: &mut ReplayClock) -> bool {
             clock.faster();
         } else if restart_rect().check_collision_point_rec(mouse) {
             clock.restart();
+        }
+    }
+    if clock.scrubbing {
+        if rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) {
+            let track = progress_track_rect();
+            clock.seek((rl.get_mouse_position().x - track.x) / track.width);
+        } else {
+            clock.scrubbing = false;
         }
     }
     false
@@ -227,18 +300,6 @@ fn draw_button(d: &mut impl RaylibDraw, rect: Rectangle, label: &str) {
         14,
         Color::new(235, 235, 240, 255),
     );
-}
-
-/// Web-only replay controls. Pointer actions are handled by the web client;
-/// video capture itself uses the browser's MediaRecorder API.
-pub fn draw_web_controls(d: &mut impl RaylibDraw, recording: bool, gif_recording: bool) {
-    draw_button(d, gif_rect(), if gif_recording { "GIF..." } else { "GIF" });
-    draw_button(
-        d,
-        record_rect(),
-        if recording { "Video..." } else { "Video" },
-    );
-    draw_button(d, island_only_rect(), "My Isle");
 }
 
 pub fn draw_overlay(d: &mut impl RaylibDraw, clock: &ReplayClock, visible: usize, total: usize) {
@@ -280,18 +341,35 @@ fn draw_overlay_with_status(d: &mut impl RaylibDraw, clock: &ReplayClock, status
     // `RaylibDraw` deliberately does not expose the global default-font
     // measurement helper. Keep this status strip at a stable width; the
     // compact 16px label is designed to fit it.
-    let width = 700;
-    let x = 10;
+    let x = STATUS_X;
+    let width = STATUS_WIDTH;
     d.draw_rectangle(x, 12, width, 34, Color::new(10, 10, 14, 225));
-    d.draw_rectangle(x + 8, 39, width - 16, 3, Color::new(54, 54, 62, 255));
+    let track = progress_track_rect();
+    let track_y = 39;
+    d.draw_rectangle(x + 8, track_y, width - 16, 3, Color::new(54, 54, 62, 255));
     d.draw_rectangle(
         x + 8,
-        39,
+        track_y,
         ((width - 16) as f32 * progress) as i32,
         3,
         Color::new(245, 245, 250, 255),
     );
+    // Draggable handle: the thin fill line alone does not read as an
+    // interactive slider, so a knob marks the grabbable point.
+    d.draw_circle(
+        (track.x + track.width * progress) as i32,
+        track_y + 1,
+        5.0,
+        Color::new(245, 245, 250, 255),
+    );
     d.draw_text(&label, x + 12, 20, 16, Color::new(235, 235, 240, 255));
+    draw_button(d, back_rect(), "<");
+    draw_button(
+        d,
+        step_size_rect(),
+        &format!("{:.2}%", clock.step_fraction() * 100.0),
+    );
+    draw_button(d, forward_rect(), ">");
     draw_button(d, slower_rect(), "Slower");
     draw_button(
         d,
@@ -332,5 +410,29 @@ mod tests {
         replay.restart();
         assert_eq!(replay.progress(), 0.0);
         assert!(!replay.is_paused());
+    }
+
+    #[test]
+    fn step_forward_and_backward_move_by_the_current_step_size_and_pause() {
+        let mut replay = ReplayClock::new([0, 100], 10.0, 0);
+        assert_eq!(replay.step_fraction(), 0.05);
+        replay.step_forward();
+        assert_eq!(replay.progress(), 0.05);
+        assert!(replay.is_paused());
+        replay.step_backward();
+        assert_eq!(replay.progress(), 0.0);
+        // Stepping past either edge clamps instead of wrapping or going negative.
+        replay.step_backward();
+        assert_eq!(replay.progress(), 0.0);
+    }
+
+    #[test]
+    fn cycle_step_size_wraps_through_every_preset() {
+        let mut replay = ReplayClock::new([0, 100], 10.0, 0);
+        let first = replay.step_fraction();
+        for _ in 0..STEP_PRESETS.len() {
+            replay.cycle_step_size();
+        }
+        assert_eq!(replay.step_fraction(), first);
     }
 }

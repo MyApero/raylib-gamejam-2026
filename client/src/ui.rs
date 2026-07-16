@@ -136,6 +136,14 @@ pub struct UiState {
     pub title_active: bool,
     /// Animation clock for the title screen (logo shimmer, button pulse).
     title_started: Instant,
+    /// Startup stays on the title/menu immediately, even before the database
+    /// is reachable.  The caller flips this only after the complete initial
+    /// subscription and the local player's required rows are available; the
+    /// title swaps its merge loader for Draw at that point.
+    startup_ready: bool,
+    startup_connected: bool,
+    startup_connection_failed: bool,
+    startup_islands: usize,
     pub name_input: String,
     name_loaded: bool,
     name_focused: bool,
@@ -303,6 +311,10 @@ impl UiState {
         Self {
             title_active: true,
             title_started: Instant::now(),
+            startup_ready: false,
+            startup_connected: false,
+            startup_connection_failed: false,
+            startup_islands: 0,
             name_input: String::new(),
             name_loaded: false,
             name_focused: false,
@@ -338,6 +350,23 @@ impl UiState {
             swatch_hsl: HashMap::new(),
             sound_on: true,
         }
+    }
+
+    /// Updates the title screen's connection/loading presentation.  Kept on
+    /// `UiState` so both native and web clients share the exact same Draw
+    /// gate and cannot accidentally make the button clickable before it is
+    /// visible (or vice versa).
+    pub fn set_startup_progress(
+        &mut self,
+        connected: bool,
+        connection_failed: bool,
+        ready: bool,
+        islands: usize,
+    ) {
+        self.startup_connected = connected;
+        self.startup_connection_failed = connection_failed;
+        self.startup_ready = ready;
+        self.startup_islands = islands;
     }
 
     /// F9.6 item 6: whether a text field currently owns keyboard input —
@@ -1251,13 +1280,15 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     // via `any_modal_open`, and this frame's `over_map_area` was computed
     // while the flag was still set, so the dismissing click can't paint.
     if state.title_active {
-        title_label_width(rl); // warm the cache while we still have `rl`
-        let mouse = rl.get_mouse_position();
-        if (rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
-            && point_in(mouse, title_btn_rect()))
-            || rl.is_key_pressed(KeyboardKey::KEY_ENTER)
-        {
-            state.title_active = false;
+        if state.startup_ready {
+            title_label_width(rl); // warm the cache while we still have `rl`
+            let mouse = rl.get_mouse_position();
+            if (rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+                && point_in(mouse, title_btn_rect()))
+                || rl.is_key_pressed(KeyboardKey::KEY_ENTER)
+            {
+                state.title_active = false;
+            }
         }
         return Actions::default();
     }
@@ -1836,7 +1867,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
 
 pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vector2) {
     if state.title_active {
-        draw_title_screen(d, state, mouse);
+        draw_title(d, state, mouse);
         return;
     }
     draw_header(d, info, state.sound_on);
@@ -4033,7 +4064,7 @@ fn draw_hexel_logo(d: &mut impl RaylibDraw, center: Vector2, cell_r: f32, t: f32
 /// Full title screen: a semi-transparent backdrop (the whole map stays
 /// hinted behind — the clients hold the camera on the whole-world pose while
 /// `title_active`), the wordmark, and the pulsing Draw button.
-fn draw_title_screen(d: &mut impl RaylibDraw, state: &UiState, mouse: Vector2) {
+pub fn draw_title(d: &mut impl RaylibDraw, state: &UiState, mouse: Vector2) {
     let t = state.title_started.elapsed().as_secs_f32();
     d.draw_rectangle_rec(
         Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H),
@@ -4045,6 +4076,11 @@ fn draw_title_screen(d: &mut impl RaylibDraw, state: &UiState, mouse: Vector2) {
         TITLE_CELL_R,
         t,
     );
+
+    if !state.startup_ready {
+        draw_startup_loader(d, state, t);
+        return;
+    }
 
     let base = title_btn_rect();
     let hovered = point_in(mouse, base);
@@ -4081,6 +4117,86 @@ fn draw_title_screen(d: &mut impl RaylibDraw, state: &UiState, mouse: Vector2) {
         TITLE_LABEL_SIZE,
         Color::new(20, 20, 26, 255),
     );
+}
+
+/// A small "Hex + Merge" loader: six source colors orbit the central tile;
+/// on each beat one slides inward and blends the centre to its hue.  It uses
+/// the same hex primitive and HSV palette as the world and title wordmark,
+/// so the waiting state reads as part of the game rather than generic UI.
+fn draw_startup_loader(d: &mut impl RaylibDraw, state: &UiState, t: f32) {
+    let center = Vector2::new(SCREEN_W / 2.0, 510.0);
+    let beat = t / 0.48;
+    let active = beat.floor() as i32 % 6;
+    let progress = beat.fract();
+    let merge = progress * progress * (3.0 - 2.0 * progress);
+    let source_r = 42.0;
+    let cell_r = 13.0;
+
+    for i in 0..6 {
+        let angle = std::f32::consts::PI / 3.0 * i as f32 - std::f32::consts::FRAC_PI_2;
+        let outer = Vector2::new(
+            center.x + angle.cos() * source_r,
+            center.y + angle.sin() * source_r,
+        );
+        let hue = (i * 60) as u16;
+        let fill = world::hsv_color(hue, 68, 88);
+        if i == active {
+            let moving = Vector2::new(
+                outer.x + (center.x - outer.x) * merge,
+                outer.y + (center.y - outer.y) * merge,
+            );
+            world::draw_hex(
+                d,
+                moving,
+                cell_r,
+                fill,
+                Some(Color::new(245, 245, 250, 210)),
+            );
+        } else {
+            world::draw_hex(
+                d,
+                outer,
+                cell_r * 0.82,
+                fill,
+                Some(Color::new(40, 40, 48, 230)),
+            );
+        }
+    }
+
+    let centre_hue = (active * 60) as u16;
+    let pulse = 1.0 + 0.08 * (progress * std::f32::consts::PI).sin();
+    world::draw_hex(
+        d,
+        center,
+        18.0 * pulse,
+        world::hsv_color(centre_hue, 55, (72.0 + merge * 22.0) as u8),
+        Some(Color::new(245, 245, 250, 230)),
+    );
+
+    let (status, color) = if state.startup_connection_failed {
+        ("Connection unavailable", Color::new(236, 150, 150, 255))
+    } else if !state.startup_connected {
+        ("Connecting to SpacetimeDB", Color::new(205, 206, 218, 255))
+    } else if state.startup_islands == 0 {
+        ("Loading islands", Color::new(205, 206, 218, 255))
+    } else {
+        return draw_title_status(
+            d,
+            &format!("Loading islands - {} received", state.startup_islands),
+            580,
+            Color::new(205, 206, 218, 255),
+        );
+    };
+    draw_title_status(d, status, 580, color);
+}
+
+fn draw_title_status(d: &mut impl RaylibDraw, text: &str, y: i32, color: Color) {
+    const SIZE: i32 = 17;
+    // RaylibDraw does not expose RaylibHandle::measure_text. This estimate is
+    // intentionally only for centring a compact status line; the Draw label
+    // above retains its exact cached measurement for hit-area polish.
+    let width = text.chars().count() as f32 * SIZE as f32 * 0.52;
+    d.draw_text(text, (SCREEN_W / 2.0 - width / 2.0) as i32, y, SIZE, color);
 }
 
 #[cfg(test)]
