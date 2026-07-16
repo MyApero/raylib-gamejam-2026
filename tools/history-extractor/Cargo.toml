@@ -1,0 +1,17 @@
+[package]
+name = "history-extractor"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+spacetimedb-commitlog = { path = "../../../SpacetimeDB/crates/commitlog" }
+spacetimedb-datastore = { path = "../../../SpacetimeDB/crates/datastore" }
+spacetimedb-fs-utils = { path = "../../../SpacetimeDB/crates/fs-utils" }
+spacetimedb-paths = { path = "../../../SpacetimeDB/crates/paths" }
+spacetimedb-primitives = { path = "../../../SpacetimeDB/crates/primitives" }
+spacetimedb-sats = { path = "../../../SpacetimeDB/crates/sats" }
+thiserror = "1"

@@ -13,25 +13,25 @@ use std::sync::OnceLock;
 pub mod constants {
     use std::time::Duration;
 
+    /// Single source of truth in the `shared` crate — see its doc comment
+    /// for why this is no longer hand-mirrored.
+    pub use shared::constants::ISLAND_RADIUS;
     /// Gap (in fine hex tiles) left between neighboring islands' paintable
     /// interiors. Single source of truth in the `shared` crate — see its
     /// doc comment for why it MUST be even.
     pub use shared::constants::MARGIN_GAP_TILES;
-    /// Single source of truth in the `shared` crate — see its doc comment
-    /// for why this is no longer hand-mirrored.
-    pub use shared::constants::ISLAND_RADIUS;
     /// Client-side send-rate cap for `set_pos`; the server has no matching
     /// limit (cursor spam is cheap), this just avoids flooding the socket.
     pub const CURSOR_SEND_HZ: f32 = 20.0;
     pub const LEVEL_XP: u64 = 100;
-    /// Single source of truth in the `shared` crate — see its doc comment
-    /// for why this is no longer hand-mirrored.
-    pub use shared::constants::{START_SAT, START_VAL};
     /// How far (degrees, either direction) the Hue slider may nudge the
     /// selected inventory hue. Single source of truth in the `shared`
     /// crate — the server is the actual enforcement point, this just keeps
     /// the slider from offering a value the server would reject.
     pub use shared::constants::HUE_TOLERANCE;
+    /// Single source of truth in the `shared` crate — see its doc comment
+    /// for why this is no longer hand-mirrored.
+    pub use shared::constants::{START_SAT, START_VAL};
     /// F9.5 item 6: floor on another player's cursor's zoomed-out render
     /// scale (relative to its size at the default `ISLAND_FIT_ZOOM`) — lets
     /// it shrink with the camera like a world-space object would, but never
@@ -123,15 +123,15 @@ pub mod constants {
     /// under a pixel and vanished at low zoom.
     pub const HOVER_BORDER_PX: f32 = 2.0;
 
-    /// F11 (flying gift): single source of truth in the `shared` crate —
-    /// both the server's `claim_gift` distance check and this client's
-    /// drift rendering must derive the identical position/range from it.
-    pub use shared::constants::GIFT_DRIFT_RADIUS;
-    pub use shared::constants::GIFT_DRIFT_PERIOD_SECS;
     /// F11: reused directly as both the click/tap hitbox (world-space, not
     /// converted from screen pixels, so "close enough" means the same thing
     /// here as it does server-side) and the visual affordance radius.
     pub use shared::constants::GIFT_CLAIM_DIST;
+    pub use shared::constants::GIFT_DRIFT_PERIOD_SECS;
+    /// F11 (flying gift): single source of truth in the `shared` crate —
+    /// both the server's `claim_gift` distance check and this client's
+    /// drift rendering must derive the identical position/range from it.
+    pub use shared::constants::GIFT_DRIFT_RADIUS;
 
     /// F13: each snapped cursor is an equilateral wedge of the completed
     /// hexagon. A regular hexagon's circumradius equals its side length, so
@@ -176,7 +176,10 @@ mod tests {
     #[test]
     fn normalize_identity_hex_leaves_full_width_unchanged() {
         let full = "AB".repeat(32);
-        assert_eq!(normalize_identity_hex(&format!("0x{full}")), full.to_lowercase());
+        assert_eq!(
+            normalize_identity_hex(&format!("0x{full}")),
+            full.to_lowercase()
+        );
     }
 
     #[test]
@@ -184,9 +187,16 @@ mod tests {
         let centre = Vector2::new(10.0, 10.0);
         let members = [(7u32, 0u32)];
         let (frame, vertices) = hexa_cluster_frame(centre, 2, &members, |_, t| t);
-        assert_eq!(vertices.len(), 6, "partial cluster still gets the full ring");
+        assert_eq!(
+            vertices.len(),
+            6,
+            "partial cluster still gets the full ring"
+        );
         let target = frame[0].1;
-        assert!((target.x - centre.x).abs() < 1e-4 && (target.y - centre.y).abs() < 1e-4, "got {target:?}");
+        assert!(
+            (target.x - centre.x).abs() < 1e-4 && (target.y - centre.y).abs() < 1e-4,
+            "got {target:?}"
+        );
     }
 
     #[test]
@@ -195,7 +205,10 @@ mod tests {
         let dx = vertices[1].x - vertices[0].x;
         let dy = vertices[1].y - vertices[0].y;
         let side_px = (dx * dx + dy * dy).sqrt() * constants::ISLAND_FIT_ZOOM;
-        assert!((side_px - constants::HEXA_CURSOR_SIDE_PX).abs() < 1e-4, "got {side_px}");
+        assert!(
+            (side_px - constants::HEXA_CURSOR_SIDE_PX).abs() < 1e-4,
+            "got {side_px}"
+        );
     }
 
     #[test]
@@ -206,19 +219,32 @@ mod tests {
         let members = [(1u32, target, raw)];
         let after_short = hexa_advance_display(&prev, &members, 0.01);
         let pos_short = after_short[&1];
-        assert!(pos_short.x > raw.x && pos_short.x < target.x, "first frame should start at raw and move toward target, got {pos_short:?}");
+        assert!(
+            pos_short.x > raw.x && pos_short.x < target.x,
+            "first frame should start at raw and move toward target, got {pos_short:?}"
+        );
         let after_long = hexa_advance_display(&after_short, &members, 5.0);
         let pos_long = after_long[&1];
-        assert!((pos_long.x - target.x).abs() < 0.01, "should have settled near target after enough time, got {pos_long:?}");
+        assert!(
+            (pos_long.x - target.x).abs() < 0.01,
+            "should have settled near target after enough time, got {pos_long:?}"
+        );
     }
 
     #[test]
     fn eyedropper_requires_an_owned_hue_and_clamps_saturation() {
         assert_eq!(eyedropper_pick(None, |_| true, 50), EyedropperPick::Empty);
-        assert_eq!(eyedropper_pick(Some((120, 80, 90)), |_| false, 50), EyedropperPick::Locked);
+        assert_eq!(
+            eyedropper_pick(Some((120, 80, 90)), |_| false, 50),
+            EyedropperPick::Locked
+        );
         assert_eq!(
             eyedropper_pick(Some((120, 80, 90)), |hue| hue == 120, 50),
-            EyedropperPick::Selected { hue: 120, sat: 50, val: 90 }
+            EyedropperPick::Selected {
+                hue: 120,
+                sat: 50,
+                val: 90
+            }
         );
     }
 }
@@ -228,7 +254,8 @@ mod tests {
 /// `normalize_identity_hex`. Single source of truth for web (native keeps
 /// comparing typed `Identity::ZERO` directly, never this string).
 #[allow(dead_code)]
-pub const COMMUNITY_OWNER_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+pub const COMMUNITY_OWNER_HEX: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// F14 (decision 20): the community island's unpainted tiles render white
 /// instead of the usual gray placeholder, marking it as the shared "Free
@@ -280,7 +307,11 @@ pub fn eyedropper_pick(
     if !owns_hue(hue) {
         return EyedropperPick::Locked;
     }
-    EyedropperPick::Selected { hue, sat: sat.min(sat_cap), val }
+    EyedropperPick::Selected {
+        hue,
+        sat: sat.min(sat_cap),
+        val,
+    }
 }
 
 /// Ease-in-out-cubic (author-requested for the launch intro: slow start,
@@ -297,7 +328,10 @@ pub use shared::ease_in_out_cubic;
 /// and `claim_gift` validates distance against this same live position).
 pub fn gift_drift_pos(spawn: Vector2, elapsed_secs: f32) -> Vector2 {
     let angle = elapsed_secs / constants::GIFT_DRIFT_PERIOD_SECS * std::f32::consts::TAU;
-    Vector2::new(spawn.x + constants::GIFT_DRIFT_RADIUS * angle.cos(), spawn.y + constants::GIFT_DRIFT_RADIUS * angle.sin())
+    Vector2::new(
+        spawn.x + constants::GIFT_DRIFT_RADIUS * angle.cos(),
+        spawn.y + constants::GIFT_DRIFT_RADIUS * angle.sin(),
+    )
 }
 
 pub fn hexdist(dq: i32, dr: i32) -> i32 {
@@ -435,7 +469,11 @@ pub fn island_cell_id(island_id: u32, q_local: i32, r_local: i32) -> u32 {
 }
 
 pub fn unpack_hsv(color: u32) -> (u16, u8, u8) {
-    (((color >> 16) & 0x1FF) as u16, ((color >> 8) & 0xFF) as u8, (color & 0xFF) as u8)
+    (
+        ((color >> 16) & 0x1FF) as u16,
+        ((color >> 8) & 0xFF) as u8,
+        (color & 0xFF) as u8,
+    )
 }
 
 #[allow(dead_code)]
@@ -454,8 +492,18 @@ pub fn draw_plus_hint(d: &mut impl RaylibDraw, m: Vector2) {
     let cx = m.x + 18.0;
     let cy = m.y + 2.0;
     d.draw_circle(cx as i32, cy as i32, 8.0, Color::new(20, 20, 24, 220));
-    d.draw_line_ex(Vector2::new(cx - 4.0, cy), Vector2::new(cx + 4.0, cy), 2.0, Color::RAYWHITE);
-    d.draw_line_ex(Vector2::new(cx, cy - 4.0), Vector2::new(cx, cy + 4.0), 2.0, Color::RAYWHITE);
+    d.draw_line_ex(
+        Vector2::new(cx - 4.0, cy),
+        Vector2::new(cx + 4.0, cy),
+        2.0,
+        Color::RAYWHITE,
+    );
+    d.draw_line_ex(
+        Vector2::new(cx, cy - 4.0),
+        Vector2::new(cx, cy + 4.0),
+        2.0,
+        Color::RAYWHITE,
+    );
 }
 
 /// FPS readout matching the header's grey ("PRESS ESC for help", `Color::GRAY`)
@@ -498,7 +546,12 @@ pub fn draw_eraser_badge(d: &mut impl RaylibDraw, m: Vector2) {
     let cy = m.y + 2.0;
     d.draw_circle(cx as i32, cy as i32, 8.0, Color::new(20, 20, 24, 220));
     d.draw_rectangle_lines(cx as i32 - 4, cy as i32 - 3, 8, 6, Color::RAYWHITE);
-    d.draw_line_ex(Vector2::new(cx - 5.0, cy + 5.0), Vector2::new(cx + 5.0, cy - 5.0), 1.5, Color::new(230, 90, 90, 255));
+    d.draw_line_ex(
+        Vector2::new(cx - 5.0, cy + 5.0),
+        Vector2::new(cx + 5.0, cy - 5.0),
+        1.5,
+        Color::new(230, 90, 90, 255),
+    );
 }
 
 /// F11: world-space icon for the flying-gift pickup — a rotated square
@@ -515,15 +568,33 @@ pub fn draw_gift_icon(d: &mut impl RaylibDraw, center: Vector2, elapsed_secs: f3
     d.draw_poly(center, 4, s, 45.0, Color::new(232, 90, 90, 255));
     d.draw_poly_lines_ex(center, 4, s, 45.0, s * 0.08, Color::new(60, 25, 25, 255));
     let ribbon = Color::new(255, 232, 130, 255);
-    d.draw_line_ex(Vector2::new(center.x - s, center.y), Vector2::new(center.x + s, center.y), s * 0.22, ribbon);
-    d.draw_line_ex(Vector2::new(center.x, center.y - s), Vector2::new(center.x, center.y + s), s * 0.22, ribbon);
+    d.draw_line_ex(
+        Vector2::new(center.x - s, center.y),
+        Vector2::new(center.x + s, center.y),
+        s * 0.22,
+        ribbon,
+    );
+    d.draw_line_ex(
+        Vector2::new(center.x, center.y - s),
+        Vector2::new(center.x, center.y + s),
+        s * 0.22,
+        ribbon,
+    );
 }
 
 /// Progress ring around the screen-space cursor while long-pressing toward a
 /// merge (`frac` 0.0..1.0 of the hold threshold elapsed).
 pub fn draw_hold_ring(d: &mut impl RaylibDraw, m: Vector2, frac: f32) {
     let center = Vector2::new(m.x + 6.0, m.y + 12.0);
-    d.draw_ring(center, 10.0, 14.0, -90.0, -90.0 + 360.0 * frac.clamp(0.0, 1.0), 24, Color::new(255, 255, 255, 220));
+    d.draw_ring(
+        center,
+        10.0,
+        14.0,
+        -90.0,
+        -90.0 + 360.0 * frac.clamp(0.0, 1.0),
+        24,
+        Color::new(255, 255, 255, 220),
+    );
 }
 
 /// Filled+outlined flat-top hex at world `center` with world-unit `radius`
@@ -532,7 +603,13 @@ pub fn draw_hold_ring(d: &mut impl RaylibDraw, m: Vector2, frac: f32) {
 /// on-screen hex size drops below a few pixels the outline is both a wasted
 /// draw call and visual noise (the fill alone reads as a painting at that
 /// distance), so the caller passes `None` past its own zoom threshold.
-pub fn draw_hex(d: &mut impl RaylibDraw, center: Vector2, radius: f32, fill: Color, line: Option<Color>) {
+pub fn draw_hex(
+    d: &mut impl RaylibDraw,
+    center: Vector2,
+    radius: f32,
+    fill: Color,
+    line: Option<Color>,
+) {
     d.draw_poly(center, 6, radius, 0.0, fill);
     if let Some(line) = line {
         d.draw_poly_lines_ex(center, 6, radius, 0.0, radius * 0.04, line);
@@ -558,7 +635,13 @@ pub fn draw_cursor(d: &mut impl RaylibDraw, m: Vector2, color: Color, locked: bo
 /// a shrunk-down other-player cursor — so Lock state is visible at a glance
 /// without opening anyone's info popup. Needs `draw_line_ex` per edge rather
 /// than `draw_triangle_lines`, which has no thickness parameter.
-pub fn draw_cursor_scaled(d: &mut impl RaylibDraw, m: Vector2, color: Color, scale: f32, locked: bool) {
+pub fn draw_cursor_scaled(
+    d: &mut impl RaylibDraw,
+    m: Vector2,
+    color: Color,
+    scale: f32,
+    locked: bool,
+) {
     // (cos, sin) = (1, 0): identity rotation — the ordinary unrotated arrow.
     draw_cursor_tri(d, m, 1.0, 0.0, color, scale, locked);
 }
@@ -567,7 +650,14 @@ pub fn draw_cursor_scaled(d: &mut impl RaylibDraw, m: Vector2, color: Color, sca
 /// shared centre and `side_midpoint` identifies the member's outer side;
 /// both are screen-space. Degenerate geometry falls back to the ordinary
 /// cursor rather than dividing by a near-zero length.
-pub fn draw_cursor_snapped(d: &mut impl RaylibDraw, tip: Vector2, side_midpoint: Vector2, color: Color, scale: f32, locked: bool) {
+pub fn draw_cursor_snapped(
+    d: &mut impl RaylibDraw,
+    tip: Vector2,
+    side_midpoint: Vector2,
+    color: Color,
+    scale: f32,
+    locked: bool,
+) {
     let (ox, oy) = (side_midpoint.x - tip.x, side_midpoint.y - tip.y);
     let len = (ox * ox + oy * oy).sqrt();
     if len < 1e-3 {
@@ -581,8 +671,14 @@ pub fn draw_cursor_snapped(d: &mut impl RaylibDraw, tip: Vector2, side_midpoint:
     // Keep the same winding as the ordinary cursor triangle. raylib culls
     // the opposite face, which used to leave HEXA wedges showing only their
     // black outline instead of the player's brush colour.
-    let left = Vector2::new(base_mid.x + tangent.x * half_side, base_mid.y + tangent.y * half_side);
-    let right = Vector2::new(base_mid.x - tangent.x * half_side, base_mid.y - tangent.y * half_side);
+    let left = Vector2::new(
+        base_mid.x + tangent.x * half_side,
+        base_mid.y + tangent.y * half_side,
+    );
+    let right = Vector2::new(
+        base_mid.x - tangent.x * half_side,
+        base_mid.y - tangent.y * half_side,
+    );
     draw_cursor_triangle(d, tip, left, right, color, locked);
 }
 
@@ -590,14 +686,29 @@ pub fn draw_cursor_snapped(d: &mut impl RaylibDraw, tip: Vector2, side_midpoint:
 /// triangle with its base offsets rotated by the caller's (cos, sin) about
 /// the tip. Rotation preserves winding, so `draw_triangle`'s face culling
 /// behaves identically to the old fixed-orientation call.
-fn draw_cursor_tri(d: &mut impl RaylibDraw, tip: Vector2, c: f32, s: f32, color: Color, scale: f32, locked: bool) {
+fn draw_cursor_tri(
+    d: &mut impl RaylibDraw,
+    tip: Vector2,
+    c: f32,
+    s: f32,
+    color: Color,
+    scale: f32,
+    locked: bool,
+) {
     let rot = |x: f32, y: f32| Vector2::new(tip.x + x * c - y * s, tip.y + x * s + y * c);
     let left = rot(0.0, 18.0 * scale);
     let right = rot(13.0 * scale, 13.0 * scale);
     draw_cursor_triangle(d, tip, left, right, color, locked);
 }
 
-fn draw_cursor_triangle(d: &mut impl RaylibDraw, tip: Vector2, left: Vector2, right: Vector2, color: Color, locked: bool) {
+fn draw_cursor_triangle(
+    d: &mut impl RaylibDraw,
+    tip: Vector2,
+    left: Vector2,
+    right: Vector2,
+    color: Color,
+    locked: bool,
+) {
     d.draw_triangle(tip, left, right, color);
     let outline_px = if locked { 3.0 } else { 1.0 };
     d.draw_line_ex(tip, left, outline_px, Color::BLACK);
@@ -624,7 +735,13 @@ pub fn draw_cursor_label(d: &mut impl RaylibDraw, tip: Vector2, name: &str, scal
     let height = font_size as f32 + 6.0;
     let rect = Rectangle::new(tip.x - width / 2.0, tip.y - height - 6.0, width, height);
     d.draw_rectangle_rec(rect, Color::new(20, 20, 26, 210));
-    d.draw_text(&name, (rect.x + 5.0) as i32, (rect.y + 3.0) as i32, font_size, Color::RAYWHITE);
+    d.draw_text(
+        &name,
+        (rect.x + 5.0) as i32,
+        (rect.y + 3.0) as i32,
+        font_size,
+        Color::RAYWHITE,
+    );
 }
 
 /// F13: regular-hexagon vertex slots around `center`, `count` of them.
@@ -642,8 +759,12 @@ pub fn draw_cursor_label(d: &mut impl RaylibDraw, tip: Vector2, name: &str, scal
 pub fn hexagon_vertex_positions(center: Vector2, count: usize, phase: f32) -> Vec<Vector2> {
     (0..count)
         .map(|i| {
-            let angle = -std::f32::consts::FRAC_PI_2 + (i % 6) as f32 * std::f32::consts::FRAC_PI_3 + phase;
-            Vector2::new(center.x + constants::HEXA_VERTEX_RADIUS * angle.cos(), center.y + constants::HEXA_VERTEX_RADIUS * angle.sin())
+            let angle =
+                -std::f32::consts::FRAC_PI_2 + (i % 6) as f32 * std::f32::consts::FRAC_PI_3 + phase;
+            Vector2::new(
+                center.x + constants::HEXA_VERTEX_RADIUS * angle.cos(),
+                center.y + constants::HEXA_VERTEX_RADIUS * angle.sin(),
+            )
         })
         .collect()
 }
@@ -711,7 +832,13 @@ pub fn hexa_advance_display<K: Clone + Eq + std::hash::Hash>(
     let mut next = std::collections::HashMap::new();
     for (key, target, raw) in members {
         let pos = prev.get(key).copied().unwrap_or(*raw);
-        next.insert(key.clone(), Vector2::new(pos.x + (target.x - pos.x) * rate, pos.y + (target.y - pos.y) * rate));
+        next.insert(
+            key.clone(),
+            Vector2::new(
+                pos.x + (target.x - pos.x) * rate,
+                pos.y + (target.y - pos.y) * rate,
+            ),
+        );
     }
     next
 }
@@ -730,7 +857,11 @@ pub fn draw_hexa_polygon(d: &mut impl RaylibDraw, vertices: &[Vector2], ignited:
     if n < 2 {
         return;
     }
-    let (color, thickness) = if ignited { (Color::new(255, 245, 200, 230), 0.12) } else { (Color::new(255, 255, 255, 90), 0.05) };
+    let (color, thickness) = if ignited {
+        (Color::new(255, 245, 200, 230), 0.12)
+    } else {
+        (Color::new(255, 255, 255, 90), 0.05)
+    };
     for i in 0..n {
         if i + 1 == n && n < 6 {
             break;

@@ -35,21 +35,29 @@
 //! - Subscribers receive other clients' commits as `TransactionUpdateLight`,
 //!   only their own as full `TransactionUpdate`.
 
-#[path = "../world.rs"]
-mod world;
-#[path = "../ui.rs"]
-mod ui;
+#[path = "../replay.rs"]
+mod replay;
 #[path = "../sfx.rs"]
 mod sfx;
+#[path = "../ui.rs"]
+mod ui;
+#[path = "../world.rs"]
+mod world;
 use world::constants::*;
 
 use raylib::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_void};
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::os::raw::c_char;
 use std::time::{Duration, Instant};
+
+const RECOVERED_HISTORY_PATH: &str = "/hexel-tile-history.bin";
+const RECOVERED_HISTORY_MAGIC: &[u8] = b"HEXELHIST\x02";
+const RECOVERED_HISTORY_RECORD_BYTES: u64 = 25;
 
 unsafe extern "C" {
     fn emscripten_run_script_string(script: *const c_char) -> *const c_char;
@@ -59,7 +67,19 @@ unsafe extern "C" {
         fps: i32,
         simulate_infinite_loop: bool,
     );
+    fn hexel_gif_begin(width: i32, height: i32) -> i32;
+    fn hexel_gif_frame(rgba: *mut u8, delay_cs: i32, pitch: i32);
+    fn hexel_gif_end(length: *mut usize) -> *mut u8;
+    fn hexel_gif_free(data: *mut c_void);
 }
+
+const GIF_EXPORT_SIZE: i32 = 240;
+const GIF_CAPTURE_EVERY_FRAMES: u32 = 6; // 10 FPS at the game's 60 FPS target
+const GIF_FRAME_DELAY_CS: i32 = 10;
+/// Exports should complete promptly after the player chooses them.  The
+/// normal replay remains configurable through its controls, while a saved
+/// timelapse uses this compact fixed presentation length.
+const TIMELAPSE_EXPORT_DURATION_SECS: f32 = 15.0;
 
 /// Everything the JS side hands us once per frame — see stdb.frame() in
 /// client/web/game.html.
@@ -165,12 +185,14 @@ struct IslandCellRow {
     q: i32,
     r: i32,
     color: u32,
+    painted_at_micros: i64,
 }
 
 struct MarginCellRow {
     q: i32,
     r: i32,
     color: u32,
+    painted_at_micros: i64,
 }
 
 /// F8: one row per (island, liker) — see the server-side comment on
@@ -288,7 +310,10 @@ fn parse_inventory(v: &Value) -> Option<(u64, InventoryRow)> {
             owner_hex: identity_hex(r.field("owner", 1)?)?,
             hue: r.field("hue", 2)?.as_u64()? as u16,
             obtained_at_micros: timestamp_micros(r.field("obtained_at", 3)?),
-            obtained_with_hex: r.field("obtained_with", 4)?.pipe(opt_value).and_then(identity_hex),
+            obtained_with_hex: r
+                .field("obtained_with", 4)?
+                .pipe(opt_value)
+                .and_then(identity_hex),
             from_gift: r.field("from_gift", 5)?.as_bool()?,
         },
     ))
@@ -303,9 +328,17 @@ fn parse_island(v: &Value) -> Option<(u32, IslandRow)> {
             owner_hex: identity_hex(r.field("owner", 1)?)?,
             slot: r.field("slot", 2)?.as_u64()? as u32,
             likes: r.field("likes", 3)?.as_u64()? as u32,
-            itch_rate_id: r.field("itch_rate_id", 4)?.pipe(opt_value).and_then(|v| v.as_u64()).map(|n| n as u32),
+            itch_rate_id: r
+                .field("itch_rate_id", 4)?
+                .pipe(opt_value)
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32),
             created_at_micros: timestamp_micros(r.field("created_at", 5)?),
-            border_color: r.field("border_color", 6)?.pipe(opt_value).and_then(|v| v.as_u64()).map(|n| n as u32),
+            border_color: r
+                .field("border_color", 6)?
+                .pipe(opt_value)
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32),
             border_hidden: r.field("border_hidden", 7)?.as_bool()?,
         },
     ))
@@ -329,7 +362,10 @@ fn parse_config(v: &Value) -> Option<(u32, ConfigRow)> {
     Some((
         id,
         ConfigRow {
-            next_rerank_at_micros: r.field("next_rerank_at", 3)?.pipe(opt_value).map(timestamp_micros),
+            next_rerank_at_micros: r
+                .field("next_rerank_at", 3)?
+                .pipe(opt_value)
+                .map(timestamp_micros),
             admin_hex: r.field("admin", 2)?.pipe(opt_value).and_then(identity_hex),
         },
     ))
@@ -345,6 +381,7 @@ fn parse_island_cell(v: &Value) -> Option<(u32, IslandCellRow)> {
             q: r.field("q", 2)?.as_i64()? as i32,
             r: r.field("r", 3)?.as_i64()? as i32,
             color: r.field("color", 4)?.as_u64()? as u32,
+            painted_at_micros: timestamp_micros(r.field("painted_at", 6)?),
         },
     ))
 }
@@ -358,6 +395,7 @@ fn parse_margin_cell(v: &Value) -> Option<(u32, MarginCellRow)> {
             q: r.field("q", 1)?.as_i64()? as i32,
             r: r.field("r", 2)?.as_i64()? as i32,
             color: r.field("color", 3)?.as_u64()? as u32,
+            painted_at_micros: timestamp_micros(r.field("painted_at", 5)?),
         },
     ))
 }
@@ -378,7 +416,12 @@ fn parse_gift(v: &Value) -> Option<(u64, GiftRow)> {
 fn parse_hexa_event(v: &Value) -> Option<(u64, HexaEventRow)> {
     let r = row_view(v)?;
     let id = r.field("id", 0)?.as_u64()?;
-    Some((id, HexaEventRow { at_micros: timestamp_micros(r.field("at", 1)?) }))
+    Some((
+        id,
+        HexaEventRow {
+            at_micros: timestamp_micros(r.field("at", 1)?),
+        },
+    ))
 }
 
 /// Mirrors `main.rs`'s `MergeEvent` binding. Field order
@@ -499,7 +542,9 @@ impl Tables {
                 "config" => apply_updates(&mut self.configs, updates, parse_config),
                 "gift" => apply_updates(&mut self.gifts, updates, parse_gift),
                 "hexa_event" => apply_updates(&mut self.hexa_events, updates, parse_hexa_event),
-                "hexa_cluster" => apply_updates(&mut self.hexa_clusters, updates, parse_hexa_cluster),
+                "hexa_cluster" => {
+                    apply_updates(&mut self.hexa_clusters, updates, parse_hexa_cluster)
+                }
                 "merge_event" => apply_updates(&mut self.merge_events, updates, parse_merge_event),
                 _ => {}
             }
@@ -557,9 +602,10 @@ fn run_js(js: &str) -> String {
 fn call_reducer(name: &str, args: Value) {
     let js_name = serde_json::to_string(name).unwrap();
     let js_args = serde_json::to_string(&args.to_string()).unwrap();
-    run_js(&format!("window.stdb && window.stdb.callReducer({js_name}, {js_args})"));
+    run_js(&format!(
+        "window.stdb && window.stdb.callReducer({js_name}, {js_args})"
+    ));
 }
-
 
 /// What a hovered world cell is paintable as, from `me`'s point of view —
 /// mirrors `main.rs`'s `Paintable` against this file's plain `Tables`
@@ -576,14 +622,21 @@ enum Paintable {
 }
 
 fn my_island<'a>(tables: &'a Tables, me: &str) -> Option<(&'a IslandRow, u32)> {
-    tables.islands.iter().find(|(_, isl)| isl.owner_hex == me).map(|(&id, isl)| (isl, id))
+    tables
+        .islands
+        .iter()
+        .find(|(_, isl)| isl.owner_hex == me)
+        .map(|(&id, isl)| (isl, id))
 }
 
 /// Author request (admin "draw anywhere"): true once `me` has claimed the
 /// admin role via `claim_admin` — mirrors `main.rs`'s `is_admin` against this
 /// file's plain `Tables` instead of `ctx.db`.
 fn is_admin(tables: &Tables, me: &str) -> bool {
-    tables.configs.get(&0).is_some_and(|c| c.admin_hex.as_deref() == Some(me))
+    tables
+        .configs
+        .get(&0)
+        .is_some_and(|c| c.admin_hex.as_deref() == Some(me))
 }
 
 fn island_world_center(island: &IslandRow) -> Vector2 {
@@ -655,12 +708,25 @@ fn painted_color_at(tables: &Tables, world_q: i32, world_r: i32) -> Option<(u16,
             .find(|c| c.island_id == island_id && c.q == lq && c.r == lr)
             .map(|c| world::unpack_hsv(c.color));
     }
-    tables.margin_cells.values().find(|c| c.q == world_q && c.r == world_r).map(|c| world::unpack_hsv(c.color))
+    tables
+        .margin_cells
+        .values()
+        .find(|c| c.q == world_q && c.r == world_r)
+        .map(|c| world::unpack_hsv(c.color))
 }
 
 /// F9.6 item 7 (launch intro): mirrors `main.rs`'s `world_fit` — a camera
 /// pose framing every currently-known island's center.
 fn world_fit(tables: &Tables, fallback: Vector2, fallback_zoom: f32) -> (Vector2, f32) {
+    world_fit_with_min_zoom(tables, fallback, fallback_zoom, 0.25)
+}
+
+fn world_fit_with_min_zoom(
+    tables: &Tables,
+    fallback: Vector2,
+    fallback_zoom: f32,
+    min_zoom: f32,
+) -> (Vector2, f32) {
     let mut min = Vector2::new(f32::MAX, f32::MAX);
     let mut max = Vector2::new(f32::MIN, f32::MIN);
     let mut any = false;
@@ -677,7 +743,7 @@ fn world_fit(tables: &Tables, fallback: Vector2, fallback_zoom: f32) -> (Vector2
     }
     let target = Vector2::new((min.x + max.x) / 2.0, (min.y + max.y) / 2.0);
     let span = (max.x - min.x).max(max.y - min.y) + ISLAND_RADIUS as f32 * 4.0;
-    let zoom = (620.0 / span.max(1.0)).clamp(0.25, ISLAND_FIT_ZOOM);
+    let zoom = (620.0 / span.max(1.0)).clamp(min_zoom, ISLAND_FIT_ZOOM);
     (target, zoom)
 }
 
@@ -758,7 +824,10 @@ fn format_age(now_micros: i64, created_at_micros: i64) -> String {
 /// Whether `me` has already liked `island_id` — mirrors `main.rs`'s
 /// `already_liked`, shared by the popup payload and the double-click toggle.
 fn already_liked(tables: &Tables, island_id: u32, me: &str) -> bool {
-    tables.island_likes.values().any(|l| l.island_id == island_id && l.liker_hex == me)
+    tables
+        .island_likes
+        .values()
+        .any(|l| l.island_id == island_id && l.liker_hex == me)
 }
 
 /// Author-requested: mirrors `main.rs`'s `resolve_border_color` — what an
@@ -782,7 +851,9 @@ fn resolve_border_color(tables: &Tables, island: &IslandRow) -> Color {
 /// F8: mirrors `main.rs`'s `open_island_info`, reading from the local
 /// `Tables` cache instead of `ctx.db`.
 fn open_island_info(state: &mut State, island_id: u32) {
-    let Some(island) = state.tables.islands.get(&island_id) else { return };
+    let Some(island) = state.tables.islands.get(&island_id) else {
+        return;
+    };
     let me = state.my_identity.clone();
     let me = me.as_deref();
     let is_own = Some(island.owner_hex.as_str()) == me;
@@ -793,14 +864,28 @@ fn open_island_info(state: &mut State, island_id: u32) {
     let already_liked = me.is_some_and(|me| already_liked(&state.tables, island_id, me));
     let border_hidden = island.border_hidden;
     let border_color = resolve_border_color(&state.tables, island);
-    state.ui_state.open_island_info(ui::IslandInfo { island_id, owner_label, likes, age_label, link_id, is_own, already_liked, border_hidden, border_color });
+    state.ui_state.open_island_info(ui::IslandInfo {
+        island_id,
+        owner_label,
+        likes,
+        age_label,
+        link_id,
+        is_own,
+        already_liked,
+        border_hidden,
+        border_color,
+    });
 }
 
 /// Author follow-up (2026-07-12): mirrors `main.rs`'s `open_admin_edit`,
 /// reading from the local `Tables` cache instead of `ctx.db`.
 fn open_admin_edit(state: &mut State, island_id: u32) {
-    let Some(island) = state.tables.islands.get(&island_id) else { return };
-    let Some(owner) = state.tables.users.get(&island.owner_hex) else { return };
+    let Some(island) = state.tables.islands.get(&island_id) else {
+        return;
+    };
+    let Some(owner) = state.tables.users.get(&island.owner_hex) else {
+        return;
+    };
     let name = owner.name.clone().unwrap_or_default();
     let likes = island.likes;
     let xp = owner.xp;
@@ -828,6 +913,194 @@ struct Pinch {
     start_zoom: f32,
 }
 
+/// Sequential reader for the local commitlog recovery artifact. Keeping only
+/// the current tile maps in memory lets the web replay handle millions of
+/// historical mutations without loading all events into the wasm heap.
+struct RecoveredReplay {
+    reader: BufReader<File>,
+    /// Inclusive/exclusive source-event range shown by this replay. Whole
+    /// world playback uses the full file; a selected island uses only the
+    /// period from its creation through its last mutation.
+    playback_start: usize,
+    playback_end: usize,
+    applied_events: usize,
+    /// Island cells use island-local coordinates, so their island id must be
+    /// part of the key. Using just `(q, r)` collapses every player's island
+    /// onto the origin.
+    island_cells: HashMap<(u32, i32, i32), u32>,
+    margin_cells: HashMap<(i32, i32), u32>,
+    /// Current slot for every island at this point in the recovered event
+    /// stream. This also follows re-ranks instead of using today's layout.
+    island_slots: HashMap<u32, u32>,
+    /// `None` replays the whole world; `Some(id)` retains only that island.
+    island_filter: Option<u32>,
+}
+
+impl RecoveredReplay {
+    fn open(island_filter: Option<u32>) -> Result<Self, String> {
+        let file = File::open(RECOVERED_HISTORY_PATH)
+            .map_err(|error| format!("replay history is unavailable: {error}"))?;
+        let length = file
+            .metadata()
+            .map_err(|error| format!("could not inspect replay history: {error}"))?
+            .len();
+        let payload = length
+            .checked_sub(RECOVERED_HISTORY_MAGIC.len() as u64)
+            .ok_or_else(|| "replay history is truncated".to_string())?;
+        if payload % RECOVERED_HISTORY_RECORD_BYTES != 0 {
+            return Err("replay history has an invalid record length".to_string());
+        }
+        let mut reader = BufReader::new(file);
+        let mut magic = [0; RECOVERED_HISTORY_MAGIC.len()];
+        reader
+            .read_exact(&mut magic)
+            .map_err(|error| format!("could not read replay history: {error}"))?;
+        if magic != RECOVERED_HISTORY_MAGIC {
+            return Err("replay history has an unknown format".to_string());
+        }
+        let total_events = (payload / RECOVERED_HISTORY_RECORD_BYTES) as usize;
+        let (playback_start, playback_end) = match island_filter {
+            None => (0, total_events),
+            Some(target_id) => {
+                // Scanning this compact fixed-width file once lets a focused
+                // replay start at the island's actual creation instead of
+                // spending most of the world timeline on an empty screen.
+                let mut scan = BufReader::new(
+                    File::open(RECOVERED_HISTORY_PATH)
+                        .map_err(|error| format!("could not scan replay history: {error}"))?,
+                );
+                scan.seek(SeekFrom::Start(RECOVERED_HISTORY_MAGIC.len() as u64))
+                    .map_err(|error| format!("could not scan replay history: {error}"))?;
+                let mut bytes = [0_u8; RECOVERED_HISTORY_RECORD_BYTES as usize];
+                let mut first = None;
+                let mut last = 0;
+                for index in 0..total_events {
+                    scan.read_exact(&mut bytes)
+                        .map_err(|error| format!("could not scan replay event {index}: {error}"))?;
+                    let kind = bytes[0];
+                    let island_id =
+                        u32::from_le_bytes(bytes[9..13].try_into().expect("fixed replay event"));
+                    if matches!(kind, 0 | 1 | 4 | 5) && island_id == target_id {
+                        first.get_or_insert(index);
+                        last = index + 1;
+                    }
+                }
+                let Some(first) = first else {
+                    return Err(format!("island #{target_id} has no recovered history"));
+                };
+                (first, last)
+            }
+        };
+        let mut replay = Self {
+            reader,
+            playback_start,
+            playback_end,
+            applied_events: playback_start,
+            island_cells: HashMap::new(),
+            margin_cells: HashMap::new(),
+            island_slots: HashMap::new(),
+            island_filter,
+        };
+        replay.reset()?;
+        Ok(replay)
+    }
+
+    fn reset(&mut self) -> Result<(), String> {
+        self.reader
+            .seek(SeekFrom::Start(
+                RECOVERED_HISTORY_MAGIC.len() as u64
+                    + self.playback_start as u64 * RECOVERED_HISTORY_RECORD_BYTES,
+            ))
+            .map_err(|error| format!("could not restart replay history: {error}"))?;
+        self.applied_events = self.playback_start;
+        self.island_cells.clear();
+        self.margin_cells.clear();
+        self.island_slots.clear();
+        Ok(())
+    }
+
+    fn advance_to(&mut self, progress: f32) -> Result<(), String> {
+        let target = self.playback_start
+            + (((self.playback_end - self.playback_start) as f64) * progress.clamp(0.0, 1.0) as f64)
+                as usize;
+        if target < self.applied_events {
+            self.reset()?;
+        }
+        let mut bytes = [0_u8; RECOVERED_HISTORY_RECORD_BYTES as usize];
+        while self.applied_events < target {
+            self.reader.read_exact(&mut bytes).map_err(|error| {
+                format!(
+                    "could not read replay event {}: {error}",
+                    self.applied_events
+                )
+            })?;
+            let kind = bytes[0];
+            // The transaction offset is retained for the exported format and
+            // auditability. Playback is paced uniformly by event order.
+            let island_id =
+                u32::from_le_bytes(bytes[9..13].try_into().expect("fixed replay event"));
+            let q = i32::from_le_bytes(bytes[13..17].try_into().expect("fixed replay event"));
+            let r = i32::from_le_bytes(bytes[17..21].try_into().expect("fixed replay event"));
+            let color = u32::from_le_bytes(bytes[21..25].try_into().expect("fixed replay event"));
+            let include_island = self
+                .island_filter
+                .is_none_or(|target_id| target_id == island_id);
+            match kind {
+                0 if include_island => {
+                    self.island_cells.remove(&(island_id, q, r));
+                }
+                1 if include_island => {
+                    self.island_cells.insert((island_id, q, r), color);
+                }
+                2 if self.island_filter.is_none() => {
+                    self.margin_cells.remove(&(q, r));
+                }
+                3 if self.island_filter.is_none() => {
+                    self.margin_cells.insert((q, r), color);
+                }
+                4 if include_island => {
+                    self.island_slots.remove(&island_id);
+                }
+                5 if include_island => {
+                    self.island_slots.insert(island_id, q as u32);
+                }
+                0..=5 => {}
+                _ => return Err(format!("replay history has invalid event kind {kind}")),
+            }
+            self.applied_events += 1;
+        }
+        Ok(())
+    }
+
+    fn visible_tiles(&self) -> usize {
+        self.island_cells.len() + self.margin_cells.len()
+    }
+
+    /// A single-island replay is an artwork export, not a historical
+    /// leaderboard visualisation.  Keep that island at the canonical origin
+    /// for every frame so current or historic re-ranks cannot push it out of
+    /// the camera centre.  Presence still comes from `island_slots`, so an
+    /// island only appears after its recovered creation event and disappears
+    /// at its recovered deletion event.
+    fn display_slot(&self, island_id: u32) -> Option<u32> {
+        self.island_slots.get(&island_id).map(|&historical_slot| {
+            if self.island_filter == Some(island_id) {
+                0
+            } else {
+                historical_slot
+            }
+        })
+    }
+
+    fn playback_events(&self) -> usize {
+        self.playback_end - self.playback_start
+    }
+
+    fn applied_playback_events(&self) -> usize {
+        self.applied_events - self.playback_start
+    }
+}
+
 struct State {
     rl: RaylibHandle,
     thread: RaylibThread,
@@ -839,6 +1112,22 @@ struct State {
     intro_started_at: Option<Instant>,
     intro_from: Option<(Vector2, f32)>,
     ui_state: ui::UiState,
+    /// Local-only retained-world replay. `None` is ordinary gameplay;
+    /// `Some` suppresses mutations and chronologically reveals timestamps.
+    replay_clock: Option<replay::ReplayClock>,
+    /// Full local history for web replay, loaded from the preloaded recovery
+    /// artifact rather than inferred from the latest table snapshot.
+    recovered_replay: Option<RecoveredReplay>,
+    /// Browser canvas recording is active until replay reaches its end (or
+    /// the viewer is closed), then JavaScript downloads a WebM file.
+    replay_recording: bool,
+    /// True for an export launched from the island panel, where controls and
+    /// the cursor stay out of the captured timelapse frames.
+    clean_timeline_export: bool,
+    /// A compact, real GIF capture of the selected island replay. Frames are
+    /// sampled after raylib finishes drawing, then encoded by `msf_gif`.
+    gif_recording: bool,
+    gif_frame_counter: u32,
     known_inventory_ids: HashSet<u64>,
     inventory_seeded: bool,
     known_merge_event_ids: HashSet<u64>,
@@ -952,6 +1241,90 @@ fn recenter(camera: &mut Camera2D, island: &IslandRow) {
     camera.offset = Vector2::new(360.0, 360.0);
 }
 
+fn start_replay_with_duration(
+    state: &mut State,
+    island_filter: Option<u32>,
+    duration_secs: f32,
+) -> bool {
+    let recovered = match RecoveredReplay::open(island_filter) {
+        Ok(recovered) => recovered,
+        Err(error) => {
+            state.ui_state.show_info_toast(error);
+            return false;
+        }
+    };
+    let total_events = recovered.playback_events();
+    state.recovered_replay = Some(recovered);
+    if let Some(island_id) = island_filter {
+        state
+            .ui_state
+            .show_info_toast(format!("replaying island #{island_id}"));
+    }
+    state.replay_clock = Some(replay::ReplayClock::new(
+        // Recovered events are ordered by committed transaction. Replay pace
+        // is deliberately controlled by the existing duration/speed UI, not
+        // by wall-clock gaps between historic transactions.
+        [0, total_events as i64],
+        duration_secs,
+        state.now_micros,
+    ));
+    state.ui_state.title_active = false;
+    state.centered_on_island = true;
+    if island_filter.is_some() {
+        // Individual replays draw the selected island in the canonical
+        // origin slot (see `RecoveredReplay::display_slot`), never at its
+        // mutable leaderboard rank.
+        state.camera.target = world::axial_to_world(0, 0);
+        state.camera.zoom = ISLAND_FIT_ZOOM;
+    } else {
+        let (target, zoom) = world_fit_with_min_zoom(
+            &state.tables,
+            state.camera.target,
+            state.camera.zoom,
+            replay::MIN_CAMERA_ZOOM,
+        );
+        state.camera.target = target;
+        state.camera.zoom = zoom;
+    }
+    state.camera.offset = Vector2::new(360.0, 360.0);
+    true
+}
+
+fn start_replay(state: &mut State, island_filter: Option<u32>) -> bool {
+    start_replay_with_duration(state, island_filter, replay::DEFAULT_DURATION_SECS)
+}
+
+fn start_gif_export(state: &mut State, island_id: u32) {
+    if !start_replay_with_duration(state, Some(island_id), TIMELAPSE_EXPORT_DURATION_SECS) {
+        return;
+    }
+    if unsafe { hexel_gif_begin(GIF_EXPORT_SIZE, GIF_EXPORT_SIZE) } != 0 {
+        state.gif_recording = true;
+        state.gif_frame_counter = 0;
+    } else {
+        state
+            .ui_state
+            .show_info_toast("could not start GIF export".to_string());
+    }
+}
+
+fn start_video_export(state: &mut State, island_id: u32) {
+    if !start_replay_with_duration(state, Some(island_id), TIMELAPSE_EXPORT_DURATION_SECS) {
+        return;
+    }
+    state.replay_recording = true;
+    state.clean_timeline_export = true;
+    if run_js("Boolean(window.stdb && window.stdb.startReplayRecording())") != "true" {
+        state.replay_recording = false;
+        state.clean_timeline_export = false;
+        state.replay_clock = None;
+        state.recovered_replay = None;
+        state
+            .ui_state
+            .show_info_toast("video export is not supported by this browser".to_string());
+    }
+}
+
 extern "C" fn on_frame(arg: *mut c_void) {
     let state = unsafe { &mut *(arg as *mut State) };
     frame(state);
@@ -972,9 +1345,15 @@ fn frame(state: &mut State) {
     }
     state.was_focused = focused_now;
     if state.mouse_state_stale
-        && !state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
-        && !state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
-        && !state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT)
+        && !state
+            .rl
+            .is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
+        && !state
+            .rl
+            .is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
+        && !state
+            .rl
+            .is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT)
     {
         state.mouse_state_stale = false;
     }
@@ -995,6 +1374,108 @@ fn frame(state: &mut State) {
         state.ui_state.show_info_toast(err);
     }
 
+    let replay_mouse = state.rl.get_mouse_position();
+    let replay_click = state.replay_clock.is_some()
+        && state
+            .rl
+            .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT);
+    let record_replay =
+        replay_click && replay::record_rect().check_collision_point_rec(replay_mouse);
+    let gif_replay = replay_click && replay::gif_rect().check_collision_point_rec(replay_mouse);
+    let replay_own_island =
+        replay_click && replay::island_only_rect().check_collision_point_rec(replay_mouse);
+    if replay_own_island {
+        if let Some(me) = state.my_identity.clone() {
+            if let Some((_, island_id)) = my_island(&state.tables, &me) {
+                start_replay(state, Some(island_id));
+            } else {
+                state
+                    .ui_state
+                    .show_info_toast("no island is available for replay".to_string());
+            }
+        }
+    }
+    if record_replay && !state.replay_recording {
+        // A recording is an export of the complete selected replay, not just
+        // whatever segment happened to be on screen when Record was pressed.
+        let island_filter = state
+            .recovered_replay
+            .as_ref()
+            .and_then(|history| history.island_filter);
+        start_replay(state, island_filter);
+        state.replay_recording = true;
+        run_js("window.stdb && window.stdb.startReplayRecording()");
+    }
+    let mut stop_replay_recording = false;
+    let mut finish_gif_recording = false;
+    if gif_replay && !state.gif_recording {
+        // GIF mode always focuses an island. If the replay is currently the
+        // whole world, default to the signed-in player's island so export is
+        // one click after choosing Replay.
+        let island_filter = state
+            .recovered_replay
+            .as_ref()
+            .and_then(|history| history.island_filter)
+            .or_else(|| {
+                state
+                    .my_identity
+                    .as_deref()
+                    .and_then(|me| my_island(&state.tables, me).map(|(_, id)| id))
+            });
+        if let Some(island_id) = island_filter {
+            start_gif_export(state, island_id);
+        } else {
+            state
+                .ui_state
+                .show_info_toast("select an island before exporting a GIF".to_string());
+        }
+    }
+    let close_replay = state
+        .replay_clock
+        .as_mut()
+        .is_some_and(|clock| replay::handle_input(&mut state.rl, clock));
+    if close_replay {
+        if state.replay_recording {
+            state.replay_recording = false;
+            stop_replay_recording = true;
+        }
+        if state.gif_recording {
+            finish_gif_recording = true;
+        }
+        state.replay_clock = None;
+        state.recovered_replay = None;
+    } else if let Some(clock) = state.replay_clock.as_mut() {
+        clock.tick(state.rl.get_frame_time());
+    }
+    if let (Some(clock), Some(recovered)) =
+        (state.replay_clock.as_ref(), state.recovered_replay.as_mut())
+    {
+        if let Err(error) = recovered.advance_to(clock.progress()) {
+            state.replay_clock = None;
+            state.recovered_replay = None;
+            state.ui_state.show_info_toast(error);
+        }
+    }
+    if state
+        .replay_clock
+        .as_ref()
+        .is_some_and(replay::ReplayClock::is_finished)
+        && state.replay_recording
+    {
+        state.replay_recording = false;
+        stop_replay_recording = true;
+    }
+    if state
+        .replay_clock
+        .as_ref()
+        .is_some_and(replay::ReplayClock::is_finished)
+        && state.gif_recording
+    {
+        finish_gif_recording = true;
+    }
+    let mut replay_mode = state.replay_clock.is_some();
+    let replay_closed_this_frame = close_replay;
+
     let me = state.my_identity.clone();
     let me = me.as_deref();
     // Theme music: mirrors `main.rs` exactly. Gating on `!title_active`
@@ -1012,9 +1493,12 @@ fn frame(state: &mut State) {
             s.theme.update_stream();
         }
     }
-    let hexa_zoom_locked = me.is_some_and(|id| state.tables.hexa_clusters.contains_key(id));
+    let hexa_zoom_locked =
+        !replay_mode && me.is_some_and(|id| state.tables.hexa_clusters.contains_key(id));
     if hexa_zoom_locked {
-        let rate = (1.0 - (-state.rl.get_frame_time() / world::constants::HEXA_ZOOM_LERP_SECS).exp()).clamp(0.0, 1.0);
+        let rate = (1.0
+            - (-state.rl.get_frame_time() / world::constants::HEXA_ZOOM_LERP_SECS).exp())
+        .clamp(0.0, 1.0);
         state.camera.zoom += (ISLAND_FIT_ZOOM - state.camera.zoom) * rate;
         if (state.camera.zoom - ISLAND_FIT_ZOOM).abs() < 0.001 {
             state.camera.zoom = ISLAND_FIT_ZOOM;
@@ -1026,11 +1510,15 @@ fn frame(state: &mut State) {
     // F11 (flying gift): mirrors `main.rs` exactly — current drifted world
     // position of the single active gift (if any) and whether the mouse is
     // within claim range of it right now.
-    let active_gift: Option<(u64, Vector2, f32)> = state.tables.gifts.iter().next().map(|(&id, g)| {
-        let elapsed = ((state.now_micros - g.spawned_at_micros).max(0) as f64 / 1_000_000.0) as f32;
-        let pos = world::gift_drift_pos(Vector2::new(g.x, g.y), elapsed);
-        (id, pos, elapsed)
-    });
+    let active_gift: Option<(u64, Vector2, f32)> = (!replay_mode)
+        .then(|| state.tables.gifts.iter().next())
+        .flatten()
+        .map(|(&id, g)| {
+            let elapsed =
+                ((state.now_micros - g.spawned_at_micros).max(0) as f64 / 1_000_000.0) as f32;
+            let pos = world::gift_drift_pos(Vector2::new(g.x, g.y), elapsed);
+            (id, pos, elapsed)
+        });
     let gift_hit = active_gift.is_some_and(|(_, pos, _)| {
         let dx = mouse_world.x - pos.x;
         let dy = mouse_world.y - pos.y;
@@ -1043,8 +1531,9 @@ fn frame(state: &mut State) {
     // long-press-merges whatever tile happens to lie beneath it.
     // `!title_active`: mirrors `main.rs` — the title screen covers the whole
     // screen, so nothing is "over the map" until Draw dismisses it.
-    let over_map_area =
-        !state.ui_state.title_active && mouse_screen.y > ui::HEADER_H && mouse_screen.y < (720.0 - ui::FOOTER_H);
+    let over_map_area = !state.ui_state.title_active
+        && mouse_screen.y > ui::HEADER_H
+        && mouse_screen.y < (720.0 - ui::FOOTER_H);
 
     // F9.6 item 7: launch intro — mirrors `main.rs` exactly. Camera starts
     // framing the whole occupied world and eases to the player's island over
@@ -1058,7 +1547,8 @@ fn frame(state: &mut State) {
     if state.ui_state.title_active {
         if let Some(me) = me {
             if let Some((island, _)) = my_island(&state.tables, me) {
-                let (target, zoom) = world_fit(&state.tables, island_world_center(island), ISLAND_FIT_ZOOM);
+                let (target, zoom) =
+                    world_fit(&state.tables, island_world_center(island), ISLAND_FIT_ZOOM);
                 state.camera.target = target;
                 state.camera.zoom = zoom;
                 state.camera.offset = Vector2::new(360.0, 360.0);
@@ -1070,15 +1560,23 @@ fn frame(state: &mut State) {
                 let to_target = island_world_center(island);
                 let to_zoom = ISLAND_FIT_ZOOM;
                 let start = *state.intro_started_at.get_or_insert_with(Instant::now);
-                let (from_target, from_zoom) =
-                    *state.intro_from.get_or_insert_with(|| world_fit(&state.tables, to_target, to_zoom));
-                let any_input = state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
-                    || state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE)
-                    || state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_RIGHT)
+                let (from_target, from_zoom) = *state
+                    .intro_from
+                    .get_or_insert_with(|| world_fit(&state.tables, to_target, to_zoom));
+                let any_input = state
+                    .rl
+                    .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+                    || state
+                        .rl
+                        .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE)
+                    || state
+                        .rl
+                        .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_RIGHT)
                     || state.rl.get_mouse_wheel_move() != 0.0
                     || state.rl.get_touch_point_count() > 0
                     || state.rl.get_key_pressed().is_some();
-                let t = (start.elapsed().as_secs_f32() / INTRO_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+                let t =
+                    (start.elapsed().as_secs_f32() / INTRO_DURATION.as_secs_f32()).clamp(0.0, 1.0);
                 if any_input || t >= 1.0 {
                     state.camera.target = to_target;
                     state.camera.zoom = to_zoom;
@@ -1111,8 +1609,14 @@ fn frame(state: &mut State) {
             state.merge_events_seeded = true;
         } else {
             for (&id, event) in &state.tables.merge_events {
-                if state.known_merge_event_ids.insert(id) && (event.a_hex == me || event.b_hex == me) {
-                    state.ui_state.note_used_color(ui::RecentColor { hue: event.merged_hue, sat: event.merged_sat, val: event.merged_val });
+                if state.known_merge_event_ids.insert(id)
+                    && (event.a_hex == me || event.b_hex == me)
+                {
+                    state.ui_state.note_used_color(ui::RecentColor {
+                        hue: event.merged_hue,
+                        sat: event.merged_sat,
+                        val: event.merged_val,
+                    });
                     if let Some(s) = &state.sfx {
                         s.merge.play();
                     }
@@ -1125,7 +1629,11 @@ fn frame(state: &mut State) {
         } else {
             for (&event_id, _) in &state.tables.hexa_events {
                 if state.known_hexa_event_ids.insert(event_id)
-                    && state.tables.hexa_clusters.get(me).is_some_and(|row| row.ignited)
+                    && state
+                        .tables
+                        .hexa_clusters
+                        .get(me)
+                        .is_some_and(|row| row.ignited)
                 {
                     state.ui_state.show_hexa_success_popup();
                     if let Some(s) = &state.sfx {
@@ -1151,7 +1659,11 @@ fn frame(state: &mut State) {
                         state.pending_gift_claim = None;
                         reward_sound_this_frame = true;
                         if let Some(s) = &state.sfx {
-                            s.play_gift_reward(&s.new_color, state.rl.get_random_value(0..=2), state.rl.get_random_value(0..=99));
+                            s.play_gift_reward(
+                                &s.new_color,
+                                state.rl.get_random_value(0..=2),
+                                state.rl.get_random_value(0..=99),
+                            );
                         }
                     } else if inv.obtained_with_hex.is_none() {
                         // F13: mirrors `main.rs` — a Hexa-pooled grant also
@@ -1160,7 +1672,12 @@ fn frame(state: &mut State) {
                         // `hexa_event` row stamped with the identical
                         // `ctx.timestamp` (see `apply_hexa`'s server-side
                         // comment).
-                        if state.tables.hexa_events.values().any(|e| e.at_micros == inv.obtained_at_micros) {
+                        if state
+                            .tables
+                            .hexa_events
+                            .values()
+                            .any(|e| e.at_micros == inv.obtained_at_micros)
+                        {
                             state.ui_state.show_hexa_toast(inv.hue);
                             if let Some(s) = &state.sfx {
                                 s.new_color.play();
@@ -1170,10 +1687,10 @@ fn frame(state: &mut State) {
                             state.ui_state.note_reset_hue(inv.hue);
                         }
                     } else {
-                        let label = inv
-                            .obtained_with_hex
-                            .as_deref()
-                            .map_or_else(|| "someone".to_string(), |p| player_label(&state.tables, p));
+                        let label = inv.obtained_with_hex.as_deref().map_or_else(
+                            || "someone".to_string(),
+                            |p| player_label(&state.tables, p),
+                        );
                         // Mirrors `main.rs`: use the same
                         // `obtained_at`/`MergeEvent.at` timestamp join
                         // the Hexa event branch above already uses.
@@ -1181,16 +1698,42 @@ fn frame(state: &mut State) {
                             .tables
                             .merge_events
                             .values()
-                            .find(|e| e.at_micros == inv.obtained_at_micros && (e.a_hex == me || e.b_hex == me))
-                            .map(|e| if e.a_hex == me { (e.hue_a, e.hue_b) } else { (e.hue_b, e.hue_a) });
+                            .find(|e| {
+                                e.at_micros == inv.obtained_at_micros
+                                    && (e.a_hex == me || e.b_hex == me)
+                            })
+                            .map(|e| {
+                                if e.a_hex == me {
+                                    (e.hue_a, e.hue_b)
+                                } else {
+                                    (e.hue_b, e.hue_a)
+                                }
+                            });
                         let color = state
                             .tables
                             .merge_events
                             .values()
-                            .find(|e| e.at_micros == inv.obtained_at_micros && (e.a_hex == me || e.b_hex == me))
-                            .map(|e| ui::RecentColor { hue: e.merged_hue, sat: e.merged_sat, val: e.merged_val })
-                            .or_else(|| state.tables.users.get(me).map(|u| ui::RecentColor { hue: inv.hue, sat: u.sat, val: u.val }))
-                            .unwrap_or(ui::RecentColor { hue: inv.hue, sat: world::sat_cap(0), val: 90 });
+                            .find(|e| {
+                                e.at_micros == inv.obtained_at_micros
+                                    && (e.a_hex == me || e.b_hex == me)
+                            })
+                            .map(|e| ui::RecentColor {
+                                hue: e.merged_hue,
+                                sat: e.merged_sat,
+                                val: e.merged_val,
+                            })
+                            .or_else(|| {
+                                state.tables.users.get(me).map(|u| ui::RecentColor {
+                                    hue: inv.hue,
+                                    sat: u.sat,
+                                    val: u.val,
+                                })
+                            })
+                            .unwrap_or(ui::RecentColor {
+                                hue: inv.hue,
+                                sat: world::sat_cap(0),
+                                val: 90,
+                            });
                         state.ui_state.show_merge_toast(color, &label, merge_from);
                         if merge_from.is_none() {
                             if let Some(s) = &state.sfx {
@@ -1204,7 +1747,11 @@ fn frame(state: &mut State) {
         // F9.5 item 4: mirrors `main.rs` — seed the last-3 ring with the
         // caller's current hue the first frame it's known.
         if let Some(user) = state.tables.users.get(me) {
-            state.ui_state.seed_recent_once(ui::RecentColor { hue: user.hue, sat: user.sat, val: user.val });
+            state.ui_state.seed_recent_once(ui::RecentColor {
+                hue: user.hue,
+                sat: user.sat,
+                val: user.val,
+            });
         }
     }
 
@@ -1216,7 +1763,10 @@ fn frame(state: &mut State) {
     // click's press and release land on different frames), so the click
     // that closes an overlay can't also paint the cell behind it on a later
     // frame where the button is still held but the overlay's already gone.
-    if state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
+    if state
+        .rl
+        .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+    {
         // F9.5 item 7 follow-up: mirrors `main.rs` — `any_modal_open`
         // deliberately excludes the foreign-island hover tooltip, which has
         // no interactive chrome and must not block map input.
@@ -1232,7 +1782,10 @@ fn frame(state: &mut State) {
             state.suppress_map_until_release = true;
         }
     }
-    if state.rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
+    if state
+        .rl
+        .is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT)
+    {
         state.suppress_map_until_release = false;
     }
 
@@ -1243,6 +1796,7 @@ fn frame(state: &mut State) {
     // card. It is intentionally ephemeral: after the canvas is captured at
     // the end of this frame, the normal game returns immediately.
     let mut export_name: Option<String> = None;
+    let mut export_link_id: Option<u32> = None;
     if let Some(me) = me {
         let user = state.tables.users.get(me);
         let hues: Vec<u16> = state
@@ -1258,13 +1812,18 @@ fn frame(state: &mut State) {
         let level = world::level_of(xp);
         // F9 level-up feedback: mirrors `main.rs` exactly.
         let leveled = state.last_level.is_some_and(|prev| level > prev);
-        if state.last_level.is_some_and(|prev| prev < shared::constants::HEXA_UNLOCK_LEVEL && level >= shared::constants::HEXA_UNLOCK_LEVEL) {
+        if state.last_level.is_some_and(|prev| {
+            prev < shared::constants::HEXA_UNLOCK_LEVEL
+                && level >= shared::constants::HEXA_UNLOCK_LEVEL
+        }) {
             state.ui_state.show_hexa_unlocked_toast();
             if let Some(s) = &state.sfx {
                 s.levelup.play();
             }
         } else if leveled {
-            state.ui_state.show_levelup_toast(level, world::sat_cap(level), hue);
+            state
+                .ui_state
+                .show_levelup_toast(level, world::sat_cap(level), hue);
             if let Some(s) = &state.sfx {
                 s.levelup.play();
             }
@@ -1276,8 +1835,15 @@ fn frame(state: &mut State) {
         if xp_delta >= 2 {
             if !leveled && !reward_sound_this_frame {
                 if let Some(s) = &state.sfx {
-                    if state.pending_gift_claim.is_some_and(|t| t.elapsed() <= GIFT_CLAIM_WINDOW) {
-                        s.play_gift_reward(&s.xp, state.rl.get_random_value(0..=2), state.rl.get_random_value(0..=99));
+                    if state
+                        .pending_gift_claim
+                        .is_some_and(|t| t.elapsed() <= GIFT_CLAIM_WINDOW)
+                    {
+                        s.play_gift_reward(
+                            &s.xp,
+                            state.rl.get_random_value(0..=2),
+                            state.rl.get_random_value(0..=99),
+                        );
                     } else {
                         s.xp.play();
                     }
@@ -1286,7 +1852,9 @@ fn frame(state: &mut State) {
             state.pending_gift_claim = None;
         }
         state.last_xp = Some(xp);
-        state.ui_state.sync_name_once(user.and_then(|u| u.name.as_ref()));
+        state
+            .ui_state
+            .sync_name_once(user.and_then(|u| u.name.as_ref()));
         // Author-caught: mirrors `main.rs`'s live-refresh so the Like button
         // reflects the reducer's result immediately, not only after a page
         // reload (the popup used to be a one-time snapshot from open time).
@@ -1295,7 +1863,12 @@ fn frame(state: &mut State) {
                 let likes = island.likes;
                 let liked = already_liked(&state.tables, island_id, me);
                 let border_color = resolve_border_color(&state.tables, island);
-                state.ui_state.refresh_island_popup(likes, liked, island.border_hidden, border_color);
+                state.ui_state.refresh_island_popup(
+                    likes,
+                    liked,
+                    island.border_hidden,
+                    border_color,
+                );
             }
         }
 
@@ -1326,7 +1899,11 @@ fn frame(state: &mut State) {
             link_id: my_island(&state.tables, me).and_then(|(isl, _)| isl.itch_rate_id),
             is_admin: is_admin(&state.tables, me),
         };
-        let actions = ui::handle_input(&mut state.rl, &mut state.ui_state, &info);
+        let actions = if replay_mode || replay_closed_this_frame {
+            ui::Actions::default()
+        } else {
+            ui::handle_input(&mut state.rl, &mut state.ui_state, &info)
+        };
         // Header sound toggle: master volume covers sfx and the theme music
         // in one call, so no per-call-site gating is needed (matches main.rs).
         if let Some(audio) = state.audio {
@@ -1346,7 +1923,9 @@ fn frame(state: &mut State) {
         }
         if let Some(token) = actions.import_token {
             let js_token = serde_json::to_string(&token).unwrap();
-            run_js(&format!("window.stdb && window.stdb.importToken({js_token})"));
+            run_js(&format!(
+                "window.stdb && window.stdb.importToken({js_token})"
+            ));
         }
         if actions.reset_account {
             call_reducer("reset_account", serde_json::json!([]));
@@ -1373,7 +1952,10 @@ fn frame(state: &mut State) {
             call_reducer("show_island_border", serde_json::json!([]));
         }
         if let Some((island_id, name, likes, xp)) = actions.admin_save_island {
-            call_reducer("admin_update_island", serde_json::json!([island_id, name, likes, xp]));
+            call_reducer(
+                "admin_update_island",
+                serde_json::json!([island_id, name, likes, xp]),
+            );
         }
         if let Some(island_id) = actions.admin_delete_island {
             call_reducer("admin_delete_island", serde_json::json!([island_id]));
@@ -1420,17 +2002,37 @@ fn frame(state: &mut State) {
             state.camera.zoom = zoom;
             state.camera.offset = Vector2::new(360.0, 360.0);
         }
-        if actions.export_screenshot {
-            if let Some((island, _)) = my_island(&state.tables, me) {
-                // A share image always shows the caller's island, not their
-                // potentially zoomed-out/panned current map view.
+        if actions.arm_island_export {
+            state.ui_state.tool = ui::Tool::IslandExport;
+            state
+                .ui_state
+                .show_info_toast("Export: click an island".to_string());
+        }
+        if let Some(island_id) = actions.export_island_image {
+            if let Some(island) = state.tables.islands.get(&island_id) {
                 recenter(&mut state.camera, island);
-                export_name = Some(state.ui_state.name_input.clone());
+                export_name = Some(player_label(&state.tables, &island.owner_hex));
+                export_link_id = island.itch_rate_id;
             }
+        }
+        if let Some(island_id) = actions.export_island_gif {
+            start_gif_export(state, island_id);
+            replay_mode = true;
+        }
+        if let Some(island_id) = actions.export_island_video {
+            start_video_export(state, island_id);
+            replay_mode = true;
+        }
+        if actions.start_replay {
+            start_replay(state, None);
+            replay_mode = true;
         }
     }
     // F9.5 item 7 follow-up: mirrors `main.rs`.
-    let map_input_allowed = !state.suppress_map_until_release && !state.ui_state.any_modal_open();
+    let map_input_allowed = !replay_mode
+        && !replay_closed_this_frame
+        && !state.suppress_map_until_release
+        && !state.ui_state.any_modal_open();
 
     // Two-finger pinch/pan (touch); single-finger tap/drag is already
     // translated to ordinary mouse events by raylib's web backend, so the
@@ -1441,10 +2043,16 @@ fn frame(state: &mut State) {
         let t0 = state.rl.get_touch_position(0);
         let t1 = state.rl.get_touch_position(1);
         let mid = Vector2::new((t0.x + t1.x) / 2.0, (t0.y + t1.y) / 2.0);
-        let dist = ((t1.x - t0.x).powi(2) + (t1.y - t0.y).powi(2)).sqrt().max(1.0);
+        let dist = ((t1.x - t0.x).powi(2) + (t1.y - t0.y).powi(2))
+            .sqrt()
+            .max(1.0);
         if state.pinch.is_none() {
             let anchor_world = state.rl.get_screen_to_world2D(mid, state.camera);
-            state.pinch = Some(Pinch { anchor_world, start_dist: dist, start_zoom: state.camera.zoom });
+            state.pinch = Some(Pinch {
+                anchor_world,
+                start_dist: dist,
+                start_zoom: state.camera.zoom,
+            });
         }
         let pinch = state.pinch.as_ref().unwrap();
         if !hexa_zoom_locked {
@@ -1458,7 +2066,11 @@ fn frame(state: &mut State) {
 
     // Zoom toward the cursor (official raylib recipe), desktop-browser mice
     // only — touch pinch is handled above.
-    let wheel = if map_input_allowed && !gesturing && !hexa_zoom_locked { state.rl.get_mouse_wheel_move() } else { 0.0 };
+    let wheel = if map_input_allowed && !gesturing && !hexa_zoom_locked {
+        state.rl.get_mouse_wheel_move()
+    } else {
+        0.0
+    };
     if wheel != 0.0 {
         state.camera.offset = mouse_screen;
         state.camera.target = mouse_world;
@@ -1474,7 +2086,8 @@ fn frame(state: &mut State) {
         if state.rl.is_key_down(KeyboardKey::KEY_LEFT) || state.rl.is_key_down(KeyboardKey::KEY_A) {
             dx -= 1.0;
         }
-        if state.rl.is_key_down(KeyboardKey::KEY_RIGHT) || state.rl.is_key_down(KeyboardKey::KEY_D) {
+        if state.rl.is_key_down(KeyboardKey::KEY_RIGHT) || state.rl.is_key_down(KeyboardKey::KEY_D)
+        {
             dx += 1.0;
         }
         if state.rl.is_key_down(KeyboardKey::KEY_UP) || state.rl.is_key_down(KeyboardKey::KEY_W) {
@@ -1501,10 +2114,20 @@ fn frame(state: &mut State) {
     let panning = map_input_allowed
         && !gesturing
         && !state.mouse_state_stale
-        && (state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
-            || state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT)
-            || (state.rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT) && state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT))
-            || (state.ui_state.tool == ui::Tool::Move && state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)));
+        && (state
+            .rl
+            .is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
+            || state
+                .rl
+                .is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT)
+            || (state.rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
+                && state
+                    .rl
+                    .is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT))
+            || (state.ui_state.tool == ui::Tool::Move
+                && state
+                    .rl
+                    .is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)));
     if panning {
         let delta = state.rl.get_mouse_delta();
         state.camera.target.x -= delta.x / state.camera.zoom;
@@ -1522,9 +2145,9 @@ fn frame(state: &mut State) {
 
     // Cursor heartbeat: throttled to CURSOR_SEND_HZ and only when moved.
     if map_input_allowed && me.is_some() {
-        let moved = state
-            .last_sent_pos
-            .is_none_or(|p| (p.x - mouse_world.x).abs() > 1e-4 || (p.y - mouse_world.y).abs() > 1e-4);
+        let moved = state.last_sent_pos.is_none_or(|p| {
+            (p.x - mouse_world.x).abs() > 1e-4 || (p.y - mouse_world.y).abs() > 1e-4
+        });
         if moved && state.last_sent_at.elapsed() >= Duration::from_secs_f32(1.0 / CURSOR_SEND_HZ) {
             call_reducer("set_pos", serde_json::json!([mouse_world.x, mouse_world.y]));
             state.last_sent_pos = Some(mouse_world);
@@ -1543,7 +2166,12 @@ fn frame(state: &mut State) {
         && matches!(state.ui_state.tool, ui::Tool::Paint | ui::Tool::Erase)
     {
         if let Some(me) = me {
-            if state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && !panning && !state.mouse_state_stale {
+            if state
+                .rl
+                .is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
+                && !panning
+                && !state.mouse_state_stale
+            {
                 let (wq, wr) = world::world_to_axial(mouse_world);
                 let target = match classify(&state.tables, me, wq, wr) {
                     Paintable::OwnIsland(lq, lr) => Some((0u8, lq, lr)),
@@ -1554,17 +2182,34 @@ fn frame(state: &mut State) {
                 };
                 if let Some(key) = target {
                     let fresh_cell = state.stroke_last != Some(key);
-                    let rate_ok = state.last_paint_at.elapsed() >= Duration::from_secs_f32(1.0 / CLIENT_PAINT_HZ);
+                    let rate_ok = state.last_paint_at.elapsed()
+                        >= Duration::from_secs_f32(1.0 / CLIENT_PAINT_HZ);
                     if fresh_cell && rate_ok {
                         match (key, state.ui_state.tool == ui::Tool::Erase) {
-                            ((0, lq, lr), false) => call_reducer("paint_island_cell", serde_json::json!([lq, lr])),
-                            ((0, lq, lr), true) => call_reducer("erase_island_cell", serde_json::json!([lq, lr])),
-                            ((1, q, r), false) => call_reducer("paint_margin_cell", serde_json::json!([q, r])),
-                            ((1, q, r), true) => call_reducer("erase_margin_cell", serde_json::json!([q, r])),
-                            ((2, lq, lr), false) => call_reducer("paint_community_cell", serde_json::json!([lq, lr])),
-                            ((2, lq, lr), true) => call_reducer("erase_community_cell", serde_json::json!([lq, lr])),
-                            ((3, q, r), false) => call_reducer("admin_paint_cell", serde_json::json!([q, r])),
-                            ((3, q, r), true) => call_reducer("admin_erase_cell", serde_json::json!([q, r])),
+                            ((0, lq, lr), false) => {
+                                call_reducer("paint_island_cell", serde_json::json!([lq, lr]))
+                            }
+                            ((0, lq, lr), true) => {
+                                call_reducer("erase_island_cell", serde_json::json!([lq, lr]))
+                            }
+                            ((1, q, r), false) => {
+                                call_reducer("paint_margin_cell", serde_json::json!([q, r]))
+                            }
+                            ((1, q, r), true) => {
+                                call_reducer("erase_margin_cell", serde_json::json!([q, r]))
+                            }
+                            ((2, lq, lr), false) => {
+                                call_reducer("paint_community_cell", serde_json::json!([lq, lr]))
+                            }
+                            ((2, lq, lr), true) => {
+                                call_reducer("erase_community_cell", serde_json::json!([lq, lr]))
+                            }
+                            ((3, q, r), false) => {
+                                call_reducer("admin_paint_cell", serde_json::json!([q, r]))
+                            }
+                            ((3, q, r), true) => {
+                                call_reducer("admin_erase_cell", serde_json::json!([q, r]))
+                            }
                             _ => unreachable!(),
                         }
                         state.stroke_last = Some(key);
@@ -1574,7 +2219,29 @@ fn frame(state: &mut State) {
             }
         }
     }
-    if state.rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
+
+    // Island export mirrors the admin edit tool: a persistent, explicit map
+    // mode whose next click chooses the target island instead of painting.
+    if map_input_allowed
+        && !gesturing
+        && over_map_area
+        && state.ui_state.tool == ui::Tool::IslandExport
+        && state
+            .rl
+            .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+    {
+        let (wq, wr) = world::world_to_axial(mouse_world);
+        if let Some((island_id, _, _)) = island_at(&state.tables, wq, wr) {
+            if let Some(island) = state.tables.islands.get(&island_id) {
+                let owner_label = player_label(&state.tables, &island.owner_hex);
+                state.ui_state.open_island_export(island_id, owner_label);
+            }
+        }
+    }
+    if state
+        .rl
+        .is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT)
+    {
         state.stroke_last = None;
     }
 
@@ -1584,11 +2251,20 @@ fn frame(state: &mut State) {
         && !gesturing
         && over_map_area
         && state.ui_state.tool == ui::Tool::Eyedropper
-        && state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+        && state
+            .rl
+            .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
     {
         if let Some(me) = me {
             let (wq, wr) = world::world_to_axial(mouse_world);
-            if pick_color_at(&state.tables, &mut state.ui_state, state.sfx.as_ref(), me, wq, wr) {
+            if pick_color_at(
+                &state.tables,
+                &mut state.ui_state,
+                state.sfx.as_ref(),
+                me,
+                wq,
+                wr,
+            ) {
                 if state.ui_state.finish_eyedropper() {
                     call_reducer("set_lock", serde_json::json!([false]));
                 }
@@ -1603,16 +2279,16 @@ fn frame(state: &mut State) {
         && !gesturing
         && over_map_area
         && state.ui_state.tool == ui::Tool::AdminEdit
-        && state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+        && state
+            .rl
+            .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
     {
         if let Some(me) = me {
             let (wq, wr) = world::world_to_axial(mouse_world);
             if let Some((island_id, _, _)) = island_at(&state.tables, wq, wr) {
-                let editable = state
-                    .tables
-                    .islands
-                    .get(&island_id)
-                    .is_some_and(|isl| isl.owner_hex != me && isl.owner_hex != world::COMMUNITY_OWNER_HEX);
+                let editable = state.tables.islands.get(&island_id).is_some_and(|isl| {
+                    isl.owner_hex != me && isl.owner_hex != world::COMMUNITY_OWNER_HEX
+                });
                 if editable {
                     open_admin_edit(state, island_id);
                 }
@@ -1625,17 +2301,31 @@ fn frame(state: &mut State) {
     if !map_input_allowed {
         state.middle_click = None;
     } else {
-        if state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE) && over_map_area {
+        if state
+            .rl
+            .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE)
+            && over_map_area
+        {
             state.middle_click = Some(mouse_screen);
         }
-        if state.rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_MIDDLE) {
+        if state
+            .rl
+            .is_mouse_button_released(MouseButton::MOUSE_BUTTON_MIDDLE)
+        {
             if let Some(press) = state.middle_click.take() {
                 let dx = mouse_screen.x - press.x;
                 let dy = mouse_screen.y - press.y;
                 if (dx * dx + dy * dy).sqrt() <= MIDDLE_CLICK_TOL_PX {
                     if let Some(me) = me {
                         let (wq, wr) = world::world_to_axial(mouse_world);
-                        if pick_color_at(&state.tables, &mut state.ui_state, state.sfx.as_ref(), me, wq, wr) {
+                        if pick_color_at(
+                            &state.tables,
+                            &mut state.ui_state,
+                            state.sfx.as_ref(),
+                            me,
+                            wq,
+                            wr,
+                        ) {
                             if state.ui_state.finish_eyedropper() {
                                 call_reducer("set_lock", serde_json::json!([false]));
                             }
@@ -1657,15 +2347,19 @@ fn frame(state: &mut State) {
         // block above — mirrors `main.rs`'s exclusion here.
         if state.ui_state.tool != ui::Tool::Eyedropper
             && state.ui_state.tool != ui::Tool::AdminEdit
+            && state.ui_state.tool != ui::Tool::IslandExport
             && !panning
             && over_map_area
-            && state.rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+            && state
+                .rl
+                .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
         {
             let (wq, wr) = world::world_to_axial(mouse_world);
             state.long_press = Some(LongPress {
                 press_screen: mouse_screen,
                 press_at: Instant::now(),
-                target: merge_target_at(&state.tables, wq, wr).filter(|&(_, _, hue)| !have_hue(&state.tables, me, hue)),
+                target: merge_target_at(&state.tables, wq, wr)
+                    .filter(|&(_, _, hue)| !have_hue(&state.tables, me, hue)),
                 // F8 (author follow-up): anywhere on a FOREIGN island's
                 // territory, not just its center. Mirrors `main.rs`; own
                 // island's popup now opens via the "My Isle" footer button.
@@ -1675,7 +2369,9 @@ fn frame(state: &mut State) {
                 // `owner_hex != me` check like any other foreign island.
                 info_target: island_at(&state.tables, wq, wr)
                     .filter(|&(id, _, _)| {
-                        state.tables.islands.get(&id).is_some_and(|isl| isl.owner_hex != me && isl.owner_hex != world::COMMUNITY_OWNER_HEX)
+                        state.tables.islands.get(&id).is_some_and(|isl| {
+                            isl.owner_hex != me && isl.owner_hex != world::COMMUNITY_OWNER_HEX
+                        })
                     })
                     .map(|(id, _, _)| id),
                 fired: false,
@@ -1685,7 +2381,9 @@ fn frame(state: &mut State) {
             let dx = mouse_screen.x - lp.press_screen.x;
             let dy = mouse_screen.y - lp.press_screen.y;
             let moved = (dx * dx + dy * dy).sqrt() > LONG_PRESS_TOL_PX;
-            let released = !state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT);
+            let released = !state
+                .rl
+                .is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT);
             if moved || released {
                 if released && !moved && !lp.fired {
                     if let Some(island_id) = lp.info_target {
@@ -1706,7 +2404,8 @@ fn frame(state: &mut State) {
                             state.ui_state.spawn_like_anim(mouse_screen, !liked);
                             state.pending_info_click = None;
                         } else {
-                            state.pending_info_click = Some((Instant::now(), mouse_screen, island_id));
+                            state.pending_info_click =
+                                Some((Instant::now(), mouse_screen, island_id));
                         }
                     }
                 }
@@ -1734,7 +2433,12 @@ fn frame(state: &mut State) {
             // click on a foreign island now directly opens its itch.io link
             // (if set) too — also decision 17's "tap opens" path for touch,
             // which has no hover.
-            if let Some(rate_id) = state.tables.islands.get(&island_id).and_then(|isl| isl.itch_rate_id) {
+            if let Some(rate_id) = state
+                .tables
+                .islands
+                .get(&island_id)
+                .and_then(|isl| isl.itch_rate_id)
+            {
                 let url = format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}");
                 let js_url = serde_json::to_string(&url).unwrap();
                 run_js(&format!("window.open({js_url}, '_blank')"));
@@ -1759,7 +2463,9 @@ fn frame(state: &mut State) {
                 let (wq, wr) = world::world_to_axial(mouse_world);
                 island_at(&state.tables, wq, wr)
                     .filter(|&(id, _, _)| {
-                        state.tables.islands.get(&id).is_some_and(|isl| isl.owner_hex != me && isl.owner_hex != world::COMMUNITY_OWNER_HEX)
+                        state.tables.islands.get(&id).is_some_and(|isl| {
+                            isl.owner_hex != me && isl.owner_hex != world::COMMUNITY_OWNER_HEX
+                        })
                     })
                     .map(|(id, _, _)| id)
             })
@@ -1772,8 +2478,12 @@ fn frame(state: &mut State) {
             }
             // Suppressed while any button/gesture is active (mid paint
             // stroke, pan, pinch, or long-press).
-            let gesturing_input = state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
-                || state.rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
+            let gesturing_input = state
+                .rl
+                .is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
+                || state
+                    .rl
+                    .is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
                 || gesturing;
             // `any_modal_open` covers My Isle and the Escape/help overlay
             // too — without it, hovering a foreign island would, after the
@@ -1781,7 +2491,11 @@ fn frame(state: &mut State) {
             // (mirrors main.rs).
             if !state.ui_state.any_modal_open() && !gesturing_input {
                 if let Some((hid, since)) = state.hover_target {
-                    let already_open = state.ui_state.island_popup.as_ref().is_some_and(|p| p.island_id == id);
+                    let already_open = state
+                        .ui_state
+                        .island_popup
+                        .as_ref()
+                        .is_some_and(|p| p.island_id == id);
                     if hid == id && !already_open && since.elapsed() >= HOVER_OPEN_DELAY {
                         open_island_info(state, id);
                     }
@@ -1802,11 +2516,17 @@ fn frame(state: &mut State) {
 
     // View-space culling bounds, padded well past the screen edges.
     let pad = (ISLAND_RADIUS as f32) * 2.0 * 5.0;
-    let top_left = state.rl.get_screen_to_world2D(Vector2::new(0.0, 0.0), state.camera);
-    let bottom_right = state.rl.get_screen_to_world2D(Vector2::new(720.0, 720.0), state.camera);
+    let top_left = state
+        .rl
+        .get_screen_to_world2D(Vector2::new(0.0, 0.0), state.camera);
+    let bottom_right = state
+        .rl
+        .get_screen_to_world2D(Vector2::new(720.0, 720.0), state.camera);
     let (view_min_x, view_max_x) = (top_left.x - pad, bottom_right.x + pad);
     let (view_min_y, view_max_y) = (top_left.y - pad, bottom_right.y + pad);
-    let in_view = |p: Vector2| p.x >= view_min_x && p.x <= view_max_x && p.y >= view_min_y && p.y <= view_max_y;
+    let in_view = |p: Vector2| {
+        p.x >= view_min_x && p.x <= view_max_x && p.y >= view_min_y && p.y <= view_max_y
+    };
 
     // Mirrors `main.rs`'s `seed_hues`: each island's border is drawn in its
     // owner's SEED hue (their starting color, or reset_account's reseed —
@@ -1824,7 +2544,8 @@ fn frame(state: &mut State) {
     // F9.5 item 6: mirrors `main.rs` — shrinks other players' cursors with
     // camera zoom (relative to their fixed size at the default
     // `ISLAND_FIT_ZOOM`), floored so they stay findable when zoomed out.
-    let other_cursor_scale = (state.camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
+    let other_cursor_scale =
+        (state.camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
 
     // F13 (Hexa event): mirrors `main.rs` — the server-authoritative central
     // formation, with each member placed at ITS OWN
@@ -1832,7 +2553,12 @@ fn frame(state: &mut State) {
     // is included like everyone else's — per the author, the LOCAL player's
     // own cursor should visibly move to its hexagon slot too (see the
     // local-cursor draw call below).
-    let hexa_rows: Vec<(&String, &HexaClusterRow)> = state.tables.hexa_clusters.iter().collect();
+    let hexa_rows: Vec<(&String, &HexaClusterRow)> = state
+        .tables
+        .hexa_clusters
+        .iter()
+        .filter(|_| !replay_mode)
+        .collect();
     // Flattened (key, hexagon target, raw fallback) triples across every
     // cluster, fed straight to `hexa_advance_display` — mirrors `main.rs` via
     // the shared `world::hexa_cluster_frame`; only the row shape and the user-table
@@ -1844,7 +2570,10 @@ fn frame(state: &mut State) {
     // World-space hexagon edges (drawn inside `d2` below, mirrors `main.rs`).
     let mut hexa_polygons: Vec<(Vec<Vector2>, bool)> = Vec::new();
     if let Some(&(_, first)) = hexa_rows.first() {
-        let members: Vec<(String, u32)> = hexa_rows.iter().map(|&(id, row)| (id.clone(), row.vertex_index)).collect();
+        let members: Vec<(String, u32)> = hexa_rows
+            .iter()
+            .map(|&(id, row)| (id.clone(), row.vertex_index))
+            .collect();
         let centre = Vector2::zero();
         let (frame, vertices) = world::hexa_cluster_frame(
             centre,
@@ -1854,7 +2583,12 @@ fn frame(state: &mut State) {
                 if Some(key.as_str()) == me {
                     mouse_world
                 } else {
-                    state.tables.users.get(key).map(|u| Vector2::new(u.cx, u.cy)).unwrap_or(target)
+                    state
+                        .tables
+                        .users
+                        .get(key)
+                        .map(|u| Vector2::new(u.cx, u.cy))
+                        .unwrap_or(target)
                 }
             },
         );
@@ -1862,17 +2596,25 @@ fn frame(state: &mut State) {
             let i = *vertex_index as usize % 6;
             let a = vertices[i];
             let b = vertices[(i + 1) % 6];
-            hexa_centres.insert(key.clone(), Vector2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5));
+            hexa_centres.insert(
+                key.clone(),
+                Vector2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5),
+            );
         }
         cluster_members.extend(frame);
         hexa_polygons.push((vertices, first.ignited));
     }
-    state.hexa_display = world::hexa_advance_display(&state.hexa_display, &cluster_members, state.rl.get_frame_time());
+    state.hexa_display = world::hexa_advance_display(
+        &state.hexa_display,
+        &cluster_members,
+        state.rl.get_frame_time(),
+    );
 
     let other_cursors: Vec<(Vector2, Color, bool, String, Option<Vector2>)> = state
         .tables
         .users
         .iter()
+        .filter(|_| !replay_mode)
         // Author-reported: mirrors `main.rs` — cursors used to vanish ~3s
         // after a player stopped moving; a stationary-but-connected player
         // should stay visible the whole time they're online.
@@ -1882,13 +2624,19 @@ fn frame(state: &mut State) {
             // its lerped snapped display position instead of its raw
             // cursor position, and carries its cluster's centre
             // (screen-projected) for the rotated arrow draw.
-            let world_pos = state.hexa_display.get(id).copied().unwrap_or(Vector2::new(u.cx, u.cy));
+            let world_pos = state
+                .hexa_display
+                .get(id)
+                .copied()
+                .unwrap_or(Vector2::new(u.cx, u.cy));
             (
                 state.rl.get_world_to_screen2D(world_pos, state.camera),
                 world::hsv_color(u.hue, u.sat, u.val),
                 u.locked,
                 u.name.clone().unwrap_or_default(),
-                hexa_centres.get(id).map(|&c| state.rl.get_world_to_screen2D(c, state.camera)),
+                hexa_centres
+                    .get(id)
+                    .map(|&c| state.rl.get_world_to_screen2D(c, state.camera)),
             )
         })
         .collect();
@@ -1899,11 +2647,17 @@ fn frame(state: &mut State) {
     // yet) falls back to the literal mouse position at the draw call.
     // Carries (tip, cluster centre), both screen-space, for the rotated
     // snapped-arrow draw.
-    let my_hexa_screen: Option<(Vector2, Vector2)> = me.and_then(|me| {
-        let pos = state.hexa_display.get(me)?;
-        let centre = hexa_centres.get(me)?;
-        Some((state.rl.get_world_to_screen2D(*pos, state.camera), state.rl.get_world_to_screen2D(*centre, state.camera)))
-    });
+    let my_hexa_screen: Option<(Vector2, Vector2)> = (!replay_mode)
+        .then_some(())
+        .and_then(|_| me)
+        .and_then(|me| {
+            let pos = state.hexa_display.get(me)?;
+            let centre = hexa_centres.get(me)?;
+            Some((
+                state.rl.get_world_to_screen2D(*pos, state.camera),
+                state.rl.get_world_to_screen2D(*centre, state.camera),
+            ))
+        });
     let eyedropper_preview = (state.ui_state.tool == ui::Tool::Eyedropper)
         .then(|| {
             let (q, r) = world::world_to_axial(mouse_world);
@@ -1919,6 +2673,7 @@ fn frame(state: &mut State) {
     // Grabbed before `begin_drawing` hands out its mutable borrow — mirrors
     // `main.rs`.
     let fps = state.rl.get_fps();
+    let recovered_history = state.recovered_replay.as_ref();
     let hover_takeable;
     let mut d = state.rl.begin_drawing(&state.thread);
     d.clear_background(Color::new(18, 18, 24, 255));
@@ -1926,85 +2681,219 @@ fn frame(state: &mut State) {
     {
         let mut d2 = d.begin_mode2D(camera);
 
-        for (&island_id, island) in &state.tables.islands {
-            let (q, r) = world::slot_coords(island.slot);
-            let (fcx, fcy) = world::slot_center(q, r);
-            let center = world::axial_to_world(fcx, fcy);
-            if !in_view(center) {
-                continue;
+        if recovered_history.is_none() {
+            for (&island_id, island) in &state.tables.islands {
+                if recovered_history.is_none()
+                    && state
+                        .replay_clock
+                        .as_ref()
+                        .is_some_and(|clock| !clock.is_visible(island.created_at_micros))
+                {
+                    continue;
+                }
+                let (q, r) = world::slot_coords(island.slot);
+                let (fcx, fcy) = world::slot_center(q, r);
+                let center = world::axial_to_world(fcx, fcy);
+                if !replay_mode && !in_view(center) {
+                    continue;
+                }
+                let mine = me == Some(island.owner_hex.as_str());
+                let unpainted_fill =
+                    world::unpainted_island_fill(island.owner_hex == world::COMMUNITY_OWNER_HEX);
+                // Mirrors `main.rs`: below `OVERVIEW_ZOOM_THRESHOLD` the
+                // island's cells are sub-pixel anyway — draw one flat hex for
+                // the whole island instead of 721 individual (and invisible)
+                // ones.
+                if recovered_history.is_some()
+                    || (!replay_mode && camera.zoom < world::constants::OVERVIEW_ZOOM_THRESHOLD)
+                {
+                    world::draw_hex(&mut d2, center, ISLAND_RADIUS as f32, unpainted_fill, None);
+                } else {
+                    // F9.5 (FPS at scale): point-lookup each rendered cell by its
+                    // packed id in the already-id-keyed `island_cells` map instead of
+                    // collecting a fresh (island_id, q, r) -> color HashMap from
+                    // EVERY island_cell row in the world every frame — cost is now
+                    // proportional to in-view cells, not total painted cells.
+                    for &(dq, dr) in world::island_offsets() {
+                        let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
+                        let id = world::island_cell_id(island_id, dq, dr);
+                        let fill = state
+                            .tables
+                            .island_cells
+                            .get(&id)
+                            .filter(|c| {
+                                state
+                                    .replay_clock
+                                    .as_ref()
+                                    .is_none_or(|clock| clock.is_visible(c.painted_at_micros))
+                            })
+                            .map_or(unpainted_fill, |c| {
+                                let (h, s, v) = world::unpack_hsv(c.color);
+                                world::hsv_color(h, s, v)
+                            });
+                        world::draw_hex(
+                            &mut d2,
+                            cell_world,
+                            1.0,
+                            fill,
+                            show_tile_outline.then_some(Color::new(40, 40, 46, 255)),
+                        );
+                    }
+                }
+                // Author-caught: mirrors `main.rs` — sat/val is now
+                // `START_SAT`/`START_VAL` exactly (was a fixed 85/95 lookalike
+                // shade).
+                //
+                // Author-requested: mirrors `main.rs` — an owner-set
+                // `border_color`/`border_hidden` override takes priority over
+                // the seed-hue default.
+                let border_color = if island.border_hidden && !replay_mode {
+                    None
+                } else if let Some(packed) = island.border_color {
+                    let (h, s, v) = world::unpack_hsv(packed);
+                    Some(world::hsv_color(h, s, v))
+                } else {
+                    seed_hues
+                        .get(island.owner_hex.as_str())
+                        .map(|&hue| world::hsv_color(hue, START_SAT, START_VAL))
+                        .or_else(|| replay_mode.then_some(Color::new(225, 225, 232, 255)))
+                };
+                if let Some(border_color) = border_color {
+                    let r_f = ISLAND_RADIUS as f32;
+                    let corners: Vec<Vector2> = world::DIRECTIONS
+                        .iter()
+                        .map(|&(dq, dr)| {
+                            world::axial_to_world(
+                                fcx + (dq as f32 * r_f) as i32,
+                                fcy + (dr as f32 * r_f) as i32,
+                            )
+                        })
+                        .collect();
+                    // Own island's border is thicker — still colored by
+                    // identity like every other island, just easier to spot.
+                    // Author-caught: mirrors `main.rs` — thickness is now a
+                    // constant SCREEN pixel width (divided by zoom to convert
+                    // back to world units), not a fixed world-unit value, so it
+                    // no longer shrinks under a pixel (and randomly vanishes on
+                    // whichever edge rounds down first) at low zoom.
+                    let px = if mine { 3.0 } else { 1.5 };
+                    let thickness = px / camera.zoom;
+                    for i in 0..6 {
+                        d2.draw_line_ex(corners[i], corners[(i + 1) % 6], thickness, border_color);
+                    }
+                }
             }
-            let mine = me == Some(island.owner_hex.as_str());
-            let unpainted_fill = world::unpainted_island_fill(island.owner_hex == world::COMMUNITY_OWNER_HEX);
-            // Mirrors `main.rs`: below `OVERVIEW_ZOOM_THRESHOLD` the
-            // island's cells are sub-pixel anyway — draw one flat hex for
-            // the whole island instead of 721 individual (and invisible)
-            // ones.
-            if camera.zoom < world::constants::OVERVIEW_ZOOM_THRESHOLD {
-                world::draw_hex(&mut d2, center, ISLAND_RADIUS as f32, unpainted_fill, None);
-            } else {
-            // F9.5 (FPS at scale): point-lookup each rendered cell by its
-            // packed id in the already-id-keyed `island_cells` map instead of
-            // collecting a fresh (island_id, q, r) -> color HashMap from
-            // EVERY island_cell row in the world every frame — cost is now
-            // proportional to in-view cells, not total painted cells.
-            for &(dq, dr) in world::island_offsets() {
-                let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
-                let id = world::island_cell_id(island_id, dq, dr);
-                let fill = state.tables.island_cells.get(&id).map_or(unpainted_fill, |c| {
-                    let (h, s, v) = world::unpack_hsv(c.color);
-                    world::hsv_color(h, s, v)
-                });
-                world::draw_hex(&mut d2, cell_world, 1.0, fill, show_tile_outline.then_some(Color::new(40, 40, 46, 255)));
-            }
-            }
-            // Author-caught: mirrors `main.rs` — sat/val is now
-            // `START_SAT`/`START_VAL` exactly (was a fixed 85/95 lookalike
-            // shade).
-            //
-            // Author-requested: mirrors `main.rs` — an owner-set
-            // `border_color`/`border_hidden` override takes priority over
-            // the seed-hue default.
-            let border_color = if island.border_hidden {
-                None
-            } else if let Some(packed) = island.border_color {
-                let (h, s, v) = world::unpack_hsv(packed);
-                Some(world::hsv_color(h, s, v))
-            } else {
-                seed_hues.get(island.owner_hex.as_str()).map(|&hue| world::hsv_color(hue, START_SAT, START_VAL))
-            };
-            if let Some(border_color) = border_color {
+        } else if let Some(history) = recovered_history {
+            // The recovered stream carries island creation, deletion and slot
+            // re-ranks. Draw the bases from that state rather than from the
+            // current subscription snapshot, which may be a different layout.
+            for &island_id in history.island_slots.keys() {
+                let Some(slot) = history.display_slot(island_id) else {
+                    continue;
+                };
+                let (q, r) = world::slot_coords(slot);
+                let (fcx, fcy) = world::slot_center(q, r);
+                let center = world::axial_to_world(fcx, fcy);
+                let island = state.tables.islands.get(&island_id);
+                let mine = island.is_some_and(|row| me == Some(row.owner_hex.as_str()));
+                let fill = island.map_or_else(
+                    || world::unpainted_island_fill(false),
+                    |row| world::unpainted_island_fill(row.owner_hex == world::COMMUNITY_OWNER_HEX),
+                );
+                world::draw_hex(&mut d2, center, ISLAND_RADIUS as f32, fill, None);
+
+                // Replay deliberately ignores `border_hidden`; it is a
+                // presentation control for live play, not a history filter.
+                let border_color = island
+                    .and_then(|row| {
+                        row.border_color.map(|packed| {
+                            let (h, s, v) = world::unpack_hsv(packed);
+                            world::hsv_color(h, s, v)
+                        })
+                    })
+                    .or_else(|| {
+                        island.and_then(|row| {
+                            seed_hues
+                                .get(row.owner_hex.as_str())
+                                .map(|&hue| world::hsv_color(hue, START_SAT, START_VAL))
+                        })
+                    })
+                    .unwrap_or(Color::new(225, 225, 232, 255));
                 let r_f = ISLAND_RADIUS as f32;
                 let corners: Vec<Vector2> = world::DIRECTIONS
                     .iter()
-                    .map(|&(dq, dr)| world::axial_to_world(fcx + (dq as f32 * r_f) as i32, fcy + (dr as f32 * r_f) as i32))
+                    .map(|&(dq, dr)| {
+                        world::axial_to_world(
+                            fcx + (dq as f32 * r_f) as i32,
+                            fcy + (dr as f32 * r_f) as i32,
+                        )
+                    })
                     .collect();
-                // Own island's border is thicker — still colored by
-                // identity like every other island, just easier to spot.
-                // Author-caught: mirrors `main.rs` — thickness is now a
-                // constant SCREEN pixel width (divided by zoom to convert
-                // back to world units), not a fixed world-unit value, so it
-                // no longer shrinks under a pixel (and randomly vanishes on
-                // whichever edge rounds down first) at low zoom.
-                let px = if mine { 3.0 } else { 1.5 };
-                let thickness = px / camera.zoom;
+                let thickness = if mine { 3.0 } else { 1.5 } / camera.zoom;
                 for i in 0..6 {
                     d2.draw_line_ex(corners[i], corners[(i + 1) % 6], thickness, border_color);
                 }
             }
         }
 
-        for cell in state.tables.margin_cells.values() {
-            let p = world::axial_to_world(cell.q, cell.r);
-            if !in_view(p) {
-                continue;
+        if let Some(history) = recovered_history {
+            for (&(island_id, q, r), &color) in &history.island_cells {
+                let Some(slot) = history.display_slot(island_id) else {
+                    // The cell belongs to an island that is not present at
+                    // this point in history (for example, during the atomic
+                    // delete transaction), so it has no world position.
+                    continue;
+                };
+                let (slot_q, slot_r) = world::slot_coords(slot);
+                let (center_q, center_r) = world::slot_center(slot_q, slot_r);
+                let (h, s, v) = world::unpack_hsv(color);
+                world::draw_hex(
+                    &mut d2,
+                    world::axial_to_world(center_q + q, center_r + r),
+                    1.0,
+                    world::hsv_color(h, s, v),
+                    show_tile_outline.then_some(Color::new(40, 40, 46, 255)),
+                );
             }
-            let (h, s, v) = world::unpack_hsv(cell.color);
-            world::draw_hex(&mut d2, p, 1.0, world::hsv_color(h, s, v), show_tile_outline.then_some(Color::new(30, 30, 34, 255)));
+            for (&(q, r), &color) in &history.margin_cells {
+                let (h, s, v) = world::unpack_hsv(color);
+                world::draw_hex(
+                    &mut d2,
+                    world::axial_to_world(q, r),
+                    1.0,
+                    world::hsv_color(h, s, v),
+                    show_tile_outline.then_some(Color::new(30, 30, 34, 255)),
+                );
+            }
+        } else {
+            for cell in state.tables.margin_cells.values() {
+                if state
+                    .replay_clock
+                    .as_ref()
+                    .is_some_and(|clock| !clock.is_visible(cell.painted_at_micros))
+                {
+                    continue;
+                }
+                let p = world::axial_to_world(cell.q, cell.r);
+                if !replay_mode && !in_view(p) {
+                    continue;
+                }
+                let (h, s, v) = world::unpack_hsv(cell.color);
+                world::draw_hex(
+                    &mut d2,
+                    p,
+                    1.0,
+                    world::hsv_color(h, s, v),
+                    show_tile_outline.then_some(Color::new(30, 30, 34, 255)),
+                );
+            }
         }
 
         // F11 (flying gift): world-space, mirrors `main.rs`.
-        if let Some((_, pos, elapsed)) = active_gift {
-            world::draw_gift_icon(&mut d2, pos, elapsed);
+        if !replay_mode {
+            if let Some((_, pos, elapsed)) = active_gift {
+                world::draw_gift_icon(&mut d2, pos, elapsed);
+            }
         }
 
         // F13 (Hexa event): world-space hexagon edges, mirrors `main.rs`.
@@ -2025,14 +2914,22 @@ fn frame(state: &mut State) {
             d2.draw_poly(hover_center, 6, 1.0, 0.0, Color::new(255, 255, 255, 70));
             // Mirrors `main.rs`: constant screen pixel width like the island
             // border, so it stays visible zoomed all the way out.
-            d2.draw_poly_lines_ex(hover_center, 6, 1.0, 0.0, HOVER_BORDER_PX / camera.zoom, Color::new(255, 255, 255, 210));
+            d2.draw_poly_lines_ex(
+                hover_center,
+                6,
+                1.0,
+                0.0,
+                HOVER_BORDER_PX / camera.zoom,
+                Color::new(255, 255, 255, 210),
+            );
         }
 
         hover_takeable = map_input_allowed
             && over_map_area
             && me.is_some_and(|me| {
                 matches!(classify(&state.tables, me, hq, hr), Paintable::None)
-                    && merge_target_at(&state.tables, hq, hr).is_some_and(|(_, _, hue)| !have_hue(&state.tables, me, hue))
+                    && merge_target_at(&state.tables, hq, hr)
+                        .is_some_and(|(_, _, hue)| !have_hue(&state.tables, me, hue))
             });
     }
 
@@ -2042,8 +2939,17 @@ fn frame(state: &mut State) {
             match snap_centre {
                 // F13 follow-up #2: mirrors `main.rs` — a hexagon-snapped
                 // cursor aims its tip at the cluster centre.
-                Some(centre) => world::draw_cursor_snapped(&mut d, *screen, *centre, *color, hexa_cursor_scale, *locked),
-                None => world::draw_cursor_scaled(&mut d, *screen, *color, other_cursor_scale, *locked),
+                Some(centre) => world::draw_cursor_snapped(
+                    &mut d,
+                    *screen,
+                    *centre,
+                    *color,
+                    hexa_cursor_scale,
+                    *locked,
+                ),
+                None => {
+                    world::draw_cursor_scaled(&mut d, *screen, *color, other_cursor_scale, *locked)
+                }
             }
             if snap_centre.is_none() && other_cursor_scale >= 0.5 {
                 world::draw_cursor_label(&mut d, *screen, name, other_cursor_scale);
@@ -2051,9 +2957,48 @@ fn frame(state: &mut State) {
         }
     }
 
-    let own_brush = me.and_then(|me| state.tables.users.get(me)).map(|u| ((u.hue, u.sat, u.val), u.xp, u.locked));
+    let own_brush = me
+        .and_then(|me| state.tables.users.get(me))
+        .map(|u| ((u.hue, u.sat, u.val), u.xp, u.locked));
+    if replay_mode {
+        if let Some(clock) = state.replay_clock.as_ref() {
+            if let Some(history) = state.recovered_replay.as_ref() {
+                if !state.gif_recording && !state.clean_timeline_export {
+                    replay::draw_history_overlay(
+                        &mut d,
+                        clock,
+                        history.visible_tiles(),
+                        history.applied_playback_events(),
+                        history.playback_events(),
+                    );
+                    replay::draw_web_controls(&mut d, state.replay_recording, state.gif_recording);
+                }
+            } else {
+                let visible_tiles = state
+                    .tables
+                    .island_cells
+                    .values()
+                    .filter(|cell| clock.is_visible(cell.painted_at_micros))
+                    .count()
+                    + state
+                        .tables
+                        .margin_cells
+                        .values()
+                        .filter(|cell| clock.is_visible(cell.painted_at_micros))
+                        .count();
+                let total_tiles = state.tables.island_cells.len() + state.tables.margin_cells.len();
+                replay::draw_overlay(&mut d, clock, visible_tiles, total_tiles);
+            }
+        }
+    }
     if let (Some(me), Some((brush, xp, locked))) = (me, own_brush) {
-        let hues: Vec<u16> = state.tables.inventory.values().filter(|i| i.owner_hex == me).map(|i| i.hue).collect();
+        let hues: Vec<u16> = state
+            .tables
+            .inventory
+            .values()
+            .filter(|i| i.owner_hex == me)
+            .map(|i| i.hue)
+            .collect();
         let level = world::level_of(xp);
         let short_id = me.to_string();
         let rerank_secs = state
@@ -2080,37 +3025,47 @@ fn frame(state: &mut State) {
             link_id: my_island(&state.tables, me).and_then(|(isl, _)| isl.itch_rate_id),
             is_admin: is_admin(&state.tables, me),
         };
-        if let Some(name) = export_name.as_deref() {
-            ui::draw_export_frame(&mut d, name, info.link_id);
-        } else {
-            ui::draw(&mut d, &state.ui_state, &info, mouse_screen);
+        if !replay_mode {
+            if let Some(name) = export_name.as_deref() {
+                ui::draw_export_frame(&mut d, name, export_link_id);
+            } else {
+                ui::draw(&mut d, &state.ui_state, &info, mouse_screen);
 
-            // F9.6 item 1: mirrors `main.rs` — eraser mode draws the cursor in a
-            // neutral gray plus a small eraser badge instead of the brush hue.
-            let (hue, sat, val) = brush;
-            let cursor_color = if state.ui_state.tool == ui::Tool::Erase {
-                Color::new(210, 210, 216, 255)
-            } else {
-                world::hsv_color(hue, sat, val)
-            };
-            // F13 (author follow-up): mirrors `main.rs` — visually snaps to the
-            // hexagon slot while merging; painting/hover logic still uses the
-            // real `mouse_world`/`mouse_screen`, only this draw call moves
-            // (and, follow-up #2, rotates to aim at the cluster centre).
-            if state.ui_state.tool == ui::Tool::Eyedropper {
-                ui::draw_eyedropper_cursor(&mut d, mouse_screen, eyedropper_preview);
-            } else {
-                match my_hexa_screen {
-                    Some((tip, centre)) => world::draw_cursor_snapped(&mut d, tip, centre, cursor_color, hexa_cursor_scale, locked),
-                    None => world::draw_cursor(&mut d, mouse_screen, cursor_color, locked),
+                // F9.6 item 1: mirrors `main.rs` — eraser mode draws the cursor in a
+                // neutral gray plus a small eraser badge instead of the brush hue.
+                let (hue, sat, val) = brush;
+                let cursor_color = if state.ui_state.tool == ui::Tool::Erase {
+                    Color::new(210, 210, 216, 255)
+                } else {
+                    world::hsv_color(hue, sat, val)
+                };
+                // F13 (author follow-up): mirrors `main.rs` — visually snaps to the
+                // hexagon slot while merging; painting/hover logic still uses the
+                // real `mouse_world`/`mouse_screen`, only this draw call moves
+                // (and, follow-up #2, rotates to aim at the cluster centre).
+                if state.ui_state.tool == ui::Tool::Eyedropper {
+                    ui::draw_eyedropper_cursor(&mut d, mouse_screen, eyedropper_preview);
+                } else {
+                    match my_hexa_screen {
+                        Some((tip, centre)) => world::draw_cursor_snapped(
+                            &mut d,
+                            tip,
+                            centre,
+                            cursor_color,
+                            hexa_cursor_scale,
+                            locked,
+                        ),
+                        None => world::draw_cursor(&mut d, mouse_screen, cursor_color, locked),
+                    }
                 }
             }
         }
     }
-    if export_name.is_none() {
+    if export_name.is_none() && !replay_mode {
         if state.ui_state.tool == ui::Tool::Erase {
             world::draw_eraser_badge(&mut d, mouse_screen);
-        } else if hover_takeable && matches!(state.ui_state.tool, ui::Tool::Paint | ui::Tool::Erase) {
+        } else if hover_takeable && matches!(state.ui_state.tool, ui::Tool::Paint | ui::Tool::Erase)
+        {
             // Move tool: left-drag pans instead of merging, so the "+"
             // take-hint (which promises a long-press merge) would mislead.
             world::draw_plus_hint(&mut d, mouse_screen);
@@ -2119,21 +3074,69 @@ fn frame(state: &mut State) {
             .long_press
             .as_ref()
             .filter(|lp| !lp.fired && lp.target.is_some())
-            .map(|lp| (lp.press_at.elapsed().as_secs_f32() / LONG_PRESS_HOLD.as_secs_f32()).clamp(0.0, 1.0))
+            .map(|lp| {
+                (lp.press_at.elapsed().as_secs_f32() / LONG_PRESS_HOLD.as_secs_f32())
+                    .clamp(0.0, 1.0)
+            })
         {
             world::draw_hold_ring(&mut d, mouse_screen, frac);
         }
         // Hidden on the title screen, colored to match the header's grey —
         // mirrors `main.rs`.
         if !state.ui_state.title_active {
-            world::draw_fps_grey(&mut d, 540, 8, fps);
+            world::draw_fps_grey(&mut d, 8, 32, fps);
         }
+    }
+    // The operating-system/browser cursor is hidden because normal play
+    // draws a brush-coloured pointer. Replay suppresses painting UI, so keep
+    // a neutral pointer visible for its controls instead of leaving users
+    // without a cursor.
+    if export_name.is_none() && replay_mode && !state.gif_recording && !state.clean_timeline_export
+    {
+        world::draw_cursor(&mut d, mouse_screen, Color::RAYWHITE, false);
     }
     // EndDrawing must complete before the browser reads the finished canvas.
     drop(d);
+    if state.gif_recording {
+        state.gif_frame_counter += 1;
+        if state
+            .gif_frame_counter
+            .is_multiple_of(GIF_CAPTURE_EVERY_FRAMES)
+            || finish_gif_recording
+        {
+            let mut image = state.rl.load_image_from_screen(&state.thread);
+            image.resize_nn(GIF_EXPORT_SIZE, GIF_EXPORT_SIZE);
+            unsafe {
+                hexel_gif_frame(image.data().cast(), GIF_FRAME_DELAY_CS, GIF_EXPORT_SIZE * 4);
+            }
+        }
+    }
+    if finish_gif_recording {
+        let mut length = 0_usize;
+        let data = unsafe { hexel_gif_end(&mut length) };
+        state.gif_recording = false;
+        if !data.is_null() && length > 0 {
+            run_js(&format!(
+                "window.stdb && window.stdb.downloadReplayGif({}, {length})",
+                data as usize
+            ));
+            unsafe { hexel_gif_free(data.cast()) };
+            state.ui_state.show_info_toast("GIF downloaded".to_string());
+        } else {
+            state
+                .ui_state
+                .show_info_toast("GIF export failed".to_string());
+        }
+    }
+    if stop_replay_recording {
+        run_js("window.stdb && window.stdb.stopReplayRecording()");
+        state.clean_timeline_export = false;
+    }
     if export_name.is_some() {
         run_js("window.stdb && window.stdb.downloadIslandImage()");
-        state.ui_state.show_info_toast("island image downloaded".to_string());
+        state
+            .ui_state
+            .show_info_toast("island image downloaded".to_string());
     }
 }
 
@@ -2146,7 +3149,9 @@ fn main() {
 
     // F12: leaked alongside `state` below (both live for the process's
     // whole lifetime under `emscripten_set_main_loop_arg` — see its comment).
-    let audio: Option<&'static RaylibAudio> = RaylibAudio::init_audio_device().ok().map(|a| &*Box::leak(Box::new(a)));
+    let audio: Option<&'static RaylibAudio> = RaylibAudio::init_audio_device()
+        .ok()
+        .map(|a| &*Box::leak(Box::new(a)));
     let sfx = audio.map(sfx::Sfx::load);
 
     let state = Box::new(State {
@@ -2164,6 +3169,12 @@ fn main() {
         intro_started_at: None,
         intro_from: None,
         ui_state: ui::UiState::new(),
+        replay_clock: None,
+        recovered_replay: None,
+        replay_recording: false,
+        clean_timeline_export: false,
+        gif_recording: false,
+        gif_frame_counter: 0,
         known_inventory_ids: HashSet::new(),
         inventory_seeded: false,
         known_merge_event_ids: HashSet::new(),

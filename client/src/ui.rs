@@ -63,6 +63,9 @@ pub enum Tool {
     Erase,
     Move,
     AdminEdit,
+    /// Armed by the header Export button. The next island click opens an
+    /// export panel for that specific island instead of painting it.
+    IslandExport,
     Eyedropper,
 }
 
@@ -82,6 +85,7 @@ impl Tool {
                 }
             }
             Tool::AdminEdit => Tool::Paint,
+            Tool::IslandExport => Tool::Paint,
             Tool::Eyedropper => Tool::Paint,
         }
     }
@@ -214,6 +218,8 @@ pub struct UiState {
     /// player's island, opened by `Tool::AdminEdit` — mutually exclusive with
     /// every other modal, same footprint. `None` while closed.
     pub admin_edit: Option<AdminEditIsland>,
+    /// Per-island export panel, opened by the `IslandExport` map tool.
+    pub island_export: Option<IslandExport>,
     admin_name_input: String,
     admin_likes_input: String,
     admin_xp_input: String,
@@ -248,6 +254,13 @@ enum AdminEditField {
 /// moderation action, not a live-synced form.
 pub struct AdminEditIsland {
     pub island_id: u32,
+}
+
+/// The selected target for image/timelapse export. Kept distinct from the
+/// hover island tooltip so its buttons remain stable and touch-friendly.
+pub struct IslandExport {
+    pub island_id: u32,
+    pub owner_label: String,
 }
 
 /// One floating like/unlike pop — see `UiState::spawn_like_anim`.
@@ -316,6 +329,7 @@ impl UiState {
             eyedropper_restore_unlock: false,
             help_open: false,
             admin_edit: None,
+            island_export: None,
             admin_name_input: String::new(),
             admin_likes_input: String::new(),
             admin_xp_input: String::new(),
@@ -352,7 +366,11 @@ impl UiState {
     /// gets a little visual acknowledgement even though the popup never
     /// opens for that gesture. `pos` is the click's screen position.
     pub fn spawn_like_anim(&mut self, pos: Vector2, liked: bool) {
-        self.like_anims.push(LikeAnim { pos, liked, started_at: Instant::now() });
+        self.like_anims.push(LikeAnim {
+            pos,
+            liked,
+            started_at: Instant::now(),
+        });
     }
 
     /// True while any of the four "real" modals — Colors, Account, Help, or
@@ -377,6 +395,7 @@ impl UiState {
             || self.hexa_success_open
             || self.island_popup.as_ref().is_some_and(|p| p.is_own)
             || self.admin_edit.is_some()
+            || self.island_export.is_some()
     }
 
     /// Closes all modals — the group is mutually exclusive by
@@ -391,6 +410,7 @@ impl UiState {
         self.hexa_success_open = false;
         self.island_popup = None;
         self.admin_edit = None;
+        self.island_export = None;
         self.admin_edit_focus = AdminEditField::None;
         self.admin_delete_armed_at = None;
         self.dragging = Drag::None;
@@ -403,7 +423,11 @@ impl UiState {
         // F9: seed the link edit field from the current value every time the
         // popup (re)opens on your own island, so editing starts from what's
         // actually set rather than whatever was last typed.
-        self.link_edit_input = if info.is_own { info.link_id.map_or(String::new(), |id| id.to_string()) } else { String::new() };
+        self.link_edit_input = if info.is_own {
+            info.link_id.map_or(String::new(), |id| id.to_string())
+        } else {
+            String::new()
+        };
         self.link_edit_focused = false;
         self.island_popup = Some(info);
     }
@@ -419,6 +443,13 @@ impl UiState {
         self.admin_xp_input = xp.to_string();
     }
 
+    pub fn open_island_export(&mut self, island_id: u32, owner_label: String) {
+        self.close_all_modals();
+        self.island_export = Some(IslandExport {
+            island_id,
+            owner_label,
+        });
+    }
 
     /// Re-reads the two fields that can change while the popup sits open
     /// (author-caught: the Like button used to look stuck on "Like" after a
@@ -426,7 +457,13 @@ impl UiState {
     /// moment it opened — nothing ever told it the reducer had landed).
     /// Called every frame the popup is open, same as `HudInfo` is rebuilt
     /// fresh from server state every frame elsewhere in this module.
-    pub fn refresh_island_popup(&mut self, likes: u32, already_liked: bool, border_hidden: bool, border_color: Color) {
+    pub fn refresh_island_popup(
+        &mut self,
+        likes: u32,
+        already_liked: bool,
+        border_hidden: bool,
+        border_color: Color,
+    ) {
         if let Some(popup) = &mut self.island_popup {
             popup.likes = likes;
             popup.already_liked = already_liked;
@@ -442,7 +479,12 @@ impl UiState {
     /// PRE-merge hues, looked up by the caller against the matching
     /// `MergeEvent` row — for a real two-player cursor-merge; `None` for a
     /// tile-merge/eyedrop, which has no second live hue to show.
-    pub fn show_merge_toast(&mut self, color: RecentColor, partner_label: &str, merge_from: Option<(u16, u16)>) {
+    pub fn show_merge_toast(
+        &mut self,
+        color: RecentColor,
+        partner_label: &str,
+        merge_from: Option<(u16, u16)>,
+    ) {
         self.toast = Some(Toast {
             text: format!("new color, obtained with {partner_label}"),
             hue: Some(color.hue),
@@ -479,7 +521,12 @@ impl UiState {
     /// F9.6 item 2: plain-text toast (no flash swatch) — used for the
     /// middle-click eyedropper's "not unlocked" feedback.
     pub fn show_info_toast(&mut self, text: String) {
-        self.toast = Some(Toast { text, hue: None, merge_from: None, shown_at: Instant::now() });
+        self.toast = Some(Toast {
+            text,
+            hue: None,
+            merge_from: None,
+            shown_at: Instant::now(),
+        });
     }
 
     /// F11: called by the caller when it sees a fresh `inventory` row with
@@ -487,8 +534,17 @@ impl UiState {
     /// treatment as `show_merge_toast`, distinct wording since there's no
     /// merge partner to name.
     pub fn show_gift_toast(&mut self, hue: u16) {
-        self.toast = Some(Toast { text: "gift claimed — new color!".to_string(), hue: Some(hue), merge_from: None, shown_at: Instant::now() });
-        self.note_used_color(RecentColor { hue, sat: default_sat(), val: DEFAULT_VAL });
+        self.toast = Some(Toast {
+            text: "gift claimed — new color!".to_string(),
+            hue: Some(hue),
+            merge_from: None,
+            shown_at: Instant::now(),
+        });
+        self.note_used_color(RecentColor {
+            hue,
+            sat: default_sat(),
+            val: DEFAULT_VAL,
+        });
     }
 
     /// F13: called by the caller when it sees a fresh `inventory` row that
@@ -496,8 +552,17 @@ impl UiState {
     /// from both a merge (which always names a partner) and a gift/reset
     /// (neither of which has an event to join).
     pub fn show_hexa_toast(&mut self, hue: u16) {
-        self.toast = Some(Toast { text: "Hexa event! colors pooled with 5 others".to_string(), hue: Some(hue), merge_from: None, shown_at: Instant::now() });
-        self.note_used_color(RecentColor { hue, sat: default_sat(), val: DEFAULT_VAL });
+        self.toast = Some(Toast {
+            text: "Hexa event! colors pooled with 5 others".to_string(),
+            hue: Some(hue),
+            merge_from: None,
+            shown_at: Instant::now(),
+        });
+        self.note_used_color(RecentColor {
+            hue,
+            sat: default_sat(),
+            val: DEFAULT_VAL,
+        });
     }
 
     /// Prominent acknowledgement for completing the six-player formation.
@@ -546,13 +611,20 @@ impl UiState {
     /// now-meaningless pre-reset colors still showing. Clears first.
     pub fn note_reset_hue(&mut self, hue: u16) {
         self.recent_colors.clear();
-        self.recent_colors.push_front(RecentColor { hue, sat: default_sat(), val: DEFAULT_VAL });
+        self.recent_colors.push_front(RecentColor {
+            hue,
+            sat: default_sat(),
+            val: DEFAULT_VAL,
+        });
     }
 
     /// A hue's own remembered sat/val, or the canonical default if the
     /// player has never tuned that color.
     fn tile_hsl(&self, hue: u16) -> (u8, u8) {
-        self.swatch_hsl.get(&hue).copied().unwrap_or((default_sat(), DEFAULT_VAL))
+        self.swatch_hsl
+            .get(&hue)
+            .copied()
+            .unwrap_or((default_sat(), DEFAULT_VAL))
     }
 
     /// Called whenever a Saturation/Lightness drag lands while `hue` is the
@@ -609,9 +681,15 @@ pub struct Actions {
     /// World Centre footer button: zoom out to frame the whole world instead
     /// of the caller's own island.
     pub center_world: bool,
-    /// Header's export control: the caller temporarily frames the player's
-    /// island, renders the clean share card, then captures that frame.
-    pub export_screenshot: bool,
+    /// Header Replay button: start a read-only chronological reveal of the
+    /// retained world snapshot. Both clients implement the same local-only
+    /// action; it never calls a reducer.
+    pub start_replay: bool,
+    /// Header Export arms the island-targeting export tool.
+    pub arm_island_export: bool,
+    pub export_island_image: Option<u32>,
+    pub export_island_gif: Option<u32>,
+    pub export_island_video: Option<u32>,
     /// Copy the full reconnection token (not just the header's short hex) to
     /// the clipboard.
     pub copy_token: bool,
@@ -701,7 +779,12 @@ fn inventory_btn_rect() -> Rectangle {
 /// zooms out to frame the whole world (`world_fit`) instead of the caller's
 /// own island. Anchors the very bottom-right corner of the footer.
 fn world_centre_btn_rect() -> Rectangle {
-    Rectangle::new(SCREEN_W - FOOTER_EDGE_PAD - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
+    Rectangle::new(
+        SCREEN_W - FOOTER_EDGE_PAD - 30.0,
+        SCREEN_H - FOOTER_H + 7.0,
+        30.0,
+        30.0,
+    )
 }
 
 /// Author-requested: icon-only (a "recenter"/geolocation glyph, see
@@ -754,7 +837,12 @@ fn recent_btn_rect() -> Rectangle {
 fn last3_rect(i: usize) -> Rectangle {
     let rb = recent_btn_rect();
     let group_x0 = rb.x - 4.0 - (2.0 * 34.0 + 30.0);
-    Rectangle::new(group_x0 + i as f32 * 34.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
+    Rectangle::new(
+        group_x0 + i as f32 * 34.0,
+        SCREEN_H - FOOTER_H + 7.0,
+        30.0,
+        30.0,
+    )
 }
 
 const RECENT_SWATCH: f32 = 42.0;
@@ -798,6 +886,13 @@ fn account_btn_rect() -> Rectangle {
 fn sound_btn_rect() -> Rectangle {
     let account = account_btn_rect();
     Rectangle::new(account.x - 8.0 - 28.0, 3.0, 28.0, 22.0)
+}
+
+/// Read-only world replay, shared by native and web. Chained left of Sound
+/// so the existing Account/Export cluster keeps its established positions.
+fn replay_btn_rect() -> Rectangle {
+    let sound = sound_btn_rect();
+    Rectangle::new(sound.x - 8.0 - 52.0, 3.0, 52.0, 22.0)
 }
 
 fn overlay_rect() -> Rectangle {
@@ -1014,6 +1109,21 @@ fn border_toggle_btn_rect() -> Rectangle {
     Rectangle::new(o.x + 320.0, o.y + 230.0, 220.0, 36.0)
 }
 
+fn island_export_image_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 30.0, o.y + 150.0, o.width - 60.0, 46.0)
+}
+
+fn island_export_gif_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 30.0, o.y + 210.0, o.width - 60.0, 46.0)
+}
+
+fn island_export_video_btn_rect() -> Rectangle {
+    let o = overlay_rect();
+    Rectangle::new(o.x + 30.0, o.y + 270.0, o.width - 60.0, 46.0)
+}
+
 fn rerank_banner_rect() -> Rectangle {
     Rectangle::new(210.0, SCREEN_H - FOOTER_H - 32.0, 300.0, 24.0)
 }
@@ -1092,7 +1202,10 @@ fn color_hex(c: Color) -> String {
 }
 
 pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) -> Actions {
-    if state.hexa_success_pending_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(2)) {
+    if state
+        .hexa_success_pending_at
+        .is_some_and(|at| at.elapsed() >= Duration::from_secs(2))
+    {
         state.hexa_success_pending_at = None;
         state.close_all_modals();
         state.hexa_success_open = true;
@@ -1102,20 +1215,35 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     // after the first call. Must happen here, before `begin_drawing`, since
     // `measure_text` needs a live `RaylibHandle` (see `colors_letter_offsets`).
     colors_letter_offsets(rl);
-    if state.toast.as_ref().is_some_and(|t| t.shown_at.elapsed() >= TOAST_DURATION) {
+    if state
+        .toast
+        .as_ref()
+        .is_some_and(|t| t.shown_at.elapsed() >= TOAST_DURATION)
+    {
         state.toast = None;
     }
-    state.like_anims.retain(|a| a.started_at.elapsed() < LIKE_ANIM_DURATION);
+    state
+        .like_anims
+        .retain(|a| a.started_at.elapsed() < LIKE_ANIM_DURATION);
     if state.pending_select == Some(info.brush.0) {
         state.pending_select = None;
     }
-    if state.reset_armed_at.is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW) {
+    if state
+        .reset_armed_at
+        .is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW)
+    {
         state.reset_armed_at = None;
     }
-    if state.delete_armed_at.is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW) {
+    if state
+        .delete_armed_at
+        .is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW)
+    {
         state.delete_armed_at = None;
     }
-    if state.copy_clicked_at.is_some_and(|t| t.elapsed() >= TOAST_DURATION) {
+    if state
+        .copy_clicked_at
+        .is_some_and(|t| t.elapsed() >= TOAST_DURATION)
+    {
         state.copy_clicked_at = None;
     }
     // Title screen: the Draw button (or Enter) is the only interactive
@@ -1125,7 +1253,8 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     if state.title_active {
         title_label_width(rl); // warm the cache while we still have `rl`
         let mouse = rl.get_mouse_position();
-        if (rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) && point_in(mouse, title_btn_rect()))
+        if (rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+            && point_in(mouse, title_btn_rect()))
             || rl.is_key_pressed(KeyboardKey::KEY_ENTER)
         {
             state.title_active = false;
@@ -1235,10 +1364,12 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     if clicked && point_in(mouse, world_centre_btn_rect()) {
         actions.center_world = true;
     }
+    if clicked && point_in(mouse, replay_btn_rect()) {
+        actions.start_replay = true;
+        return actions;
+    }
     if clicked && point_in(mouse, export_btn_rect()) {
-        actions.export_screenshot = true;
-        // The header button is a complete gesture of its own. In particular,
-        // do not let this same click blur/commit the name field below.
+        actions.arm_island_export = true;
         return actions;
     }
     if clicked && point_in(mouse, hexel_logo_rect()) {
@@ -1260,7 +1391,12 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     if let Some(color) = last3_clicked {
         if (color.hue, color.sat.min(info.sat_cap), color.val) != info.brush {
             actions.set_brush = Some((color.hue, color.sat.min(info.sat_cap), color.val));
-            state.base_hue = info.hues.iter().copied().min_by_key(|&h| world::hue_dist(h, color.hue)).unwrap_or(color.hue);
+            state.base_hue = info
+                .hues
+                .iter()
+                .copied()
+                .min_by_key(|&h| world::hue_dist(h, color.hue))
+                .unwrap_or(color.hue);
             state.pending_select = Some(color.hue);
             state.note_used_color(color);
         }
@@ -1382,7 +1518,8 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             }
             if state.import_focused {
                 while let Some(c) = rl.get_char_pressed() {
-                    if !c.is_control() && state.import_input.chars().count() < IMPORT_TOKEN_MAX_LEN {
+                    if !c.is_control() && state.import_input.chars().count() < IMPORT_TOKEN_MAX_LEN
+                    {
                         state.import_input.push(c);
                     }
                 }
@@ -1399,7 +1536,8 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                         || rl.is_key_down(KeyboardKey::KEY_RIGHT_SUPER));
                 if pasting {
                     if let Ok(clip) = rl.get_clipboard_text() {
-                        let room = IMPORT_TOKEN_MAX_LEN.saturating_sub(state.import_input.chars().count());
+                        let room =
+                            IMPORT_TOKEN_MAX_LEN.saturating_sub(state.import_input.chars().count());
                         state.import_input.extend(clip.trim().chars().take(room));
                     }
                 }
@@ -1488,6 +1626,25 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         return actions;
     }
 
+    if let Some(export) = &state.island_export {
+        let island_id = export.island_id;
+        if modal_dismiss_clicked(mouse, clicked) {
+            state.island_export = None;
+            return actions;
+        }
+        if clicked && point_in(mouse, island_export_image_btn_rect()) {
+            actions.export_island_image = Some(island_id);
+            state.island_export = None;
+        } else if clicked && point_in(mouse, island_export_gif_btn_rect()) {
+            actions.export_island_gif = Some(island_id);
+            state.island_export = None;
+        } else if clicked && point_in(mouse, island_export_video_btn_rect()) {
+            actions.export_island_video = Some(island_id);
+            state.island_export = None;
+        }
+        return actions;
+    }
+
     // Author follow-up (2026-07-12): admin edit modal — three plain text
     // fields (name/likes/xp, digits-only for the latter two) committed
     // together by Save, plus a double-click-confirmed Delete (same pattern
@@ -1500,7 +1657,10 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             state.admin_delete_armed_at = None;
             return actions;
         }
-        if state.admin_delete_armed_at.is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW) {
+        if state
+            .admin_delete_armed_at
+            .is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW)
+        {
             state.admin_delete_armed_at = None;
         }
         if clicked {
@@ -1557,13 +1717,22 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             state.recent_open = false;
             return actions;
         }
-        let selected = state.recent_colors.iter().enumerate().find_map(|(i, &color)| {
-            (clicked && point_in(mouse, recent_swatch_rect(i))).then_some(color)
-        });
+        let selected = state
+            .recent_colors
+            .iter()
+            .enumerate()
+            .find_map(|(i, &color)| {
+                (clicked && point_in(mouse, recent_swatch_rect(i))).then_some(color)
+            });
         if let Some(color) = selected {
             let sat = color.sat.min(info.sat_cap);
             actions.set_brush = Some((color.hue, sat, color.val));
-            state.base_hue = info.hues.iter().copied().min_by_key(|&h| world::hue_dist(h, color.hue)).unwrap_or(color.hue);
+            state.base_hue = info
+                .hues
+                .iter()
+                .copied()
+                .min_by_key(|&h| world::hue_dist(h, color.hue))
+                .unwrap_or(color.hue);
             state.pending_select = Some(color.hue);
             state.note_used_color(color);
             state.recent_open = false;
@@ -1686,6 +1855,8 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         }
     } else if state.admin_edit.is_some() {
         draw_admin_edit(d, state);
+    } else if let Some(export) = &state.island_export {
+        draw_island_export(d, export);
     } else if state.help_open {
         draw_help_overlay(d);
     } else if let Some((title, color)) = hovered_recent_footer(state, mouse) {
@@ -1695,11 +1866,18 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         draw_button_tooltip(d, title, &[hex.as_str(), hsl.as_str()], mouse);
     } else if point_in(mouse, eraser_btn_rect()) {
         let (title, lines): (&str, &[&str]) = match state.tool {
-            Tool::Paint if info.is_admin => ("Paint", &["Click to cycle: Paint ->", "Eraser -> Move -> Edit"]),
+            Tool::Paint if info.is_admin => (
+                "Paint",
+                &["Click to cycle: Paint ->", "Eraser -> Move -> Edit"],
+            ),
             Tool::Paint => ("Paint", &["Click to cycle: Paint ->", "Eraser -> Move"]),
             Tool::Erase => ("Eraser", &["Revert a cell to its", "original color"]),
-            Tool::Move => ("Move", &["Left-drag pans the camera", "instead of painting"]),
+            Tool::Move => (
+                "Move",
+                &["Left-drag pans the camera", "instead of painting"],
+            ),
             Tool::AdminEdit => ("Edit", &["Tap another island to", "edit its player/stats"]),
+            Tool::IslandExport => ("Export", &["Tap an island to choose", "image or timelapse"]),
             Tool::Eyedropper => ("Paint", &["Click to return to", "the paint tool"]),
         };
         draw_button_tooltip(d, title, lines, mouse);
@@ -1721,12 +1899,24 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
 /// Big, explicit acknowledgement for a successful HEXA. It deliberately
 /// draws last, over both the map and HUD, and stays open until OK is clicked.
 fn draw_hexa_success_popup(d: &mut impl RaylibDraw) {
-    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(5, 7, 13, 185));
+    d.draw_rectangle_rec(
+        Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H),
+        Color::new(5, 7, 13, 185),
+    );
 
     let panel = Rectangle::new(90.0, 90.0, 550.0, 550.0);
     d.draw_rectangle_rec(panel, Color::new(22, 25, 38, 250));
     d.draw_rectangle_lines_ex(panel, 3.0, Color::new(255, 220, 92, 255));
-    d.draw_rectangle_lines_ex(Rectangle::new(panel.x + 8.0, panel.y + 8.0, panel.width - 16.0, panel.height - 16.0), 1.0, Color::new(255, 245, 190, 180));
+    d.draw_rectangle_lines_ex(
+        Rectangle::new(
+            panel.x + 8.0,
+            panel.y + 8.0,
+            panel.width - 16.0,
+            panel.height - 16.0,
+        ),
+        1.0,
+        Color::new(255, 245, 190, 180),
+    );
 
     let centre = Vector2::new(SCREEN_W / 2.0, panel.y + 125.0);
     for i in 0..6 {
@@ -1739,13 +1929,31 @@ fn draw_hexa_success_popup(d: &mut impl RaylibDraw) {
 
     d.draw_text("HEXA!", 270, 340, 62, Color::new(255, 232, 125, 255));
     d.draw_text("FORMATION COMPLETE", 216, 405, 24, Color::RAYWHITE);
-    d.draw_text("Thank you for playing HEXEL.", 218, 457, 20, Color::new(255, 245, 205, 255));
-    d.draw_text("You and your friends made the HEXA and pooled your colors.", 129, 488, 16, Color::new(220, 224, 236, 255));
+    d.draw_text(
+        "Thank you for playing HEXEL.",
+        218,
+        457,
+        20,
+        Color::new(255, 245, 205, 255),
+    );
+    d.draw_text(
+        "You and your friends made the HEXA and pooled your colors.",
+        129,
+        488,
+        16,
+        Color::new(220, 224, 236, 255),
+    );
 
     let ok = hexa_success_ok_rect();
     d.draw_rectangle_rounded(ok, 0.3, 8, Color::new(255, 220, 92, 255));
     d.draw_rectangle_rounded_lines(ok, 0.3, 8, Color::new(72, 52, 24, 255));
-    d.draw_text("OK", ok.x as i32 + 58, ok.y as i32 + 10, 20, Color::new(38, 31, 22, 255));
+    d.draw_text(
+        "OK",
+        ok.x as i32 + 58,
+        ok.y as i32 + 10,
+        20,
+        Color::new(38, 31, 22, 255),
+    );
 }
 
 /// F8/F9: own-island management panel (opened via the "My Isle" footer
@@ -1754,26 +1962,69 @@ fn draw_hexa_success_popup(d: &mut impl RaylibDraw) {
 /// (backdrop, close button) since it has real form controls to interact
 /// with, unlike the foreign-island case.
 fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInfo, info: &HudInfo) {
-    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
+    d.draw_rectangle_rec(
+        Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H),
+        Color::new(0, 0, 0, 140),
+    );
 
     let o = overlay_rect();
     d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
     d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
-    d.draw_text("Island", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+    d.draw_text(
+        "Island",
+        o.x as i32 + 20,
+        o.y as i32 + 14,
+        18,
+        Color::RAYWHITE,
+    );
 
     let close = overlay_close_rect();
     d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
+    d.draw_text(
+        "X",
+        close.x as i32 + 11,
+        close.y as i32 + 7,
+        16,
+        Color::RAYWHITE,
+    );
 
-    d.draw_text(&format!("Owner: {}", popup.owner_label), o.x as i32 + 20, o.y as i32 + 54, 16, Color::RAYWHITE);
+    d.draw_text(
+        &format!("Owner: {}", popup.owner_label),
+        o.x as i32 + 20,
+        o.y as i32 + 54,
+        16,
+        Color::RAYWHITE,
+    );
     // F9.6 item 3: heart glyph in place of the old text-only "Likes: N" —
     // filled when the viewer (the popup only ever opens on your OWN island,
     // so this is always `false` here in practice, kept for symmetry with
     // the tooltip below which does need it) has already liked it.
-    let heart_color = if popup.already_liked { Color::new(230, 70, 90, 255) } else { Color::new(160, 160, 168, 255) };
-    world::draw_heart(d, Vector2::new(o.x + 30.0, o.y + 86.0), 18.0, popup.already_liked, heart_color);
-    d.draw_text(&format!("{}", popup.likes), o.x as i32 + 44, o.y as i32 + 78, 16, Color::RAYWHITE);
-    d.draw_text(&format!("Created {}", popup.age_label), o.x as i32 + 20, o.y as i32 + 106, 16, Color::LIGHTGRAY);
+    let heart_color = if popup.already_liked {
+        Color::new(230, 70, 90, 255)
+    } else {
+        Color::new(160, 160, 168, 255)
+    };
+    world::draw_heart(
+        d,
+        Vector2::new(o.x + 30.0, o.y + 86.0),
+        18.0,
+        popup.already_liked,
+        heart_color,
+    );
+    d.draw_text(
+        &format!("{}", popup.likes),
+        o.x as i32 + 44,
+        o.y as i32 + 78,
+        16,
+        Color::RAYWHITE,
+    );
+    d.draw_text(
+        &format!("Created {}", popup.age_label),
+        o.x as i32 + 20,
+        o.y as i32 + 106,
+        16,
+        Color::LIGHTGRAY,
+    );
 
     // Author-requested: live-updates from the edit field as you type. Grey
     // while empty, blue (same link color as the foreign-island tooltip's
@@ -1784,20 +2035,56 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
     let (link_label, link_color) = if typed.is_empty() {
         ("Your link: not set".to_string(), Color::LIGHTGRAY)
     } else if typed_link_id(state).is_some() {
-        (format!("Your link: itch.io rate #{typed}"), Color::new(120, 180, 255, 255))
+        (
+            format!("Your link: itch.io rate #{typed}"),
+            Color::new(120, 180, 255, 255),
+        )
     } else {
-        (format!("Your link: itch.io rate #{typed}"), Color::new(220, 90, 90, 255))
+        (
+            format!("Your link: itch.io rate #{typed}"),
+            Color::new(220, 90, 90, 255),
+        )
     };
-    d.draw_text(&link_label, o.x as i32 + 20, o.y as i32 + 132, 16, link_color);
-    d.draw_text("Set your itch.io rate id:", o.x as i32 + 20, o.y as i32 + 162, 14, Color::LIGHTGRAY);
+    d.draw_text(
+        &link_label,
+        o.x as i32 + 20,
+        o.y as i32 + 132,
+        16,
+        link_color,
+    );
+    d.draw_text(
+        "Set your itch.io rate id:",
+        o.x as i32 + 20,
+        o.y as i32 + 162,
+        14,
+        Color::LIGHTGRAY,
+    );
 
     // Author-requested: no Set button — typing submits automatically (see
     // `handle_input`), so the field just fills the row.
     let field = link_edit_rect();
     d.draw_rectangle_rec(field, Color::new(28, 28, 34, 255));
-    d.draw_rectangle_lines_ex(field, 1.0, if state.link_edit_focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
-    let shown = if state.link_edit_input.is_empty() && !state.link_edit_focused { "e.g. 123456" } else { &state.link_edit_input };
-    d.draw_text(shown, field.x as i32 + 6, field.y as i32 + 7, 14, Color::RAYWHITE);
+    d.draw_rectangle_lines_ex(
+        field,
+        1.0,
+        if state.link_edit_focused {
+            Color::GOLD
+        } else {
+            Color::new(90, 90, 96, 255)
+        },
+    );
+    let shown = if state.link_edit_input.is_empty() && !state.link_edit_focused {
+        "e.g. 123456"
+    } else {
+        &state.link_edit_input
+    };
+    d.draw_text(
+        shown,
+        field.x as i32 + 6,
+        field.y as i32 + 7,
+        14,
+        Color::RAYWHITE,
+    );
 
     // Author-requested: pin the border to the current brush color, or toggle
     // it shown/hidden — two separate actions now, so un-hiding never
@@ -1809,31 +2096,91 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
     // color change" language as the footer's lock button.
     let setb = border_set_btn_rect();
     d.draw_rectangle_rec(setb, Color::new(40, 40, 48, 255));
-    d.draw_text("Set border:", setb.x as i32 + 10, setb.y as i32 + 11, 14, Color::RAYWHITE);
+    d.draw_text(
+        "Set border:",
+        setb.x as i32 + 10,
+        setb.y as i32 + 11,
+        14,
+        Color::RAYWHITE,
+    );
     let swatch = 16.0;
-    let sw1 = Rectangle::new(setb.x + 168.0, setb.y + (setb.height - swatch) / 2.0, swatch, swatch);
+    let sw1 = Rectangle::new(
+        setb.x + 168.0,
+        setb.y + (setb.height - swatch) / 2.0,
+        swatch,
+        swatch,
+    );
     d.draw_rectangle_rec(sw1, popup.border_color);
     d.draw_rectangle_lines_ex(sw1, 1.0, Color::new(90, 90, 96, 255));
-    d.draw_text("->", sw1.x as i32 + 20, setb.y as i32 + 11, 14, Color::LIGHTGRAY);
+    d.draw_text(
+        "->",
+        sw1.x as i32 + 20,
+        setb.y as i32 + 11,
+        14,
+        Color::LIGHTGRAY,
+    );
     let cursor_color = world::hsv_color(info.brush.0, info.brush.1, info.brush.2);
     let sw2 = Rectangle::new(sw1.x + 40.0, sw1.y, swatch, swatch);
     d.draw_rectangle_rec(sw2, cursor_color);
     d.draw_rectangle_lines_ex(sw2, 1.0, Color::new(90, 90, 96, 255));
 
     let tgb = border_toggle_btn_rect();
-    d.draw_rectangle_rec(tgb, if popup.border_hidden { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
-    let toggle_label = if popup.border_hidden { "Border: Hidden" } else { "Border: Shown" };
-    d.draw_text(toggle_label, tgb.x as i32 + 24, tgb.y as i32 + 10, 14, Color::RAYWHITE);
+    d.draw_rectangle_rec(
+        tgb,
+        if popup.border_hidden {
+            Color::new(120, 60, 60, 255)
+        } else {
+            Color::new(40, 40, 48, 255)
+        },
+    );
+    let toggle_label = if popup.border_hidden {
+        "Border: Hidden"
+    } else {
+        "Border: Shown"
+    };
+    d.draw_text(
+        toggle_label,
+        tgb.x as i32 + 24,
+        tgb.y as i32 + 10,
+        14,
+        Color::RAYWHITE,
+    );
 }
 
 /// Shared row layout for the admin edit modal's three text fields — label
 /// above, boxed value below, gold border while focused (same visual
 /// language as every other text field in this file).
-fn draw_admin_field(d: &mut impl RaylibDraw, label: &str, rect: Rectangle, value: &str, focused: bool) {
-    d.draw_text(label, rect.x as i32, rect.y as i32 - 18, 14, Color::LIGHTGRAY);
+fn draw_admin_field(
+    d: &mut impl RaylibDraw,
+    label: &str,
+    rect: Rectangle,
+    value: &str,
+    focused: bool,
+) {
+    d.draw_text(
+        label,
+        rect.x as i32,
+        rect.y as i32 - 18,
+        14,
+        Color::LIGHTGRAY,
+    );
     d.draw_rectangle_rec(rect, Color::new(28, 28, 34, 255));
-    d.draw_rectangle_lines_ex(rect, 1.0, if focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
-    d.draw_text(value, rect.x as i32 + 6, rect.y as i32 + 7, 14, Color::RAYWHITE);
+    d.draw_rectangle_lines_ex(
+        rect,
+        1.0,
+        if focused {
+            Color::GOLD
+        } else {
+            Color::new(90, 90, 96, 255)
+        },
+    );
+    d.draw_text(
+        value,
+        rect.x as i32 + 6,
+        rect.y as i32 + 7,
+        14,
+        Color::RAYWHITE,
+    );
 }
 
 /// Author follow-up (2026-07-12): admin-only moderation modal, opened by
@@ -1841,36 +2188,172 @@ fn draw_admin_field(d: &mut impl RaylibDraw, label: &str, rect: Rectangle, value
 /// island tooltip/link. Three plain text fields (name/likes/xp) committed
 /// together by Save, plus a double-click-confirmed destructive Delete.
 fn draw_admin_edit(d: &mut impl RaylibDraw, state: &UiState) {
-    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
+    d.draw_rectangle_rec(
+        Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H),
+        Color::new(0, 0, 0, 140),
+    );
 
     let o = overlay_rect();
     d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
     d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
-    d.draw_text("Edit Player / Island", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+    d.draw_text(
+        "Edit Player / Island",
+        o.x as i32 + 20,
+        o.y as i32 + 14,
+        18,
+        Color::RAYWHITE,
+    );
 
     let close = overlay_close_rect();
     d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
+    d.draw_text(
+        "X",
+        close.x as i32 + 11,
+        close.y as i32 + 7,
+        16,
+        Color::RAYWHITE,
+    );
 
-    draw_admin_field(d, "Player name:", admin_name_field_rect(), &state.admin_name_input, state.admin_edit_focus == AdminEditField::Name);
-    draw_admin_field(d, "Likes:", admin_likes_field_rect(), &state.admin_likes_input, state.admin_edit_focus == AdminEditField::Likes);
-    draw_admin_field(d, "XP:", admin_xp_field_rect(), &state.admin_xp_input, state.admin_edit_focus == AdminEditField::Xp);
+    draw_admin_field(
+        d,
+        "Player name:",
+        admin_name_field_rect(),
+        &state.admin_name_input,
+        state.admin_edit_focus == AdminEditField::Name,
+    );
+    draw_admin_field(
+        d,
+        "Likes:",
+        admin_likes_field_rect(),
+        &state.admin_likes_input,
+        state.admin_edit_focus == AdminEditField::Likes,
+    );
+    draw_admin_field(
+        d,
+        "XP:",
+        admin_xp_field_rect(),
+        &state.admin_xp_input,
+        state.admin_edit_focus == AdminEditField::Xp,
+    );
 
     let save = admin_save_btn_rect();
     d.draw_rectangle_rec(save, Color::new(40, 70, 48, 255));
-    d.draw_text("Save", save.x as i32 + 54, save.y as i32 + 11, 16, Color::RAYWHITE);
+    d.draw_text(
+        "Save",
+        save.x as i32 + 54,
+        save.y as i32 + 11,
+        16,
+        Color::RAYWHITE,
+    );
 
     let del = admin_delete_btn_rect();
     let armed = state.admin_delete_armed_at.is_some();
-    d.draw_rectangle_rec(del, if armed { Color::new(140, 50, 50, 255) } else { Color::new(60, 40, 40, 255) });
-    let del_label = if armed { "Click again to confirm delete" } else { "Delete isle & account" };
-    d.draw_text(del_label, del.x as i32 + 10, del.y as i32 + 11, 14, Color::RAYWHITE);
+    d.draw_rectangle_rec(
+        del,
+        if armed {
+            Color::new(140, 50, 50, 255)
+        } else {
+            Color::new(60, 40, 40, 255)
+        },
+    );
+    let del_label = if armed {
+        "Click again to confirm delete"
+    } else {
+        "Delete isle & account"
+    };
+    d.draw_text(
+        del_label,
+        del.x as i32 + 10,
+        del.y as i32 + 11,
+        14,
+        Color::RAYWHITE,
+    );
     d.draw_text(
         "Deletes every painted cell and the owner's\naccount entirely. Cannot be undone.",
         del.x as i32,
         del.y as i32 + del.height as i32 + 10,
         12,
         Color::GRAY,
+    );
+}
+
+/// Stable, button-driven export panel opened by clicking an island with the
+/// Export tool. Unlike the hover tooltip, it is deliberately a modal so
+/// touch users can choose image versus timelapse reliably.
+fn draw_island_export(d: &mut impl RaylibDraw, export: &IslandExport) {
+    d.draw_rectangle_rec(
+        Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H),
+        Color::new(0, 0, 0, 140),
+    );
+    let o = overlay_rect();
+    d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
+    d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
+    d.draw_text(
+        "Export island",
+        o.x as i32 + 20,
+        o.y as i32 + 14,
+        18,
+        Color::RAYWHITE,
+    );
+    d.draw_text(
+        &format!("{}  ·  island #{}", export.owner_label, export.island_id),
+        o.x as i32 + 20,
+        o.y as i32 + 54,
+        16,
+        Color::LIGHTGRAY,
+    );
+    d.draw_text(
+        "Choose an export for this island:",
+        o.x as i32 + 20,
+        o.y as i32 + 92,
+        14,
+        Color::RAYWHITE,
+    );
+    for (rect, label, detail, color) in [
+        (
+            island_export_image_btn_rect(),
+            "Image (PNG)",
+            "current island portrait",
+            Color::new(40, 70, 48, 255),
+        ),
+        (
+            island_export_gif_btn_rect(),
+            "Timelapse GIF",
+            "compact animated history",
+            Color::new(64, 56, 102, 255),
+        ),
+        (
+            island_export_video_btn_rect(),
+            "Timelapse video",
+            "WebM animated history",
+            Color::new(40, 70, 100, 255),
+        ),
+    ] {
+        d.draw_rectangle_rec(rect, color);
+        d.draw_rectangle_lines_ex(rect, 1.0, Color::new(120, 120, 135, 255));
+        d.draw_text(
+            label,
+            rect.x as i32 + 14,
+            rect.y as i32 + 8,
+            16,
+            Color::RAYWHITE,
+        );
+        d.draw_text(
+            detail,
+            rect.x as i32 + 14,
+            rect.y as i32 + 27,
+            12,
+            Color::LIGHTGRAY,
+        );
+    }
+    let close = overlay_close_rect();
+    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
+    d.draw_text(
+        "X",
+        close.x as i32 + 11,
+        close.y as i32 + 7,
+        16,
+        Color::RAYWHITE,
     );
 }
 
@@ -1885,24 +2368,80 @@ const BTN_TOOLTIP_W: f32 = 210.0;
 /// deliberately excluded (self-explanatory as a text input).
 const BUTTON_TOOLTIPS: &[(fn() -> Rectangle, &str, &[&str])] = &[
     (center_btn_rect, "Isle Centre", &["Go back to your island"]),
-    (world_centre_btn_rect, "World Centre", &["Zoom out to see", "the whole world"]),
-    (inventory_btn_rect, "Colors", &["Inventory: stores every", "color you've discovered"]),
-    (recent_btn_rect, "Recent colors", &["Open your raw HSL", "color history"]),
-    (lock_btn_rect, "Lock", &["Blocks cursor merging", "and central HEXA"]),
-    (brush_btn_rect, "Eyedropper", &["Click or tap, then select", "a painted tile", "Merging is disabled while active"]),
-    (sound_btn_rect, "Sound", &["Toggle sound effects", "and background music"]),
-    (account_btn_rect, "Account", &["Copy or import your ID,", "start a new or delete your account"]),
+    (
+        world_centre_btn_rect,
+        "World Centre",
+        &["Zoom out to see", "the whole world"],
+    ),
+    (
+        inventory_btn_rect,
+        "Colors",
+        &["Inventory: stores every", "color you've discovered"],
+    ),
+    (
+        recent_btn_rect,
+        "Recent colors",
+        &["Open your raw HSL", "color history"],
+    ),
+    (
+        lock_btn_rect,
+        "Lock",
+        &["Blocks cursor merging", "and central HEXA"],
+    ),
+    (
+        brush_btn_rect,
+        "Eyedropper",
+        &[
+            "Click or tap, then select",
+            "a painted tile",
+            "Merging is disabled while active",
+        ],
+    ),
+    (
+        sound_btn_rect,
+        "Sound",
+        &["Toggle sound effects", "and background music"],
+    ),
+    (
+        replay_btn_rect,
+        "Replay",
+        &["Replay the retained world", "from its oldest timestamp"],
+    ),
+    (
+        account_btn_rect,
+        "Account",
+        &[
+            "Copy or import your ID,",
+            "start a new or delete your account",
+        ],
+    ),
     (
         footer_link_edit_rect,
         "Link your island",
-        &["Paste your raylib gamejam", "submission's rate id here.", "Other players clicking your", "island get sent to that page."],
+        &[
+            "Paste your raylib gamejam",
+            "submission's rate id here.",
+            "Other players clicking your",
+            "island get sent to that page.",
+        ],
     ),
-    (my_island_btn_rect, "My Isle", &["Get info on your island", "and set your project link"]),
-    (export_btn_rect, "Export", &["Save a shareable image", "of your island"]),
+    (
+        my_island_btn_rect,
+        "My Isle",
+        &["Get info on your island", "and set your project link"],
+    ),
+    (
+        export_btn_rect,
+        "Export",
+        &["Save a shareable image", "of your island"],
+    ),
 ];
 
 fn hovered_button_tooltip(mouse: Vector2) -> Option<(&'static str, &'static [&'static str])> {
-    BUTTON_TOOLTIPS.iter().find(|&&(rect_fn, _, _)| point_in(mouse, rect_fn())).map(|&(_, title, lines)| (title, lines))
+    BUTTON_TOOLTIPS
+        .iter()
+        .find(|&&(rect_fn, _, _)| point_in(mouse, rect_fn()))
+        .map(|&(_, title, lines)| (title, lines))
 }
 
 /// Author-requested: the footer's last-3 swatches (`UiState::last3`, most-
@@ -1910,7 +2449,11 @@ fn hovered_button_tooltip(mouse: Vector2) -> Option<(&'static str, &'static [&'s
 /// "Last color used" for the newest, "Last last ..." for the one before,
 /// "Last last last ..." for the oldest of the three — instead of being
 /// silently excluded like the name field.
-const LAST3_TITLES: [&str; 3] = ["Last color used", "Last last color used", "Last last last color used"];
+const LAST3_TITLES: [&str; 3] = [
+    "Last color used",
+    "Last last color used",
+    "Last last last color used",
+];
 
 fn hovered_recent_footer(state: &UiState, mouse: Vector2) -> Option<(&'static str, RecentColor)> {
     LAST3_TITLES
@@ -1977,14 +2520,36 @@ fn draw_island_tooltip(d: &mut impl RaylibDraw, popup: &IslandInfo, mouse: Vecto
     ty += TOOLTIP_LINE_H as i32;
     // F9.6 item 3: heart glyph (filled = you've already liked this island)
     // instead of the old text-only "Likes: N".
-    let heart_color = if popup.already_liked { Color::new(230, 70, 90, 255) } else { Color::new(160, 160, 168, 255) };
-    world::draw_heart(d, Vector2::new(tx as f32 + 8.0, ty as f32 + 7.0), 14.0, popup.already_liked, heart_color);
-    d.draw_text(&format!("{}", popup.likes), tx + 20, ty, 13, Color::LIGHTGRAY);
+    let heart_color = if popup.already_liked {
+        Color::new(230, 70, 90, 255)
+    } else {
+        Color::new(160, 160, 168, 255)
+    };
+    world::draw_heart(
+        d,
+        Vector2::new(tx as f32 + 8.0, ty as f32 + 7.0),
+        14.0,
+        popup.already_liked,
+        heart_color,
+    );
+    d.draw_text(
+        &format!("{}", popup.likes),
+        tx + 20,
+        ty,
+        13,
+        Color::LIGHTGRAY,
+    );
     ty += TOOLTIP_LINE_H as i32;
     d.draw_text(&popup.age_label, tx, ty, 12, Color::GRAY);
     if let Some(id) = popup.link_id {
         ty += TOOLTIP_LINE_H as i32;
-        d.draw_text(&format!("Linked: rate #{id}"), tx, ty, 12, Color::new(120, 180, 255, 255));
+        d.draw_text(
+            &format!("Linked: rate #{id}"),
+            tx,
+            ty,
+            12,
+            Color::new(120, 180, 255, 255),
+        );
     }
 }
 
@@ -1996,12 +2561,17 @@ fn draw_island_tooltip(d: &mut impl RaylibDraw, popup: &IslandInfo, mouse: Vecto
 /// `LIKE_ANIM_DURATION`; screen-space, drawn over everything else.
 fn draw_like_anims(d: &mut impl RaylibDraw, state: &UiState) {
     for anim in &state.like_anims {
-        let t = (anim.started_at.elapsed().as_secs_f32() / LIKE_ANIM_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+        let t = (anim.started_at.elapsed().as_secs_f32() / LIKE_ANIM_DURATION.as_secs_f32())
+            .clamp(0.0, 1.0);
         let alpha = ((1.0 - t) * 255.0) as u8;
         let rise = t * 26.0;
         let size = 20.0 + t * 10.0;
         let cy = anim.pos.y - rise;
-        let color = if anim.liked { Color::new(230, 70, 90, alpha) } else { Color::new(160, 160, 168, alpha) };
+        let color = if anim.liked {
+            Color::new(230, 70, 90, alpha)
+        } else {
+            Color::new(160, 160, 168, alpha)
+        };
         world::draw_heart(d, Vector2::new(anim.pos.x, cy), size, anim.liked, color);
     }
 }
@@ -2029,12 +2599,24 @@ fn draw_rerank_banner(d: &mut impl RaylibDraw, secs: i64) {
 /// result alone — widened and re-centered on the same axis so it still sits
 /// under the header symmetrically.
 fn draw_toast(d: &mut impl RaylibDraw, toast: &Toast, info: &HudInfo) {
-    let frac = 1.0 - (toast.shown_at.elapsed().as_secs_f32() / TOAST_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+    let frac = 1.0
+        - (toast.shown_at.elapsed().as_secs_f32() / TOAST_DURATION.as_secs_f32()).clamp(0.0, 1.0);
     let alpha = (frac * 235.0) as u8;
     let content_w = toast.text.chars().count() as f32 * 8.0
         + if toast.hue.is_some() { 42.0 } else { 20.0 }
-        + if toast.merge_from.is_some() { 80.0 } else { 0.0 };
-    let bar_w = content_w.clamp(if toast.merge_from.is_some() { 430.0 } else { 360.0 }, 680.0);
+        + if toast.merge_from.is_some() {
+            80.0
+        } else {
+            0.0
+        };
+    let bar_w = content_w.clamp(
+        if toast.merge_from.is_some() {
+            430.0
+        } else {
+            360.0
+        },
+        680.0,
+    );
     let bar = Rectangle::new(360.0 - bar_w / 2.0, HEADER_H + 10.0, bar_w, 34.0);
     d.draw_rectangle_rec(bar, Color::new(24, 24, 30, alpha));
     d.draw_rectangle_lines_ex(bar, 1.0, Color::new(255, 215, 0, alpha));
@@ -2066,15 +2648,30 @@ fn draw_toast(d: &mut impl RaylibDraw, toast: &Toast, info: &HudInfo) {
     } else {
         x as i32 + 4
     };
-    d.draw_text(&toast.text, text_x, bar.y as i32 + 9, 14, Color::new(255, 255, 255, alpha));
+    d.draw_text(
+        &toast.text,
+        text_x,
+        bar.y as i32 + 9,
+        14,
+        Color::new(255, 255, 255, alpha),
+    );
 }
 
 fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo, sound_on: bool) {
-    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, HEADER_H), Color::new(10, 10, 14, 235));
+    d.draw_rectangle_rec(
+        Rectangle::new(0.0, 0.0, SCREEN_W, HEADER_H),
+        Color::new(10, 10, 14, 235),
+    );
     // Author-requested: the short identity hex used to lead this line, but
     // it's already reachable via the Account overlay ("Signed in as ..."),
     // so the header itself only needs the level/xp readout.
-    d.draw_text(&format!("Lv{}  {}xp", info.level, info.xp), 10, 6, 16, Color::RAYWHITE);
+    d.draw_text(
+        &format!("Lv{}  {}xp", info.level, info.xp),
+        10,
+        6,
+        16,
+        Color::RAYWHITE,
+    );
     // Author-requested: sits in the gap right after the level/xp readout
     // (freed up by removing the web-only "ws: ..." debug line that used to
     // live here).
@@ -2082,16 +2679,28 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo, sound_on: bool) {
     d.draw_text("hexel", 338, 6, 16, Color::RAYWHITE);
     // Author-requested: camera world position, two stacked lines in the gap
     // between the wordmark and the online count.
-    d.draw_text(&format!("X: {}", info.camera_target.x.round() as i32), 260, 2, 11, Color::LIGHTGRAY);
-    d.draw_text(&format!("Y: {}", info.camera_target.y.round() as i32), 260, 14, 11, Color::LIGHTGRAY);
+    d.draw_text(
+        &format!("X: {}", info.camera_target.x.round() as i32),
+        260,
+        2,
+        11,
+        Color::LIGHTGRAY,
+    );
+    d.draw_text(
+        &format!("Y: {}", info.camera_target.y.round() as i32),
+        260,
+        14,
+        11,
+        Color::LIGHTGRAY,
+    );
     // Fixed-position right-side label rather than measuring text width —
     // the draw handle has no default-font `measure_text` (that's only on
     // `RaylibHandle`, unavailable once `begin_drawing` hands out its borrow).
-    // Shifted left from 548 to make room for the Account button now living
-    // in the header (see `account_btn_rect`).
+    // Shifted left to leave room for the Replay/Sound/Account/Export button
+    // cluster on the right.
     d.draw_text(
         &format!("{} / {} online", info.online, info.total),
-        430,
+        390,
         6,
         14,
         Color::LIGHTGRAY,
@@ -2100,13 +2709,36 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo, sound_on: bool) {
     // the Export button.
     let ab = account_btn_rect();
     d.draw_rectangle_rec(ab, Color::new(40, 40, 48, 255));
-    d.draw_text("Account", ab.x as i32 + 8, ab.y as i32 + 6, 10, Color::RAYWHITE);
+    d.draw_text(
+        "Account",
+        ab.x as i32 + 8,
+        ab.y as i32 + 6,
+        10,
+        Color::RAYWHITE,
+    );
 
     // Author-requested: sound on/off, directly left of Account. Same
     // muted-red-when-off convention as `lock_btn_rect`'s locked state.
     let sb = sound_btn_rect();
-    d.draw_rectangle_rec(sb, if sound_on { Color::new(40, 40, 48, 255) } else { Color::new(120, 60, 60, 255) });
+    d.draw_rectangle_rec(
+        sb,
+        if sound_on {
+            Color::new(40, 40, 48, 255)
+        } else {
+            Color::new(120, 60, 60, 255)
+        },
+    );
     draw_sound_icon(d, sb, sound_on);
+
+    let replay = replay_btn_rect();
+    d.draw_rectangle_rec(replay, Color::new(40, 40, 48, 255));
+    d.draw_text(
+        "Replay",
+        replay.x as i32 + 7,
+        replay.y as i32 + 6,
+        10,
+        Color::RAYWHITE,
+    );
 
     let export = export_btn_rect();
     d.draw_rectangle_rec(export, Color::new(40, 40, 48, 255));
@@ -2118,10 +2750,21 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo, sound_on: bool) {
 /// the player's island; keeping the card here makes native and web exports
 /// visually identical.
 pub fn draw_export_frame(d: &mut impl RaylibDraw, name: &str, link_id: Option<u32>) {
-    let display_name = if name.trim().is_empty() { "My" } else { name.trim() };
+    let display_name = if name.trim().is_empty() {
+        "My"
+    } else {
+        name.trim()
+    };
 
     let footer_h = if link_id.is_some() { 92.0 } else { 72.0 };
-    d.draw_rectangle_gradient_v(0, 0, SCREEN_W as i32, 88, Color::new(8, 10, 16, 245), Color::new(8, 10, 16, 0));
+    d.draw_rectangle_gradient_v(
+        0,
+        0,
+        SCREEN_W as i32,
+        88,
+        Color::new(8, 10, 16, 245),
+        Color::new(8, 10, 16, 0),
+    );
     d.draw_rectangle_gradient_v(
         0,
         (SCREEN_H - footer_h) as i32,
@@ -2131,8 +2774,20 @@ pub fn draw_export_frame(d: &mut impl RaylibDraw, name: &str, link_id: Option<u3
         Color::new(8, 10, 16, 245),
     );
     d.draw_text("hexel", 24, 18, 24, Color::RAYWHITE);
-    d.draw_text(&format!("{}'s island", display_name), 24, 47, 22, Color::new(210, 214, 224, 255));
-    d.draw_text("https://hexel.mister-esman.uk", 168, 680, 16, Color::RAYWHITE);
+    d.draw_text(
+        &format!("{}'s island", display_name),
+        24,
+        47,
+        22,
+        Color::new(210, 214, 224, 255),
+    );
+    d.draw_text(
+        "https://hexel.mister-esman.uk",
+        168,
+        680,
+        16,
+        Color::RAYWHITE,
+    );
     // Author-requested: the shared image should carry the island's itch.io
     // rate link (if the player set one) so a rater can jump straight to it
     // from a screenshot, not just the app's landing page above. Left-aligned
@@ -2187,11 +2842,22 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
             d.draw_rectangle_lines_ex(eb, 2.0, Color::GOLD);
             draw_admin_edit_icon(d, eb);
         }
+        Tool::IslandExport => {
+            d.draw_rectangle_lines_ex(eb, 2.0, Color::new(100, 180, 255, 255));
+            draw_admin_edit_icon(d, eb);
+        }
         Tool::Eyedropper => draw_pencil_icon(d, eb),
     }
 
     let lb = lock_btn_rect();
-    d.draw_rectangle_rec(lb, if info.locked { Color::new(120, 60, 60, 255) } else { Color::new(40, 40, 48, 255) });
+    d.draw_rectangle_rec(
+        lb,
+        if info.locked {
+            Color::new(120, 60, 60, 255)
+        } else {
+            Color::new(40, 40, 48, 255)
+        },
+    );
     draw_lock_icon(d, lb, info.locked);
 
     let rb = recent_btn_rect();
@@ -2200,8 +2866,20 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
 
     let nf = name_field_rect();
     d.draw_rectangle_rec(nf, Color::new(28, 28, 34, 255));
-    d.draw_rectangle_lines_ex(nf, 1.0, if state.name_focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
-    let label = if state.name_input.is_empty() && !state.name_focused { "name..." } else { &state.name_input };
+    d.draw_rectangle_lines_ex(
+        nf,
+        1.0,
+        if state.name_focused {
+            Color::GOLD
+        } else {
+            Color::new(90, 90, 96, 255)
+        },
+    );
+    let label = if state.name_input.is_empty() && !state.name_focused {
+        "name..."
+    } else {
+        &state.name_input
+    };
     d.draw_text(label, nf.x as i32 + 6, nf.y as i32 + 7, 14, Color::RAYWHITE);
 
     // Eyedropper tool. The tip droplet is tinted with the live brush color;
@@ -2211,7 +2889,11 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     if state.tool == Tool::Eyedropper {
         d.draw_rectangle_lines_ex(bb, 2.0, Color::GOLD);
     }
-    draw_brush_icon(d, bb, world::hsv_color(info.brush.0, info.brush.1, info.brush.2));
+    draw_brush_icon(
+        d,
+        bb,
+        world::hsv_color(info.brush.0, info.brush.1, info.brush.2),
+    );
 
     // Author-requested: footer quick-access rate-id field, left of My Isle
     // (see `footer_link_edit_rect`'s doc comment) — same colored-by-validity
@@ -2226,12 +2908,28 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
         Color::new(90, 90, 96, 255)
     };
     d.draw_rectangle_lines_ex(fl, 1.0, fl_border);
-    let fl_shown = if state.link_edit_input.is_empty() && !state.link_edit_focused { "id" } else { &state.link_edit_input };
-    d.draw_text(fl_shown, fl.x as i32 + 6, fl.y as i32 + 8, 12, Color::RAYWHITE);
+    let fl_shown = if state.link_edit_input.is_empty() && !state.link_edit_focused {
+        "id"
+    } else {
+        &state.link_edit_input
+    };
+    d.draw_text(
+        fl_shown,
+        fl.x as i32 + 6,
+        fl.y as i32 + 8,
+        12,
+        Color::RAYWHITE,
+    );
 
     let mb = my_island_btn_rect();
     d.draw_rectangle_rec(mb, Color::new(40, 40, 48, 255));
-    d.draw_text("My Isle", mb.x as i32 + 6, mb.y as i32 + 9, 10, Color::RAYWHITE);
+    d.draw_text(
+        "My Isle",
+        mb.x as i32 + 6,
+        mb.y as i32 + 9,
+        10,
+        Color::RAYWHITE,
+    );
 }
 
 /// Author-requested: each letter of the footer's "Colors" button in its own
@@ -2271,8 +2969,17 @@ fn draw_colors_label(d: &mut impl RaylibDraw, r: Rectangle) {
     for (i, ch) in COLORS_LABEL.chars().enumerate() {
         let hue = (i as u16) * 360 / n;
         let color = canonical_color(hue);
-        let dx = offsets.and_then(|o| o.get(i)).copied().unwrap_or(i as i32 * 9);
-        d.draw_text(&ch.to_string(), (start_x + dx as f32) as i32, r.y as i32 + 7, COLORS_LABEL_SIZE, color);
+        let dx = offsets
+            .and_then(|o| o.get(i))
+            .copied()
+            .unwrap_or(i as i32 * 9);
+        d.draw_text(
+            &ch.to_string(),
+            (start_x + dx as f32) as i32,
+            r.y as i32 + 7,
+            COLORS_LABEL_SIZE,
+            color,
+        );
     }
 }
 
@@ -2284,14 +2991,42 @@ fn draw_locate_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     let cy = r.y + r.height / 2.0;
     let icon_color = Color::new(235, 235, 240, 255);
     let ring_r = 6.0;
-    d.draw_ring(Vector2::new(cx, cy), ring_r - 1.5, ring_r, 0.0, 360.0, 24, icon_color);
+    d.draw_ring(
+        Vector2::new(cx, cy),
+        ring_r - 1.5,
+        ring_r,
+        0.0,
+        360.0,
+        24,
+        icon_color,
+    );
     d.draw_circle(cx as i32, cy as i32, 2.0, icon_color);
     let gap = 1.0;
     let tick = 3.0;
-    d.draw_line_ex(Vector2::new(cx, cy - ring_r - gap), Vector2::new(cx, cy - ring_r - gap - tick), 2.0, icon_color);
-    d.draw_line_ex(Vector2::new(cx, cy + ring_r + gap), Vector2::new(cx, cy + ring_r + gap + tick), 2.0, icon_color);
-    d.draw_line_ex(Vector2::new(cx - ring_r - gap, cy), Vector2::new(cx - ring_r - gap - tick, cy), 2.0, icon_color);
-    d.draw_line_ex(Vector2::new(cx + ring_r + gap, cy), Vector2::new(cx + ring_r + gap + tick, cy), 2.0, icon_color);
+    d.draw_line_ex(
+        Vector2::new(cx, cy - ring_r - gap),
+        Vector2::new(cx, cy - ring_r - gap - tick),
+        2.0,
+        icon_color,
+    );
+    d.draw_line_ex(
+        Vector2::new(cx, cy + ring_r + gap),
+        Vector2::new(cx, cy + ring_r + gap + tick),
+        2.0,
+        icon_color,
+    );
+    d.draw_line_ex(
+        Vector2::new(cx - ring_r - gap, cy),
+        Vector2::new(cx - ring_r - gap - tick, cy),
+        2.0,
+        icon_color,
+    );
+    d.draw_line_ex(
+        Vector2::new(cx + ring_r + gap, cy),
+        Vector2::new(cx + ring_r + gap + tick, cy),
+        2.0,
+        icon_color,
+    );
 }
 
 /// World Centre glyph: a globe (ring plus a meridian/equator cross), distinct
@@ -2301,8 +3036,21 @@ fn draw_globe_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     let cy = r.y + r.height / 2.0;
     let icon_color = Color::new(235, 235, 240, 255);
     let ring_r = 7.0;
-    d.draw_ring(Vector2::new(cx, cy), ring_r - 1.3, ring_r, 0.0, 360.0, 24, icon_color);
-    d.draw_line_ex(Vector2::new(cx - ring_r, cy), Vector2::new(cx + ring_r, cy), 1.0, icon_color);
+    d.draw_ring(
+        Vector2::new(cx, cy),
+        ring_r - 1.3,
+        ring_r,
+        0.0,
+        360.0,
+        24,
+        icon_color,
+    );
+    d.draw_line_ex(
+        Vector2::new(cx - ring_r, cy),
+        Vector2::new(cx + ring_r, cy),
+        1.0,
+        icon_color,
+    );
     d.draw_ellipse_lines(cx as i32, cy as i32, ring_r * 0.45, ring_r, icon_color);
 }
 
@@ -2312,7 +3060,12 @@ fn draw_globe_icon(d: &mut impl RaylibDraw, r: Rectangle) {
 fn draw_export_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     let color = Color::new(235, 235, 240, 255);
     let cx = r.x + r.width / 2.0;
-    d.draw_line_ex(Vector2::new(cx, r.y + 14.0), Vector2::new(cx, r.y + 5.0), 2.0, color);
+    d.draw_line_ex(
+        Vector2::new(cx, r.y + 14.0),
+        Vector2::new(cx, r.y + 5.0),
+        2.0,
+        color,
+    );
     d.draw_triangle(
         Vector2::new(cx, r.y + 3.0),
         Vector2::new(cx - 4.0, r.y + 8.0),
@@ -2331,13 +3084,28 @@ fn draw_sound_icon(d: &mut impl RaylibDraw, r: Rectangle, on: bool) {
     let cx = r.x + r.width / 2.0 - 3.0;
     let cy = r.y + r.height / 2.0;
     d.draw_rectangle_rec(Rectangle::new(cx - 6.0, cy - 3.0, 4.0, 6.0), color);
-    d.draw_triangle(Vector2::new(cx - 2.0, cy - 3.0), Vector2::new(cx - 2.0, cy + 3.0), Vector2::new(cx + 4.0, cy + 7.0), color);
-    d.draw_triangle(Vector2::new(cx - 2.0, cy - 3.0), Vector2::new(cx + 4.0, cy - 7.0), Vector2::new(cx + 4.0, cy + 7.0), color);
+    d.draw_triangle(
+        Vector2::new(cx - 2.0, cy - 3.0),
+        Vector2::new(cx - 2.0, cy + 3.0),
+        Vector2::new(cx + 4.0, cy + 7.0),
+        color,
+    );
+    d.draw_triangle(
+        Vector2::new(cx - 2.0, cy - 3.0),
+        Vector2::new(cx + 4.0, cy - 7.0),
+        Vector2::new(cx + 4.0, cy + 7.0),
+        color,
+    );
     if on {
         d.draw_ring(Vector2::new(cx + 6.0, cy), 3.0, 4.0, -50.0, 50.0, 8, color);
         d.draw_ring(Vector2::new(cx + 6.0, cy), 6.0, 7.0, -50.0, 50.0, 8, color);
     } else {
-        d.draw_line_ex(Vector2::new(cx + 1.0, cy - 8.0), Vector2::new(cx + 11.0, cy + 8.0), 2.0, Color::new(255, 230, 230, 255));
+        d.draw_line_ex(
+            Vector2::new(cx + 1.0, cy - 8.0),
+            Vector2::new(cx + 11.0, cy + 8.0),
+            2.0,
+            Color::new(255, 230, 230, 255),
+        );
     }
 }
 
@@ -2380,7 +3148,13 @@ fn draw_pencil_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     d.draw_triangle(tip[0], tip[1], tip[2], Color::new(190, 150, 100, 255));
 
     let outline = Color::new(40, 40, 48, 255);
-    d.draw_rectangle_lines((x + cap_w) as i32, y as i32, body_w as i32, h as i32, outline);
+    d.draw_rectangle_lines(
+        (x + cap_w) as i32,
+        y as i32,
+        body_w as i32,
+        h as i32,
+        outline,
+    );
     d.draw_triangle_lines(tip[0], tip[1], tip[2], outline);
     d.draw_rectangle_rounded_lines(cap, 0.5, 4, outline);
 }
@@ -2418,18 +3192,40 @@ fn draw_move_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     let head_w = 5.0;
     let head_l = 4.0;
 
-    d.draw_rectangle_rec(Rectangle::new(cx - shaft_half_w, cy - arm, shaft_half_w * 2.0, arm * 2.0), icon_color);
-    d.draw_rectangle_rec(Rectangle::new(cx - arm, cy - shaft_half_w, arm * 2.0, shaft_half_w * 2.0), icon_color);
+    d.draw_rectangle_rec(
+        Rectangle::new(cx - shaft_half_w, cy - arm, shaft_half_w * 2.0, arm * 2.0),
+        icon_color,
+    );
+    d.draw_rectangle_rec(
+        Rectangle::new(cx - arm, cy - shaft_half_w, arm * 2.0, shaft_half_w * 2.0),
+        icon_color,
+    );
 
     let heads = [
         // Up
-        [Vector2::new(cx - head_w / 2.0, cy - arm), Vector2::new(cx + head_w / 2.0, cy - arm), Vector2::new(cx, cy - arm - head_l)],
+        [
+            Vector2::new(cx - head_w / 2.0, cy - arm),
+            Vector2::new(cx + head_w / 2.0, cy - arm),
+            Vector2::new(cx, cy - arm - head_l),
+        ],
         // Down
-        [Vector2::new(cx - head_w / 2.0, cy + arm), Vector2::new(cx, cy + arm + head_l), Vector2::new(cx + head_w / 2.0, cy + arm)],
+        [
+            Vector2::new(cx - head_w / 2.0, cy + arm),
+            Vector2::new(cx, cy + arm + head_l),
+            Vector2::new(cx + head_w / 2.0, cy + arm),
+        ],
         // Leftnex
-        [Vector2::new(cx - arm, cy - head_w / 2.0), Vector2::new(cx - arm - head_l, cy), Vector2::new(cx - arm, cy + head_w / 2.0)],
+        [
+            Vector2::new(cx - arm, cy - head_w / 2.0),
+            Vector2::new(cx - arm - head_l, cy),
+            Vector2::new(cx - arm, cy + head_w / 2.0),
+        ],
         // Right
-        [Vector2::new(cx + arm, cy - head_w / 2.0), Vector2::new(cx + arm, cy + head_w / 2.0), Vector2::new(cx + arm + head_l, cy)],
+        [
+            Vector2::new(cx + arm, cy - head_w / 2.0),
+            Vector2::new(cx + arm, cy + head_w / 2.0),
+            Vector2::new(cx + arm + head_l, cy),
+        ],
     ];
     for h in heads {
         d.draw_triangle(h[0], h[1], h[2], icon_color);
@@ -2449,7 +3245,15 @@ fn draw_admin_edit_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     let cy = r.y + r.height / 2.0 - 1.5;
     let icon_color = Color::new(235, 235, 240, 255);
     let ring_r = 5.5;
-    d.draw_ring(Vector2::new(cx, cy), ring_r - 1.5, ring_r, 0.0, 360.0, 24, icon_color);
+    d.draw_ring(
+        Vector2::new(cx, cy),
+        ring_r - 1.5,
+        ring_r,
+        0.0,
+        360.0,
+        24,
+        icon_color,
+    );
     let handle_start = Vector2::new(cx + ring_r * 0.7, cy + ring_r * 0.7);
     let handle_end = Vector2::new(handle_start.x + 5.0, handle_start.y + 5.0);
     d.draw_line_ex(handle_start, handle_end, 2.5, icon_color);
@@ -2475,7 +3279,13 @@ fn draw_brush_icon(d: &mut impl RaylibDraw, r: Rectangle, tip_color: Color) {
     let bristle_top_w = handle_w + 2.0;
     let ferrule = Rectangle::new(x - 1.0, y + handle_h, bristle_top_w, ferrule_h);
     d.draw_rectangle_rec(ferrule, Color::new(190, 190, 196, 255));
-    d.draw_rectangle_lines(ferrule.x as i32, ferrule.y as i32, ferrule.width as i32, ferrule.height as i32, outline);
+    d.draw_rectangle_lines(
+        ferrule.x as i32,
+        ferrule.y as i32,
+        ferrule.width as i32,
+        ferrule.height as i32,
+        outline,
+    );
 
     let bristle_y = y + handle_h + ferrule_h;
     let tip_cx = x - 1.0 + bristle_top_w / 2.0;
@@ -2500,7 +3310,11 @@ fn draw_brush_icon(d: &mut impl RaylibDraw, r: Rectangle, tip_color: Color) {
 /// World-cursor version of the footer eyedropper icon. The droplet is
 /// anchored at `tip` and previews the painted color currently underneath.
 pub fn draw_eyedropper_cursor(d: &mut impl RaylibDraw, tip: Vector2, preview: Color) {
-    draw_brush_icon(d, Rectangle::new(tip.x - 15.0, tip.y - 25.5, 30.0, 30.0), preview);
+    draw_brush_icon(
+        d,
+        Rectangle::new(tip.x - 15.0, tip.y - 25.5, 30.0, 30.0),
+        preview,
+    );
 }
 
 /// Author-requested: icon-only Lock button — padlock glyph, shackle swung
@@ -2514,9 +3328,25 @@ fn draw_lock_icon(d: &mut impl RaylibDraw, r: Rectangle, locked: bool) {
     let shackle_cy = body_y - 2.0;
     let icon_color = Color::new(235, 235, 240, 255);
     if locked {
-        d.draw_ring(Vector2::new(cx, shackle_cy), 3.5, 5.5, 180.0, 360.0, 16, icon_color);
+        d.draw_ring(
+            Vector2::new(cx, shackle_cy),
+            3.5,
+            5.5,
+            180.0,
+            360.0,
+            16,
+            icon_color,
+        );
     } else {
-        d.draw_ring(Vector2::new(cx + 3.0, shackle_cy), 3.5, 5.5, 180.0, 340.0, 16, icon_color);
+        d.draw_ring(
+            Vector2::new(cx + 3.0, shackle_cy),
+            3.5,
+            5.5,
+            180.0,
+            340.0,
+            16,
+            icon_color,
+        );
     }
     d.draw_rectangle_rounded(body, 0.25, 4, icon_color);
 }
@@ -2526,16 +3356,31 @@ fn draw_lock_icon(d: &mut impl RaylibDraw, r: Rectangle, locked: bool) {
 /// the actual theme mechanic — merging — above the controls list, since
 /// "how do I even get new colors" was never spelled out anywhere in-game.
 fn draw_help_overlay(d: &mut impl RaylibDraw) {
-    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
+    d.draw_rectangle_rec(
+        Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H),
+        Color::new(0, 0, 0, 140),
+    );
 
     let o = overlay_rect();
     d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
     d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
-    d.draw_text("How to play", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+    d.draw_text(
+        "How to play",
+        o.x as i32 + 20,
+        o.y as i32 + 14,
+        18,
+        Color::RAYWHITE,
+    );
 
     let close = overlay_close_rect();
     d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
+    d.draw_text(
+        "X",
+        close.x as i32 + 11,
+        close.y as i32 + 7,
+        16,
+        Color::RAYWHITE,
+    );
 
     let section_color = Color::new(180, 200, 255, 255);
     let mut ty = o.y as i32 + 50;
@@ -2589,26 +3434,54 @@ fn draw_crosshair(d: &mut impl RaylibDraw, r: Rectangle, color: Color) {
         (Vector2::new(r.x, r.y), Vector2::new(1.0, 1.0)),
         (Vector2::new(r.x + r.width, r.y), Vector2::new(-1.0, 1.0)),
         (Vector2::new(r.x, r.y + r.height), Vector2::new(1.0, -1.0)),
-        (Vector2::new(r.x + r.width, r.y + r.height), Vector2::new(-1.0, -1.0)),
+        (
+            Vector2::new(r.x + r.width, r.y + r.height),
+            Vector2::new(-1.0, -1.0),
+        ),
     ];
     for (corner, dir) in corners {
-        d.draw_line_ex(corner, Vector2::new(corner.x + len * dir.x, corner.y), thick, color);
-        d.draw_line_ex(corner, Vector2::new(corner.x, corner.y + len * dir.y), thick, color);
+        d.draw_line_ex(
+            corner,
+            Vector2::new(corner.x + len * dir.x, corner.y),
+            thick,
+            color,
+        );
+        d.draw_line_ex(
+            corner,
+            Vector2::new(corner.x, corner.y + len * dir.y),
+            thick,
+            color,
+        );
     }
 }
 
 fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vector2) {
     // Dim the world behind the modal.
-    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
+    d.draw_rectangle_rec(
+        Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H),
+        Color::new(0, 0, 0, 140),
+    );
 
     let o = overlay_rect();
     d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
     d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
-    d.draw_text("Inventory", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+    d.draw_text(
+        "Inventory",
+        o.x as i32 + 20,
+        o.y as i32 + 14,
+        18,
+        Color::RAYWHITE,
+    );
 
     let close = overlay_close_rect();
     d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
+    d.draw_text(
+        "X",
+        close.x as i32 + 11,
+        close.y as i32 + 7,
+        16,
+        Color::RAYWHITE,
+    );
 
     // F9.6 item 4: sorted by hue (see `sorted_hues`), and a hex-code label
     // pops up above whichever swatch the mouse is currently over. Author-
@@ -2645,12 +3518,26 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse:
         let label = Rectangle::new(r.x, r.y - 20.0, label_w, 18.0);
         d.draw_rectangle_rec(label, Color::new(10, 10, 14, 235));
         d.draw_rectangle_lines_ex(label, 1.0, Color::new(120, 120, 130, 200));
-        d.draw_text(&hex, label.x as i32 + 4, label.y as i32 + 2, 13, Color::RAYWHITE);
+        d.draw_text(
+            &hex,
+            label.x as i32 + 4,
+            label.y as i32 + 2,
+            13,
+            Color::RAYWHITE,
+        );
     }
 
     let tol = world::constants::HUE_TOLERANCE;
     let offset = hue_offset_signed(effective_hue(state, info), state.base_hue).clamp(-tol, tol);
-    draw_hue_slider(d, hue_slider_rect(), offset, tol, state.base_hue, info.brush.1, info.brush.2);
+    draw_hue_slider(
+        d,
+        hue_slider_rect(),
+        offset,
+        tol,
+        state.base_hue,
+        info.brush.1,
+        info.brush.2,
+    );
     let sat_track = sat_slider_rect();
     draw_slider_capped(
         d,
@@ -2688,15 +3575,30 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse:
 }
 
 fn draw_recent_overlay(d: &mut impl RaylibDraw, state: &UiState, mouse: Vector2) {
-    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
+    d.draw_rectangle_rec(
+        Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H),
+        Color::new(0, 0, 0, 140),
+    );
     let o = overlay_rect();
     d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
     d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
-    d.draw_text("Recent colors", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+    d.draw_text(
+        "Recent colors",
+        o.x as i32 + 20,
+        o.y as i32 + 14,
+        18,
+        Color::RAYWHITE,
+    );
 
     let close = overlay_close_rect();
     d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
+    d.draw_text(
+        "X",
+        close.x as i32 + 11,
+        close.y as i32 + 7,
+        16,
+        Color::RAYWHITE,
+    );
 
     let mut hovered = None;
     for (i, &color) in state.recent_colors.iter().enumerate() {
@@ -2720,23 +3622,53 @@ fn draw_recent_overlay(d: &mut impl RaylibDraw, state: &UiState, mouse: Vector2)
 /// the inventory overlay's footprint/backdrop/close button but never draws
 /// alongside it (`draw` picks one or the other).
 fn draw_account_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
-    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(0, 0, 0, 140));
+    d.draw_rectangle_rec(
+        Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H),
+        Color::new(0, 0, 0, 140),
+    );
 
     let o = overlay_rect();
     d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
     d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
-    d.draw_text("Account", o.x as i32 + 20, o.y as i32 + 14, 18, Color::RAYWHITE);
+    d.draw_text(
+        "Account",
+        o.x as i32 + 20,
+        o.y as i32 + 14,
+        18,
+        Color::RAYWHITE,
+    );
 
     let close = overlay_close_rect();
     d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text("X", close.x as i32 + 11, close.y as i32 + 7, 16, Color::RAYWHITE);
+    d.draw_text(
+        "X",
+        close.x as i32 + 11,
+        close.y as i32 + 7,
+        16,
+        Color::RAYWHITE,
+    );
 
-    d.draw_text(&format!("Signed in as {}", info.short_id), o.x as i32 + 20, o.y as i32 + 44, 14, Color::LIGHTGRAY);
+    d.draw_text(
+        &format!("Signed in as {}", info.short_id),
+        o.x as i32 + 20,
+        o.y as i32 + 44,
+        14,
+        Color::LIGHTGRAY,
+    );
 
     let cb = copy_btn_rect();
     d.draw_rectangle_rec(cb, Color::new(40, 40, 48, 255));
-    d.draw_text("Copy my token", cb.x as i32 + 16, cb.y as i32 + 11, 14, Color::RAYWHITE);
-    if state.copy_clicked_at.is_some_and(|t| t.elapsed() < TOAST_DURATION) {
+    d.draw_text(
+        "Copy my token",
+        cb.x as i32 + 16,
+        cb.y as i32 + 11,
+        14,
+        Color::RAYWHITE,
+    );
+    if state
+        .copy_clicked_at
+        .is_some_and(|t| t.elapsed() < TOAST_DURATION)
+    {
         d.draw_text(
             "copied (or check the popup)",
             cb.x as i32 + cb.width as i32 + 12,
@@ -2755,22 +3687,63 @@ fn draw_account_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo
 
     if info.show_token_import {
         let field = import_field_rect();
-        d.draw_text("Paste an ID to restore that account:", field.x as i32, field.y as i32 - 18, 14, Color::LIGHTGRAY);
+        d.draw_text(
+            "Paste an ID to restore that account:",
+            field.x as i32,
+            field.y as i32 - 18,
+            14,
+            Color::LIGHTGRAY,
+        );
         d.draw_rectangle_rec(field, Color::new(28, 28, 34, 255));
-        d.draw_rectangle_lines_ex(field, 1.0, if state.import_focused { Color::GOLD } else { Color::new(90, 90, 96, 255) });
-        let shown = if state.import_input.is_empty() && !state.import_focused { "paste here..." } else { &state.import_input };
-        d.draw_text(shown, field.x as i32 + 6, field.y as i32 + 7, 14, Color::RAYWHITE);
+        d.draw_rectangle_lines_ex(
+            field,
+            1.0,
+            if state.import_focused {
+                Color::GOLD
+            } else {
+                Color::new(90, 90, 96, 255)
+            },
+        );
+        let shown = if state.import_input.is_empty() && !state.import_focused {
+            "paste here..."
+        } else {
+            &state.import_input
+        };
+        d.draw_text(
+            shown,
+            field.x as i32 + 6,
+            field.y as i32 + 7,
+            14,
+            Color::RAYWHITE,
+        );
 
         let ib = import_btn_rect();
         d.draw_rectangle_rec(ib, Color::new(40, 40, 48, 255));
-        d.draw_text("Import", ib.x as i32 + 20, ib.y as i32 + 9, 14, Color::RAYWHITE);
+        d.draw_text(
+            "Import",
+            ib.x as i32 + 20,
+            ib.y as i32 + 9,
+            14,
+            Color::RAYWHITE,
+        );
     }
 
     let rb = reset_btn_rect();
     let armed = state.reset_armed_at.is_some();
-    d.draw_rectangle_rec(rb, if armed { Color::new(140, 50, 50, 255) } else { Color::new(60, 40, 40, 255) });
+    d.draw_rectangle_rec(
+        rb,
+        if armed {
+            Color::new(140, 50, 50, 255)
+        } else {
+            Color::new(60, 40, 40, 255)
+        },
+    );
     d.draw_text(
-        if armed { "Click again to confirm new account" } else { "New account" },
+        if armed {
+            "Click again to confirm new account"
+        } else {
+            "New account"
+        },
         rb.x as i32 + 10,
         rb.y as i32 + 11,
         14,
@@ -2790,9 +3763,20 @@ fn draw_account_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo
     if !info.is_admin {
         let db = delete_account_btn_rect();
         let del_armed = state.delete_armed_at.is_some();
-        d.draw_rectangle_rec(db, if del_armed { Color::new(140, 50, 50, 255) } else { Color::new(60, 40, 40, 255) });
+        d.draw_rectangle_rec(
+            db,
+            if del_armed {
+                Color::new(140, 50, 50, 255)
+            } else {
+                Color::new(60, 40, 40, 255)
+            },
+        );
         d.draw_text(
-            if del_armed { "Click again to confirm delete" } else { "Delete account" },
+            if del_armed {
+                "Click again to confirm delete"
+            } else {
+                "Delete account"
+            },
             db.x as i32 + 10,
             db.y as i32 + 11,
             14,
@@ -2819,8 +3803,18 @@ fn draw_hue_slider(
     sat: u8,
     val: u8,
 ) {
-    let label = if offset == 0 { "Hue (0)".to_string() } else { format!("Hue ({offset:+})") };
-    d.draw_text(&label, track.x as i32, track.y as i32 - 18, 14, Color::LIGHTGRAY);
+    let label = if offset == 0 {
+        "Hue (0)".to_string()
+    } else {
+        format!("Hue ({offset:+})")
+    };
+    d.draw_text(
+        &label,
+        track.x as i32,
+        track.y as i32 - 18,
+        14,
+        Color::LIGHTGRAY,
+    );
     // Left/right edges of the track are the ±tol extremes of the window, so the
     // gradient previews what dragging to either end would actually look like.
     let lo_hue = (base_hue as i32 - tol).rem_euclid(360) as u16;
@@ -2842,10 +3836,23 @@ fn draw_hue_slider(
     );
     let frac = (offset + tol) as f32 / (2 * tol) as f32;
     let handle_x = track.x + track.width * frac;
-    d.draw_circle(handle_x as i32, (track.y + track.height / 2.0) as i32, 9.0, Color::RAYWHITE);
+    d.draw_circle(
+        handle_x as i32,
+        (track.y + track.height / 2.0) as i32,
+        9.0,
+        Color::RAYWHITE,
+    );
 }
 
-fn draw_slider(d: &mut impl RaylibDraw, track: Rectangle, value: u8, max: u8, lo: Color, hi: Color, label: &str) {
+fn draw_slider(
+    d: &mut impl RaylibDraw,
+    track: Rectangle,
+    value: u8,
+    max: u8,
+    lo: Color,
+    hi: Color,
+    label: &str,
+) {
     draw_slider_capped(d, track, value, max, max, lo, hi, label);
 }
 
@@ -2867,8 +3874,21 @@ fn draw_slider_capped(
     hi: Color,
     label: &str,
 ) {
-    d.draw_text(label, track.x as i32, track.y as i32 - 18, 14, Color::LIGHTGRAY);
-    d.draw_rectangle_gradient_h(track.x as i32, track.y as i32, track.width as i32, track.height as i32, lo, hi);
+    d.draw_text(
+        label,
+        track.x as i32,
+        track.y as i32 - 18,
+        14,
+        Color::LIGHTGRAY,
+    );
+    d.draw_rectangle_gradient_h(
+        track.x as i32,
+        track.y as i32,
+        track.width as i32,
+        track.height as i32,
+        lo,
+        hi,
+    );
     if cap < max {
         let cap_frac = cap as f32 / max as f32;
         let locked = Rectangle::new(
@@ -2879,9 +3899,18 @@ fn draw_slider_capped(
         );
         d.draw_rectangle_rec(locked, Color::new(20, 20, 24, 190));
     }
-    let frac = if max == 0 { 0.0 } else { value as f32 / max as f32 };
+    let frac = if max == 0 {
+        0.0
+    } else {
+        value as f32 / max as f32
+    };
     let handle_x = track.x + track.width * frac;
-    d.draw_circle(handle_x as i32, (track.y + track.height / 2.0) as i32, 9.0, Color::RAYWHITE);
+    d.draw_circle(
+        handle_x as i32,
+        (track.y + track.height / 2.0) as i32,
+        9.0,
+        Color::RAYWHITE,
+    );
     if cap < max {
         let cap_x = track.x + track.width * (cap as f32 / max as f32);
         d.draw_line_ex(
@@ -2904,28 +3933,48 @@ fn draw_slider_capped(
 // at v=6, x-height letters top out around v=2.5–3, ascenders at v=0.
 
 const TITLE_GLYPH_H: &[(i32, i32)] = &[
-    (0, 0), (0, 2), (0, 4), (0, 6), (0, 8), (0, 10), (0, 12), // left stem (ascender)
-    (1, 5),                                                   // shoulder
-    (2, 6), (2, 8), (2, 10), (2, 12),                         // right stem
+    (0, 0),
+    (0, 2),
+    (0, 4),
+    (0, 6),
+    (0, 8),
+    (0, 10),
+    (0, 12), // left stem (ascender)
+    (1, 5),  // shoulder
+    (2, 6),
+    (2, 8),
+    (2, 10),
+    (2, 12), // right stem
 ];
 const TITLE_GLYPH_E: &[(i32, i32)] = &[
-    (1, 5),                    // top cap
-    (0, 6), (0, 8), (0, 10),   // left side
-    (2, 6), (2, 8),            // right side, upper half
-    (1, 9),                    // crossbar (counter above, mouth below-right)
-    (1, 11), (2, 12),          // bottom sweep + tail
+    (1, 5), // top cap
+    (0, 6),
+    (0, 8),
+    (0, 10), // left side
+    (2, 6),
+    (2, 8), // right side, upper half
+    (1, 9), // crossbar (counter above, mouth below-right)
+    (1, 11),
+    (2, 12), // bottom sweep + tail
 ];
 const TITLE_GLYPH_X: &[(i32, i32)] = &[
-    (0, 6), (2, 6),   // top arms
-    (1, 9),           // crossing
-    (0, 12), (2, 12), // bottom arms
+    (0, 6),
+    (2, 6), // top arms
+    (1, 9), // crossing
+    (0, 12),
+    (2, 12), // bottom arms
 ];
 const TITLE_GLYPH_L: &[(i32, i32)] = &[(0, 0), (0, 2), (0, 4), (0, 6), (0, 8), (0, 10), (0, 12)];
 
 /// The word: each glyph with its column offset (3-wide letters, 1-column
 /// gaps, the final `l` is a single column — 17 columns total).
-const TITLE_WORD: [(&[(i32, i32)], i32); 5] =
-    [(TITLE_GLYPH_H, 0), (TITLE_GLYPH_E, 4), (TITLE_GLYPH_X, 8), (TITLE_GLYPH_E, 12), (TITLE_GLYPH_L, 16)];
+const TITLE_WORD: [(&[(i32, i32)], i32); 5] = [
+    (TITLE_GLYPH_H, 0),
+    (TITLE_GLYPH_E, 4),
+    (TITLE_GLYPH_X, 8),
+    (TITLE_GLYPH_E, 12),
+    (TITLE_GLYPH_L, 16),
+];
 const TITLE_COLS: i32 = 17;
 
 /// Logo cell outer radius: 17 columns span `16*1.5 + 2` = 26 radii, so 23
@@ -2986,21 +4035,37 @@ fn draw_hexel_logo(d: &mut impl RaylibDraw, center: Vector2, cell_r: f32, t: f32
 /// `title_active`), the wordmark, and the pulsing Draw button.
 fn draw_title_screen(d: &mut impl RaylibDraw, state: &UiState, mouse: Vector2) {
     let t = state.title_started.elapsed().as_secs_f32();
-    d.draw_rectangle_rec(Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H), Color::new(8, 9, 14, 205));
-    draw_hexel_logo(d, Vector2::new(SCREEN_W / 2.0, TITLE_LOGO_CY), TITLE_CELL_R, t);
+    d.draw_rectangle_rec(
+        Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H),
+        Color::new(8, 9, 14, 205),
+    );
+    draw_hexel_logo(
+        d,
+        Vector2::new(SCREEN_W / 2.0, TITLE_LOGO_CY),
+        TITLE_CELL_R,
+        t,
+    );
 
     let base = title_btn_rect();
     let hovered = point_in(mouse, base);
     // Idle: soft breathing pulse to invite the click; hovered: settled,
     // slightly enlarged (a pulse under the cursor reads as jitter).
-    let scale = if hovered { 1.07 } else { 1.0 + 0.03 * (t * 3.2).sin() };
+    let scale = if hovered {
+        1.07
+    } else {
+        1.0 + 0.03 * (t * 3.2).sin()
+    };
     let r = Rectangle::new(
         base.x + base.width * (1.0 - scale) / 2.0,
         base.y + base.height * (1.0 - scale) / 2.0,
         base.width * scale,
         base.height * scale,
     );
-    let fill = if hovered { Color::RAYWHITE } else { Color::new(228, 229, 235, 255) };
+    let fill = if hovered {
+        Color::RAYWHITE
+    } else {
+        Color::new(228, 229, 235, 255)
+    };
     d.draw_rectangle_rounded(r, 0.45, 8, fill);
     d.draw_rectangle_rounded_lines(r, 0.45, 8, Color::new(40, 40, 48, 255));
 
@@ -3038,13 +4103,21 @@ mod tests {
     fn recent_colors_keep_raw_hsl_dedupe_and_cap_at_grid_size() {
         let mut state = UiState::new();
         for hue in 0..105 {
-            state.note_used_color(RecentColor { hue, sat: 40, val: 90 });
+            state.note_used_color(RecentColor {
+                hue,
+                sat: 40,
+                val: 90,
+            });
         }
         assert_eq!(state.recent_colors.len(), 99);
         assert_eq!(state.recent_colors.front().unwrap().hue, 104);
         assert_eq!(state.recent_colors.back().unwrap().hue, 6);
 
-        let raw_variant = RecentColor { hue: 104, sat: 55, val: 72 };
+        let raw_variant = RecentColor {
+            hue: 104,
+            sat: 55,
+            val: 72,
+        };
         state.note_used_color(raw_variant);
         assert_eq!(state.recent_colors.len(), 99);
         assert_eq!(state.recent_colors.front(), Some(&raw_variant));

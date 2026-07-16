@@ -1,4 +1,5 @@
 mod module_bindings;
+mod replay;
 mod sfx;
 mod ui;
 mod world;
@@ -6,8 +7,12 @@ use module_bindings::*;
 use world::constants::*;
 
 use raylib::prelude::*;
-use spacetimedb_sdk::{credentials, DbContext, Identity, Table, Timestamp};
+use spacetimedb_sdk::{DbContext, Identity, Table, Timestamp, credentials};
 use std::collections::{HashMap, HashSet};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Local SpacetimeDB instance (`spacetime start`).
@@ -27,7 +32,6 @@ fn creds_store() -> credentials::File {
     credentials::File::new(key)
 }
 
-
 /// The caller's own island, if the subscription has it yet.
 fn my_island(ctx: &DbConnection, me: Identity) -> Option<Island> {
     ctx.db.island().owner().find(&me)
@@ -37,7 +41,11 @@ fn my_island(ctx: &DbConnection, me: Identity) -> Option<Island> {
 /// admin role via `claim_admin` — `Config.admin` is a public field, so every
 /// client already sees it.
 fn is_admin(ctx: &DbConnection, me: Identity) -> bool {
-    ctx.db.config().id().find(&0).is_some_and(|c| c.admin == Some(me))
+    ctx.db
+        .config()
+        .id()
+        .find(&0)
+        .is_some_and(|c| c.admin == Some(me))
 }
 
 fn island_world_center(island: &Island) -> Vector2 {
@@ -53,6 +61,15 @@ fn island_world_center(island: &Island) -> Vector2 {
 /// `my_island` resolves, since that means at least one island — the
 /// caller's own — exists; defensive only).
 fn world_fit(ctx: &DbConnection, fallback: Vector2, fallback_zoom: f32) -> (Vector2, f32) {
+    world_fit_with_min_zoom(ctx, fallback, fallback_zoom, 0.25)
+}
+
+fn world_fit_with_min_zoom(
+    ctx: &DbConnection,
+    fallback: Vector2,
+    fallback_zoom: f32,
+    min_zoom: f32,
+) -> (Vector2, f32) {
     let mut min = Vector2::new(f32::MAX, f32::MAX);
     let mut max = Vector2::new(f32::MIN, f32::MIN);
     let mut any = false;
@@ -71,7 +88,7 @@ fn world_fit(ctx: &DbConnection, fallback: Vector2, fallback_zoom: f32) -> (Vect
     // Padding: an island's own radius (so the outermost islands aren't
     // clipped at their edge) plus a little breathing room.
     let span = (max.x - min.x).max(max.y - min.y) + ISLAND_RADIUS as f32 * 4.0;
-    let zoom = (620.0 / span.max(1.0)).clamp(0.25, ISLAND_FIT_ZOOM);
+    let zoom = (620.0 / span.max(1.0)).clamp(min_zoom, ISLAND_FIT_ZOOM);
     (target, zoom)
 }
 
@@ -218,7 +235,12 @@ fn pick_color_at(
     world_q: i32,
     world_r: i32,
 ) -> bool {
-    let level = ctx.db.user().identity().find(&me).map_or(0, |u| world::level_of(u.xp));
+    let level = ctx
+        .db
+        .user()
+        .identity()
+        .find(&me)
+        .map_or(0, |u| world::level_of(u.xp));
     match world::eyedropper_pick(
         painted_color_at(ctx, world_q, world_r),
         |hue| have_hue(ctx, me, hue),
@@ -246,7 +268,10 @@ fn pick_color_at(
 /// F8: coarse "N {unit} ago" label for the island-info popup — no date/time
 /// crate in this workspace, and a jam popup doesn't need calendar precision.
 fn format_age(now: Timestamp, created_at: Timestamp) -> String {
-    let secs = now.duration_since(created_at).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = now
+        .duration_since(created_at)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     if secs < 60 {
         "just now".to_string()
     } else if secs < 3600 {
@@ -261,7 +286,10 @@ fn format_age(now: Timestamp, created_at: Timestamp) -> String {
 /// Whether `me` has already liked `island_id` — shared by the popup payload
 /// and the double-click-to-like toggle below.
 fn already_liked(ctx: &DbConnection, island_id: u32, me: Identity) -> bool {
-    ctx.db.island_like().iter().any(|l| l.island_id == island_id && l.liker == me)
+    ctx.db
+        .island_like()
+        .iter()
+        .any(|l| l.island_id == island_id && l.liker == me)
 }
 
 /// Author-requested: what an island's border currently resolves to,
@@ -275,15 +303,28 @@ fn resolve_border_color(ctx: &DbConnection, island: &Island) -> Color {
         let (h, s, v) = world::unpack_hsv(packed);
         world::hsv_color(h, s, v)
     } else {
-        let seed_hue = ctx.db.inventory().iter().find(|inv| inv.owner == island.owner && inv.obtained_with.is_none()).map(|inv| inv.hue);
+        let seed_hue = ctx
+            .db
+            .inventory()
+            .iter()
+            .find(|inv| inv.owner == island.owner && inv.obtained_with.is_none())
+            .map(|inv| inv.hue);
         world::hsv_color(seed_hue.unwrap_or(0), 40, 100)
     }
 }
 
 /// F8: builds the popup payload for `island_id` and opens it. A no-op if the
 /// island has since vanished (can't happen for real islands, defensive only).
-fn open_island_info(ctx: &DbConnection, ui_state: &mut ui::UiState, island_id: u32, me: Identity, now: Timestamp) {
-    let Some(island) = ctx.db.island().id().find(&island_id) else { return };
+fn open_island_info(
+    ctx: &DbConnection,
+    ui_state: &mut ui::UiState,
+    island_id: u32,
+    me: Identity,
+    now: Timestamp,
+) {
+    let Some(island) = ctx.db.island().id().find(&island_id) else {
+        return;
+    };
     let already_liked = already_liked(ctx, island_id, me);
     let border_color = resolve_border_color(ctx, &island);
     ui_state.open_island_info(ui::IslandInfo {
@@ -303,10 +344,24 @@ fn open_island_info(ctx: &DbConnection, ui_state: &mut ui::UiState, island_id: u
 /// `island_id` — mirrors `open_island_info`'s "look the row up, hand it to
 /// `ui_state`" shape. A no-op if the island or its owner has since vanished.
 fn open_admin_edit(ctx: &DbConnection, ui_state: &mut ui::UiState, island_id: u32) {
-    let Some(island) = ctx.db.island().id().find(&island_id) else { return };
-    let Some(owner) = ctx.db.user().identity().find(&island.owner) else { return };
+    let Some(island) = ctx.db.island().id().find(&island_id) else {
+        return;
+    };
+    let Some(owner) = ctx.db.user().identity().find(&island.owner) else {
+        return;
+    };
     let name = owner.name.clone().unwrap_or_default();
     ui_state.open_admin_edit(island_id, &name, island.likes, owner.xp);
+}
+
+/// Mirrors the web client's island-targeted export panel. The desktop build
+/// can still export a PNG directly; browser-only timelapse choices explain
+/// their availability when selected.
+fn open_island_export(ctx: &DbConnection, ui_state: &mut ui::UiState, island_id: u32) {
+    let Some(island) = ctx.db.island().id().find(&island_id) else {
+        return;
+    };
+    ui_state.open_island_export(island_id, player_label(ctx, island.owner));
 }
 
 /// In-flight long-press-to-merge gesture: started on LMB press, cancelled by
@@ -323,6 +378,12 @@ struct LongPress {
 }
 
 fn main() {
+    let initial_replay_duration = replay::requested_duration().unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
+    let subscription_ready = Arc::new(AtomicBool::new(false));
+    let subscription_ready_callback = Arc::clone(&subscription_ready);
     let ctx = DbConnection::builder()
         .on_connect(|_ctx, _identity, token| {
             if let Err(e) = creds_store().save(token) {
@@ -343,22 +404,27 @@ fn main() {
         .build()
         .expect("Failed to connect");
 
-    ctx.subscription_builder().on_error(|_ctx, err| {
-        eprintln!("Subscription failed: {err}");
-        std::process::exit(1);
-    }).subscribe([
-        "SELECT * FROM config",
-        "SELECT * FROM user",
-        "SELECT * FROM inventory",
-        "SELECT * FROM island",
-        "SELECT * FROM island_like",
-        "SELECT * FROM island_cell",
-        "SELECT * FROM margin_cell",
-        "SELECT * FROM gift",
-        "SELECT * FROM hexa_event",
-        "SELECT * FROM hexa_cluster",
-        "SELECT * FROM merge_event",
-    ]);
+    ctx.subscription_builder()
+        .on_applied(move |_ctx| {
+            subscription_ready_callback.store(true, Ordering::Release);
+        })
+        .on_error(|_ctx, err| {
+            eprintln!("Subscription failed: {err}");
+            std::process::exit(1);
+        })
+        .subscribe([
+            "SELECT * FROM config",
+            "SELECT * FROM user",
+            "SELECT * FROM inventory",
+            "SELECT * FROM island",
+            "SELECT * FROM island_like",
+            "SELECT * FROM island_cell",
+            "SELECT * FROM margin_cell",
+            "SELECT * FROM gift",
+            "SELECT * FROM hexa_event",
+            "SELECT * FROM hexa_cluster",
+            "SELECT * FROM merge_event",
+        ]);
 
     let (mut rl, thread) = raylib::init()
         .size(720, 720) // jam hard constraint
@@ -369,7 +435,10 @@ fn main() {
 
     // F12: audio device init is an environmental boundary (no sound card,
     // headless/CI) — degrade to silence instead of crashing the game over it.
-    let audio = RaylibAudio::init_audio_device().ok();
+    let audio = initial_replay_duration
+        .is_none()
+        .then(|| RaylibAudio::init_audio_device().ok())
+        .flatten();
     let sfx = audio.as_ref().map(sfx::Sfx::load);
 
     let mut camera = Camera2D {
@@ -392,6 +461,8 @@ fn main() {
     let mut stroke_last: Option<(u8, i32, i32)> = None;
     let mut last_paint_at = Instant::now();
     let mut ui_state = ui::UiState::new();
+    let mut replay_clock: Option<replay::ReplayClock> = None;
+    let mut replay_request = initial_replay_duration;
     let mut long_press: Option<LongPress> = None;
     // Author-requested: a clean single-click on a foreign island, held
     // pending for DOUBLE_CLICK_WINDOW to see whether a second click on the
@@ -477,6 +548,53 @@ fn main() {
 
         let me = ctx.try_identity();
         let now = Timestamp::now();
+        if replay_clock.is_none()
+            && replay_request.is_some()
+            && subscription_ready.load(Ordering::Acquire)
+        {
+            let mut timestamps = Vec::new();
+            timestamps.extend(
+                ctx.db
+                    .island()
+                    .iter()
+                    .map(|row| row.created_at.to_micros_since_unix_epoch()),
+            );
+            timestamps.extend(
+                ctx.db
+                    .island_cell()
+                    .iter()
+                    .map(|row| row.painted_at.to_micros_since_unix_epoch()),
+            );
+            timestamps.extend(
+                ctx.db
+                    .margin_cell()
+                    .iter()
+                    .map(|row| row.painted_at.to_micros_since_unix_epoch()),
+            );
+            replay_clock = Some(replay::ReplayClock::new(
+                timestamps,
+                replay_request.expect("checked above"),
+                now.to_micros_since_unix_epoch(),
+            ));
+            ui_state.title_active = false;
+            centered_on_island = true;
+            let (target, zoom) =
+                world_fit_with_min_zoom(&ctx, camera.target, camera.zoom, replay::MIN_CAMERA_ZOOM);
+            camera.target = target;
+            camera.zoom = zoom;
+            camera.offset = Vector2::new(360.0, 360.0);
+        }
+        let close_replay = replay_clock
+            .as_mut()
+            .is_some_and(|clock| replay::handle_input(&mut rl, clock));
+        if close_replay {
+            replay_clock = None;
+            replay_request = None;
+        } else if let Some(clock) = replay_clock.as_mut() {
+            clock.tick(rl.get_frame_time());
+        }
+        let replay_mode = replay_clock.is_some();
+        let replay_closed_this_frame = close_replay;
         // Theme music: starts once gameplay begins (title dismissed via a
         // real click), never restarted — a suspended browser AudioContext
         // only resumes on a user gesture, so gating on `!title_active`
@@ -490,9 +608,11 @@ fn main() {
                 s.theme.update_stream();
             }
         }
-        let hexa_zoom_locked = me.is_some_and(|id| ctx.db.hexa_cluster().iter().any(|row| row.identity == id));
+        let hexa_zoom_locked = !replay_mode
+            && me.is_some_and(|id| ctx.db.hexa_cluster().iter().any(|row| row.identity == id));
         if hexa_zoom_locked {
-            let rate = (1.0 - (-rl.get_frame_time() / world::constants::HEXA_ZOOM_LERP_SECS).exp()).clamp(0.0, 1.0);
+            let rate = (1.0 - (-rl.get_frame_time() / world::constants::HEXA_ZOOM_LERP_SECS).exp())
+                .clamp(0.0, 1.0);
             camera.zoom += (ISLAND_FIT_ZOOM - camera.zoom) * rate;
             if (camera.zoom - ISLAND_FIT_ZOOM).abs() < 0.001 {
                 camera.zoom = ISLAND_FIT_ZOOM;
@@ -507,11 +627,18 @@ fn main() {
         // convention as `mouse_world` itself: this reads last frame's
         // settled camera/mouse, same as every other click gesture below) so
         // both the claim-on-press block and the render call can reuse it.
-        let active_gift: Option<(u64, Vector2, f32)> = ctx.db.gift().iter().next().map(|g| {
-            let elapsed = now.duration_since(g.spawned_at).map(|d| d.as_secs_f32()).unwrap_or(0.0).max(0.0);
-            let pos = world::gift_drift_pos(Vector2::new(g.x, g.y), elapsed);
-            (g.id, pos, elapsed)
-        });
+        let active_gift: Option<(u64, Vector2, f32)> = (!replay_mode)
+            .then(|| ctx.db.gift().iter().next())
+            .flatten()
+            .map(|g| {
+                let elapsed = now
+                    .duration_since(g.spawned_at)
+                    .map(|d| d.as_secs_f32())
+                    .unwrap_or(0.0)
+                    .max(0.0);
+                let pos = world::gift_drift_pos(Vector2::new(g.x, g.y), elapsed);
+                (g.id, pos, elapsed)
+            });
         let gift_hit = active_gift.is_some_and(|(_, pos, _)| {
             let dx = mouse_world.x - pos.x;
             let dy = mouse_world.y - pos.y;
@@ -529,8 +656,9 @@ fn main() {
         // screen position is "over the map" until Draw dismisses it (and the
         // dismissing click itself still sees the flag set, so it can't
         // paint the tile under the button).
-        let over_map_area =
-            !ui_state.title_active && mouse_screen.y > ui::HEADER_H && mouse_screen.y < (720.0 - ui::FOOTER_H);
+        let over_map_area = !ui_state.title_active
+            && mouse_screen.y > ui::HEADER_H
+            && mouse_screen.y < (720.0 - ui::FOOTER_H);
 
         // F9.6 item 7: launch intro. First frame the player's own island is
         // known, camera starts framing the whole occupied world (`world_fit`)
@@ -549,7 +677,8 @@ fn main() {
         if ui_state.title_active {
             if let Some(me) = me {
                 if let Some(island) = my_island(&ctx, me) {
-                    let (target, zoom) = world_fit(&ctx, island_world_center(&island), ISLAND_FIT_ZOOM);
+                    let (target, zoom) =
+                        world_fit(&ctx, island_world_center(&island), ISLAND_FIT_ZOOM);
                     camera.target = target;
                     camera.zoom = zoom;
                     camera.offset = Vector2::new(360.0, 360.0);
@@ -561,13 +690,15 @@ fn main() {
                     let to_target = island_world_center(&island);
                     let to_zoom = ISLAND_FIT_ZOOM;
                     let start = *intro_started_at.get_or_insert_with(Instant::now);
-                    let (from_target, from_zoom) = *intro_from.get_or_insert_with(|| world_fit(&ctx, to_target, to_zoom));
+                    let (from_target, from_zoom) =
+                        *intro_from.get_or_insert_with(|| world_fit(&ctx, to_target, to_zoom));
                     let any_input = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
                         || rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE)
                         || rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_RIGHT)
                         || rl.get_mouse_wheel_move() != 0.0
                         || rl.get_key_pressed().is_some();
-                    let t = (start.elapsed().as_secs_f32() / INTRO_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+                    let t = (start.elapsed().as_secs_f32() / INTRO_DURATION.as_secs_f32())
+                        .clamp(0.0, 1.0);
                     if any_input || t >= 1.0 {
                         camera.target = to_target;
                         camera.zoom = to_zoom;
@@ -604,7 +735,11 @@ fn main() {
             } else {
                 for event in ctx.db.merge_event().iter() {
                     if known_merge_event_ids.insert(event.id) && (event.a == me || event.b == me) {
-                        ui_state.note_used_color(ui::RecentColor { hue: event.merged_hue, sat: event.merged_sat, val: event.merged_val });
+                        ui_state.note_used_color(ui::RecentColor {
+                            hue: event.merged_hue,
+                            sat: event.merged_sat,
+                            val: event.merged_val,
+                        });
                         if let Some(s) = &sfx {
                             s.merge.play();
                         }
@@ -617,7 +752,12 @@ fn main() {
             } else {
                 for event in ctx.db.hexa_event().iter() {
                     if known_hexa_event_ids.insert(event.id)
-                        && ctx.db.hexa_cluster().identity().find(&me).is_some_and(|row| row.ignited)
+                        && ctx
+                            .db
+                            .hexa_cluster()
+                            .identity()
+                            .find(&me)
+                            .is_some_and(|row| row.ignited)
                     {
                         ui_state.show_hexa_success_popup();
                         if let Some(s) = &sfx {
@@ -646,7 +786,11 @@ fn main() {
                             pending_gift_claim = None;
                             reward_sound_this_frame = true;
                             if let Some(s) = &sfx {
-                                s.play_gift_reward(&s.new_color, rl.get_random_value(0..=2), rl.get_random_value(0..=99));
+                                s.play_gift_reward(
+                                    &s.new_color,
+                                    rl.get_random_value(0..=2),
+                                    rl.get_random_value(0..=99),
+                                );
                             }
                         } else if inv.obtained_with.is_none() {
                             // F13: a Hexa-pooled grant ALSO leaves
@@ -667,7 +811,9 @@ fn main() {
                                 ui_state.note_reset_hue(inv.hue);
                             }
                         } else {
-                            let label = inv.obtained_with.map_or_else(|| "someone".to_string(), |p| player_label(&ctx, p));
+                            let label = inv
+                                .obtained_with
+                                .map_or_else(|| "someone".to_string(), |p| player_label(&ctx, p));
                             // Look up the matching `MergeEvent`
                             // row for the two PRE-merge hues — same
                             // timestamp join as the Hexa event above. A
@@ -680,15 +826,35 @@ fn main() {
                                 .merge_event()
                                 .iter()
                                 .find(|e| e.at == inv.obtained_at && (e.a == me || e.b == me))
-                                .map(|e| if e.a == me { (e.hue_a, e.hue_b) } else { (e.hue_b, e.hue_a) });
+                                .map(|e| {
+                                    if e.a == me {
+                                        (e.hue_a, e.hue_b)
+                                    } else {
+                                        (e.hue_b, e.hue_a)
+                                    }
+                                });
                             let color = ctx
                                 .db
                                 .merge_event()
                                 .iter()
                                 .find(|e| e.at == inv.obtained_at && (e.a == me || e.b == me))
-                                .map(|e| ui::RecentColor { hue: e.merged_hue, sat: e.merged_sat, val: e.merged_val })
-                                .or_else(|| ctx.db.user().identity().find(&me).map(|u| ui::RecentColor { hue: inv.hue, sat: u.sat, val: u.val }))
-                                .unwrap_or(ui::RecentColor { hue: inv.hue, sat: world::sat_cap(0), val: 90 });
+                                .map(|e| ui::RecentColor {
+                                    hue: e.merged_hue,
+                                    sat: e.merged_sat,
+                                    val: e.merged_val,
+                                })
+                                .or_else(|| {
+                                    ctx.db.user().identity().find(&me).map(|u| ui::RecentColor {
+                                        hue: inv.hue,
+                                        sat: u.sat,
+                                        val: u.val,
+                                    })
+                                })
+                                .unwrap_or(ui::RecentColor {
+                                    hue: inv.hue,
+                                    sat: world::sat_cap(0),
+                                    val: 90,
+                                });
                             ui_state.show_merge_toast(color, &label, merge_from);
                             if merge_from.is_none() {
                                 if let Some(s) = &sfx {
@@ -704,7 +870,11 @@ fn main() {
             // the first frame it's known — a no-op once it has anything, so a
             // connection with no merge yet doesn't leave the footer empty.
             if let Some(user) = ctx.db.user().identity().find(&me) {
-                ui_state.seed_recent_once(ui::RecentColor { hue: user.hue, sat: user.sat, val: user.val });
+                ui_state.seed_recent_once(ui::RecentColor {
+                    hue: user.hue,
+                    sat: user.sat,
+                    val: user.val,
+                });
             }
         }
 
@@ -749,8 +919,16 @@ fn main() {
         let mut export_name: Option<String> = None;
         if let Some(me) = me {
             let user = ctx.db.user().identity().find(&me);
-            let hues: Vec<u16> = ctx.db.inventory().iter().filter(|i| i.owner == me).map(|i| i.hue).collect();
-            let (hue, sat, val) = user.as_ref().map_or((0, 40, 100), |u| (u.hue, u.sat, u.val));
+            let hues: Vec<u16> = ctx
+                .db
+                .inventory()
+                .iter()
+                .filter(|i| i.owner == me)
+                .map(|i| i.hue)
+                .collect();
+            let (hue, sat, val) = user
+                .as_ref()
+                .map_or((0, 40, 100), |u| (u.hue, u.sat, u.val));
             let xp = user.as_ref().map_or(0, |u| u.xp);
             let locked = user.as_ref().is_some_and(|u| u.locked);
             let level = world::level_of(xp);
@@ -758,7 +936,10 @@ fn main() {
             // the first frame `me` becomes known (that would just be
             // reporting whatever level the player already was).
             let leveled = last_level.is_some_and(|prev| level > prev);
-            if last_level.is_some_and(|prev| prev < shared::constants::HEXA_UNLOCK_LEVEL && level >= shared::constants::HEXA_UNLOCK_LEVEL) {
+            if last_level.is_some_and(|prev| {
+                prev < shared::constants::HEXA_UNLOCK_LEVEL
+                    && level >= shared::constants::HEXA_UNLOCK_LEVEL
+            }) {
                 ui_state.show_hexa_unlocked_toast();
                 if let Some(s) = &sfx {
                     s.levelup.play();
@@ -784,7 +965,11 @@ fn main() {
                 if !leveled && !reward_sound_this_frame {
                     if let Some(s) = &sfx {
                         if pending_gift_claim.is_some_and(|t| t.elapsed() <= GIFT_CLAIM_WINDOW) {
-                            s.play_gift_reward(&s.xp, rl.get_random_value(0..=2), rl.get_random_value(0..=99));
+                            s.play_gift_reward(
+                                &s.xp,
+                                rl.get_random_value(0..=2),
+                                rl.get_random_value(0..=99),
+                            );
                         } else {
                             s.xp.play();
                         }
@@ -800,9 +985,18 @@ fn main() {
             // open, same as everything else in `HudInfo`.
             if let Some(island_id) = ui_state.island_popup.as_ref().map(|p| p.island_id) {
                 if let Some(island) = ctx.db.island().id().find(&island_id) {
-                    let already_liked = ctx.db.island_like().iter().any(|l| l.island_id == island_id && l.liker == me);
+                    let already_liked = ctx
+                        .db
+                        .island_like()
+                        .iter()
+                        .any(|l| l.island_id == island_id && l.liker == me);
                     let border_color = resolve_border_color(&ctx, &island);
-                    ui_state.refresh_island_popup(island.likes, already_liked, island.border_hidden, border_color);
+                    ui_state.refresh_island_popup(
+                        island.likes,
+                        already_liked,
+                        island.border_hidden,
+                        border_color,
+                    );
                 }
             }
             // F8 re-rank countdown: `next_rerank_at.duration_since(now)` is
@@ -833,7 +1027,14 @@ fn main() {
                 link_id: my_island(&ctx, me).and_then(|isl| isl.itch_rate_id),
                 is_admin: is_admin(&ctx, me),
             };
-            let actions = ui::handle_input(&mut rl, &mut ui_state, &info);
+            let actions = if replay_mode || replay_closed_this_frame {
+                ui::Actions::default()
+            } else {
+                ui::handle_input(&mut rl, &mut ui_state, &info)
+            };
+            if actions.start_replay {
+                replay_request = Some(replay::DEFAULT_DURATION_SECS);
+            }
             // Header sound toggle: master volume covers sfx and the theme
             // music in one call, so no per-call-site gating is needed.
             if let Some(audio) = &audio {
@@ -903,11 +1104,15 @@ fn main() {
                 let _ = ctx.reducers.admin_force_rerank();
             }
             if let Some((island_id, rate_id)) = actions.click_link {
-                open_url(&format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"));
+                open_url(&format!(
+                    "https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"
+                ));
                 let _ = ctx.reducers.click_link(island_id);
             }
             if let Some(rate_id) = actions.open_own_link {
-                open_url(&format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"));
+                open_url(&format!(
+                    "https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"
+                ));
             }
             if actions.open_project_page {
                 open_url("https://itch.io/jam/raylib-6x-gamejam/rate/4767021");
@@ -936,28 +1141,41 @@ fn main() {
                 camera.zoom = zoom;
                 camera.offset = Vector2::new(360.0, 360.0);
             }
-            if actions.export_screenshot {
-                if let Some(island) = my_island(&ctx, me) {
-                    // Exports are always a recognisable portrait of the
-                    // player's own island, independent of their current pan
-                    // or zoom. The share card is drawn after the world.
+            if actions.arm_island_export {
+                ui_state.tool = ui::Tool::IslandExport;
+                ui_state.show_info_toast("Export: click an island".to_string());
+            }
+            if let Some(island_id) = actions.export_island_image {
+                if let Some(island) = ctx.db.island().id().find(&island_id) {
                     camera.target = island_world_center(&island);
                     camera.zoom = ISLAND_FIT_ZOOM;
                     camera.offset = Vector2::new(360.0, 360.0);
-                    export_name = Some(ui_state.name_input.clone());
+                    export_name = Some(player_label(&ctx, island.owner));
                 }
+            }
+            if actions.export_island_gif.is_some() || actions.export_island_video.is_some() {
+                ui_state.show_info_toast(
+                    "Timelapse export is available in the web version".to_string(),
+                );
             }
         }
         // F9.5 item 7 follow-up: mirrors the latch above — only an OWN-
         // island popup blocks map input; a foreign tooltip must not, or
         // hovering it would disable the very double-click/long-press
         // gestures it's showing info for.
-        let map_input_allowed = !suppress_map_until_release && !ui_state.any_modal_open();
+        let map_input_allowed = !replay_mode
+            && !replay_closed_this_frame
+            && !suppress_map_until_release
+            && !ui_state.any_modal_open();
 
         // Zoom toward the cursor (official raylib recipe): re-anchor
         // offset/target at the mouse before changing zoom so the world
         // point under the cursor doesn't jump.
-        let wheel = if map_input_allowed && !hexa_zoom_locked { rl.get_mouse_wheel_move() } else { 0.0 };
+        let wheel = if map_input_allowed && !hexa_zoom_locked {
+            rl.get_mouse_wheel_move()
+        } else {
+            0.0
+        };
         if wheel != 0.0 {
             camera.offset = mouse_screen;
             camera.target = mouse_world;
@@ -1005,8 +1223,10 @@ fn main() {
             && !mouse_state_stale
             && (rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_MIDDLE)
                 || rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_RIGHT)
-                || (rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT) && rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT))
-                || (ui_state.tool == ui::Tool::Move && rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)));
+                || (rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
+                    && rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT))
+                || (ui_state.tool == ui::Tool::Move
+                    && rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)));
         if panning {
             let delta = rl.get_mouse_delta();
             camera.target.x -= delta.x / camera.zoom;
@@ -1025,7 +1245,9 @@ fn main() {
 
         // Cursor heartbeat: throttled to CURSOR_SEND_HZ and only when moved.
         if map_input_allowed && me.is_some() {
-            let moved = last_sent_pos.is_none_or(|p| (p.x - mouse_world.x).abs() > 1e-4 || (p.y - mouse_world.y).abs() > 1e-4);
+            let moved = last_sent_pos.is_none_or(|p| {
+                (p.x - mouse_world.x).abs() > 1e-4 || (p.y - mouse_world.y).abs() > 1e-4
+            });
             if moved && last_sent_at.elapsed() >= Duration::from_secs_f32(1.0 / CURSOR_SEND_HZ) {
                 let _ = ctx.reducers.set_pos(mouse_world.x, mouse_world.y);
                 last_sent_pos = Some(mouse_world);
@@ -1038,9 +1260,15 @@ fn main() {
         // which reducer fires depends on `ui_state.tool` — same target-cell
         // classification either way. `over_map_area`: not while the cursor
         // is over the header/footer HUD.
-        if map_input_allowed && over_map_area && matches!(ui_state.tool, ui::Tool::Paint | ui::Tool::Erase) {
+        if map_input_allowed
+            && over_map_area
+            && matches!(ui_state.tool, ui::Tool::Paint | ui::Tool::Erase)
+        {
             if let Some(me) = me {
-                if rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) && !panning && !mouse_state_stale {
+                if rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
+                    && !panning
+                    && !mouse_state_stale
+                {
                     let (wq, wr) = world::world_to_axial(mouse_world);
                     let target = match classify(&ctx, me, wq, wr) {
                         Paintable::OwnIsland(lq, lr) => Some((0u8, lq, lr)),
@@ -1051,7 +1279,8 @@ fn main() {
                     };
                     if let Some(key) = target {
                         let fresh_cell = stroke_last != Some(key);
-                        let rate_ok = last_paint_at.elapsed() >= Duration::from_secs_f32(1.0 / CLIENT_PAINT_HZ);
+                        let rate_ok = last_paint_at.elapsed()
+                            >= Duration::from_secs_f32(1.0 / CLIENT_PAINT_HZ);
                         if fresh_cell && rate_ok {
                             match (key, ui_state.tool == ui::Tool::Erase) {
                                 ((0, lq, lr), false) => {
@@ -1130,6 +1359,17 @@ fn main() {
             }
         }
 
+        if map_input_allowed
+            && over_map_area
+            && ui_state.tool == ui::Tool::IslandExport
+            && rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+        {
+            let (wq, wr) = world::world_to_axial(mouse_world);
+            if let Some((island, _, _)) = island_at(&ctx, wq, wr) {
+                open_island_export(&ctx, &mut ui_state, island.id);
+            }
+        }
+
         // F9.6 item 2: middle-click eyedropper. A clean press+release within
         // `MIDDLE_CLICK_TOL_PX` picks the hovered tile's color; if the caller
         // already owns that hue (within `HUE_TOLERANCE`, same window
@@ -1177,6 +1417,7 @@ fn main() {
             // resolving into the old open-the-link behavior on release.
             if ui_state.tool != ui::Tool::Eyedropper
                 && ui_state.tool != ui::Tool::AdminEdit
+                && ui_state.tool != ui::Tool::IslandExport
                 && !panning
                 && over_map_area
                 && rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
@@ -1185,7 +1426,8 @@ fn main() {
                 long_press = Some(LongPress {
                     press_screen: mouse_screen,
                     press_at: Instant::now(),
-                    target: merge_target_at(&ctx, wq, wr).filter(|&(_, _, hue)| !have_hue(&ctx, me, hue)),
+                    target: merge_target_at(&ctx, wq, wr)
+                        .filter(|&(_, _, hue)| !have_hue(&ctx, me, hue)),
                     // F8 (author follow-up): any point on a FOREIGN island's
                     // territory, not just its center — released here opens
                     // its info popup instead of painting. Your own island
@@ -1197,7 +1439,9 @@ fn main() {
                     // owner would otherwise pass every `owner != me` check
                     // like any other foreign island.
                     info_target: island_at(&ctx, wq, wr)
-                        .filter(|(island, _, _)| island.owner != me && island.owner != Identity::ZERO)
+                        .filter(|(island, _, _)| {
+                            island.owner != me && island.owner != Identity::ZERO
+                        })
                         .map(|(island, _, _)| island.id),
                     fired: false,
                 });
@@ -1240,7 +1484,8 @@ fn main() {
                                 ui_state.spawn_like_anim(mouse_screen, !liked);
                                 pending_info_click = None;
                             } else {
-                                pending_info_click = Some((Instant::now(), mouse_screen, island_id));
+                                pending_info_click =
+                                    Some((Instant::now(), mouse_screen, island_id));
                             }
                         }
                     }
@@ -1275,7 +1520,9 @@ fn main() {
                 // decision 17's "tap opens" path for it).
                 if let Some(island) = ctx.db.island().id().find(&island_id) {
                     if let Some(rate_id) = island.itch_rate_id {
-                        open_url(&format!("https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"));
+                        open_url(&format!(
+                            "https://itch.io/jam/raylib-6x-gamejam/rate/{rate_id}"
+                        ));
                         let _ = ctx.reducers.click_link(island_id);
                     }
                 }
@@ -1299,7 +1546,9 @@ fn main() {
                 me.and_then(|me| {
                     let (hq, hr) = world::world_to_axial(mouse_world);
                     island_at(&ctx, hq, hr)
-                        .filter(|(island, _, _)| island.owner != me && island.owner != Identity::ZERO)
+                        .filter(|(island, _, _)| {
+                            island.owner != me && island.owner != Identity::ZERO
+                        })
                         .map(|(island, _, _)| island.id)
                 })
             })
@@ -1320,7 +1569,10 @@ fn main() {
                 // exemption in the hover-out close check below).
                 if !ui_state.any_modal_open() && !gesturing {
                     if let Some((hid, since)) = hover_target {
-                        let already_open = ui_state.island_popup.as_ref().is_some_and(|p| p.island_id == id);
+                        let already_open = ui_state
+                            .island_popup
+                            .as_ref()
+                            .is_some_and(|p| p.island_id == id);
                         if hid == id && !already_open && since.elapsed() >= HOVER_OPEN_DELAY {
                             if let Some(me) = me {
                                 open_island_info(&ctx, &mut ui_state, id, me, now);
@@ -1351,7 +1603,9 @@ fn main() {
         let bottom_right = rl.get_screen_to_world2D(Vector2::new(720.0, 720.0), camera);
         let (view_min_x, view_max_x) = (top_left.x - pad, bottom_right.x + pad);
         let (view_min_y, view_max_y) = (top_left.y - pad, bottom_right.y + pad);
-        let in_view = |p: Vector2| p.x >= view_min_x && p.x <= view_max_x && p.y >= view_min_y && p.y <= view_max_y;
+        let in_view = |p: Vector2| {
+            p.x >= view_min_x && p.x <= view_max_x && p.y >= view_min_y && p.y <= view_max_y
+        };
 
         // Author-requested (F8 follow-up): each island's border is drawn in
         // its owner's SEED hue — the color they started with (or re-rolled
@@ -1373,7 +1627,8 @@ fn main() {
         // shrinks with the camera like a world-space object would (instead
         // of towering over the tiles when zoomed out), floored so it stays
         // findable even zoomed far out.
-        let other_cursor_scale = (camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
+        let other_cursor_scale =
+            (camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
 
         // F13 (Hexa event): the server-authoritative central formation.
         // Place each member on `hexagon_vertex_positions` at ITS OWN
@@ -1399,7 +1654,10 @@ fn main() {
         // `member_count >= HEXA_SIZE` check.
         let mut hexa_polygons: Vec<(Vec<Vector2>, bool)> = Vec::new();
         if let Some(first) = hexa_rows.first() {
-            let members: Vec<(Identity, u32)> = hexa_rows.iter().map(|r| (r.identity, r.vertex_index)).collect();
+            let members: Vec<(Identity, u32)> = hexa_rows
+                .iter()
+                .map(|r| (r.identity, r.vertex_index))
+                .collect();
             let centre = Vector2::zero();
             let (frame, vertices) = world::hexa_cluster_frame(
                 centre,
@@ -1409,7 +1667,12 @@ fn main() {
                     if Some(key) == me {
                         mouse_world
                     } else {
-                        ctx.db.user().identity().find(&key).map(|u| Vector2::new(u.cx, u.cy)).unwrap_or(target)
+                        ctx.db
+                            .user()
+                            .identity()
+                            .find(&key)
+                            .map(|u| Vector2::new(u.cx, u.cy))
+                            .unwrap_or(target)
                     }
                 },
             );
@@ -1422,7 +1685,8 @@ fn main() {
             cluster_members.extend(frame);
             hexa_polygons.push((vertices, first.ignited));
         }
-        hexa_display = world::hexa_advance_display(&hexa_display, &cluster_members, rl.get_frame_time());
+        hexa_display =
+            world::hexa_advance_display(&hexa_display, &cluster_members, rl.get_frame_time());
 
         // Screen-space projection for other players' cursors, computed here
         // (not inside the draw call) because `rl` can't be borrowed again
@@ -1431,6 +1695,7 @@ fn main() {
             .db
             .user()
             .iter()
+            .filter(|_| !replay_mode)
             // Author-reported: cursors used to vanish ~3s after a player
             // stopped moving their mouse (`is_present`'s freshness window,
             // meant for merge-eligibility, was also gating cursor
@@ -1446,13 +1711,18 @@ fn main() {
                 // override. A snapped member also carries its cluster's
                 // centre (screen-projected) so the draw call can aim the
                 // rotated arrow at it.
-                let world_pos = hexa_display.get(&u.identity).copied().unwrap_or(Vector2::new(u.cx, u.cy));
+                let world_pos = hexa_display
+                    .get(&u.identity)
+                    .copied()
+                    .unwrap_or(Vector2::new(u.cx, u.cy));
                 (
                     rl.get_world_to_screen2D(world_pos, camera),
                     world::hsv_color(u.hue, u.sat, u.val),
                     u.locked,
                     u.name.clone().unwrap_or_default(),
-                    hexa_centres.get(&u.identity).map(|&c| rl.get_world_to_screen2D(c, camera)),
+                    hexa_centres
+                        .get(&u.identity)
+                        .map(|&c| rl.get_world_to_screen2D(c, camera)),
                 )
             })
             .collect();
@@ -1465,11 +1735,17 @@ fn main() {
         // yet) falls back to the literal mouse position at the draw call.
         // Carries (tip, cluster centre), both screen-space, for the rotated
         // snapped-arrow draw.
-        let my_hexa_screen: Option<(Vector2, Vector2)> = me.and_then(|me| {
-            let pos = hexa_display.get(&me)?;
-            let centre = hexa_centres.get(&me)?;
-            Some((rl.get_world_to_screen2D(*pos, camera), rl.get_world_to_screen2D(*centre, camera)))
-        });
+        let my_hexa_screen: Option<(Vector2, Vector2)> = (!replay_mode)
+            .then_some(())
+            .and_then(|_| me)
+            .and_then(|me| {
+                let pos = hexa_display.get(&me)?;
+                let centre = hexa_centres.get(&me)?;
+                Some((
+                    rl.get_world_to_screen2D(*pos, camera),
+                    rl.get_world_to_screen2D(*centre, camera),
+                ))
+            });
         let eyedropper_preview = (ui_state.tool == ui::Tool::Eyedropper)
             .then(|| {
                 let (q, r) = world::world_to_axial(mouse_world);
@@ -1494,10 +1770,15 @@ fn main() {
             let mut d2 = d.begin_mode2D(camera);
 
             for island in ctx.db.island().iter() {
+                if replay_clock.as_ref().is_some_and(|clock| {
+                    !clock.is_visible(island.created_at.to_micros_since_unix_epoch())
+                }) {
+                    continue;
+                }
                 let (q, r) = world::slot_coords(island.slot);
                 let (fcx, fcy) = world::slot_center(q, r);
                 let center = world::axial_to_world(fcx, fcy);
-                if !in_view(center) {
+                if !replay_mode && !in_view(center) {
                     continue;
                 }
                 let mine = me == Some(island.owner);
@@ -1505,24 +1786,40 @@ fn main() {
                 // Below `OVERVIEW_ZOOM_THRESHOLD` the island's cells are
                 // sub-pixel anyway — draw one flat hex for the whole island
                 // instead of 721 individual (and invisible) ones.
-                if camera.zoom < world::constants::OVERVIEW_ZOOM_THRESHOLD {
+                if !replay_mode && camera.zoom < world::constants::OVERVIEW_ZOOM_THRESHOLD {
                     world::draw_hex(&mut d2, center, ISLAND_RADIUS as f32, unpainted_fill, None);
                 } else {
-                // F9.5 (FPS at scale): point-lookup each rendered cell by its
-                // packed id via the SDK's own unique-index cache instead of
-                // collecting a HashMap from EVERY island_cell row in the
-                // world every frame — cost is now proportional to in-view
-                // cells (this loop already skipped non-in-view islands
-                // above), not total painted cells across the whole world.
-                for &(dq, dr) in world::island_offsets() {
-                    let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
-                    let id = world::island_cell_id(island.id, dq, dr);
-                    let fill = ctx.db.island_cell().id().find(&id).map_or(unpainted_fill, |c| {
-                        let (h, s, v) = world::unpack_hsv(c.color);
-                        world::hsv_color(h, s, v)
-                    });
-                    world::draw_hex(&mut d2, cell_world, 1.0, fill, show_tile_outline.then_some(Color::new(40, 40, 46, 255)));
-                }
+                    // F9.5 (FPS at scale): point-lookup each rendered cell by its
+                    // packed id via the SDK's own unique-index cache instead of
+                    // collecting a HashMap from EVERY island_cell row in the
+                    // world every frame — cost is now proportional to in-view
+                    // cells (this loop already skipped non-in-view islands
+                    // above), not total painted cells across the whole world.
+                    for &(dq, dr) in world::island_offsets() {
+                        let cell_world = world::axial_to_world(fcx + dq, fcy + dr);
+                        let id = world::island_cell_id(island.id, dq, dr);
+                        let fill = ctx
+                            .db
+                            .island_cell()
+                            .id()
+                            .find(&id)
+                            .filter(|c| {
+                                replay_clock.as_ref().is_none_or(|clock| {
+                                    clock.is_visible(c.painted_at.to_micros_since_unix_epoch())
+                                })
+                            })
+                            .map_or(unpainted_fill, |c| {
+                                let (h, s, v) = world::unpack_hsv(c.color);
+                                world::hsv_color(h, s, v)
+                            });
+                        world::draw_hex(
+                            &mut d2,
+                            cell_world,
+                            1.0,
+                            fill,
+                            show_tile_outline.then_some(Color::new(40, 40, 46, 255)),
+                        );
+                    }
                 }
                 // Author-caught: sat/val used to be a fixed (85, 95),
                 // making the border a different shade than the owner's
@@ -1535,19 +1832,27 @@ fn main() {
                 // hide it entirely via `disable_island_border` — checked
                 // first since a hidden border skips the seed-hue fallback
                 // too.
-                let border_color = if island.border_hidden {
+                let border_color = if island.border_hidden && !replay_mode {
                     None
                 } else if let Some(packed) = island.border_color {
                     let (h, s, v) = world::unpack_hsv(packed);
                     Some(world::hsv_color(h, s, v))
                 } else {
-                    seed_hues.get(&island.owner).map(|&hue| world::hsv_color(hue, START_SAT, START_VAL))
+                    seed_hues
+                        .get(&island.owner)
+                        .map(|&hue| world::hsv_color(hue, START_SAT, START_VAL))
+                        .or_else(|| replay_mode.then_some(Color::new(225, 225, 232, 255)))
                 };
                 if let Some(border_color) = border_color {
                     let r_f = ISLAND_RADIUS as f32;
                     let corners: Vec<Vector2> = world::DIRECTIONS
                         .iter()
-                        .map(|&(dq, dr)| world::axial_to_world(fcx + (dq as f32 * r_f) as i32, fcy + (dr as f32 * r_f) as i32))
+                        .map(|&(dq, dr)| {
+                            world::axial_to_world(
+                                fcx + (dq as f32 * r_f) as i32,
+                                fcy + (dr as f32 * r_f) as i32,
+                            )
+                        })
                         .collect();
                     // Own island's border is drawn thicker — still colored
                     // by identity like every other island, just easier to
@@ -1572,12 +1877,23 @@ fn main() {
             }
 
             for cell in ctx.db.margin_cell().iter() {
+                if replay_clock.as_ref().is_some_and(|clock| {
+                    !clock.is_visible(cell.painted_at.to_micros_since_unix_epoch())
+                }) {
+                    continue;
+                }
                 let p = world::axial_to_world(cell.q, cell.r);
-                if !in_view(p) {
+                if !replay_mode && !in_view(p) {
                     continue;
                 }
                 let (h, s, v) = world::unpack_hsv(cell.color);
-                world::draw_hex(&mut d2, p, 1.0, world::hsv_color(h, s, v), show_tile_outline.then_some(Color::new(30, 30, 34, 255)));
+                world::draw_hex(
+                    &mut d2,
+                    p,
+                    1.0,
+                    world::hsv_color(h, s, v),
+                    show_tile_outline.then_some(Color::new(30, 30, 34, 255)),
+                );
             }
 
             // F11 (flying gift): world-space, so it naturally pans/zooms
@@ -1613,7 +1929,14 @@ fn main() {
                 // back to world units), not a fixed world-unit thickness, so
                 // it stays visible zoomed all the way out instead of
                 // shrinking under a pixel.
-                d2.draw_poly_lines_ex(hover_center, 6, 1.0, 0.0, HOVER_BORDER_PX / camera.zoom, Color::new(255, 255, 255, 210));
+                d2.draw_poly_lines_ex(
+                    hover_center,
+                    6,
+                    1.0,
+                    0.0,
+                    HOVER_BORDER_PX / camera.zoom,
+                    Color::new(255, 255, 255, 210),
+                );
             }
 
             // Eyedropper hint: a cell not paintable by the caller (someone
@@ -1623,7 +1946,8 @@ fn main() {
                 && over_map_area
                 && me.is_some_and(|me| {
                     matches!(classify(&ctx, me, hq, hr), Paintable::None)
-                        && merge_target_at(&ctx, hq, hr).is_some_and(|(_, _, hue)| !have_hue(&ctx, me, hue))
+                        && merge_target_at(&ctx, hq, hr)
+                            .is_some_and(|(_, _, hue)| !have_hue(&ctx, me, hue))
                 });
         }
 
@@ -1636,8 +1960,21 @@ fn main() {
                 match snap_centre {
                     // F13 follow-up #2: a hexagon-snapped cursor aims its tip
                     // at the cluster centre instead of the fixed up-left arrow.
-                    Some(centre) => world::draw_cursor_snapped(&mut d, *screen, *centre, *color, hexa_cursor_scale, *locked),
-                    None => world::draw_cursor_scaled(&mut d, *screen, *color, other_cursor_scale, *locked),
+                    Some(centre) => world::draw_cursor_snapped(
+                        &mut d,
+                        *screen,
+                        *centre,
+                        *color,
+                        hexa_cursor_scale,
+                        *locked,
+                    ),
+                    None => world::draw_cursor_scaled(
+                        &mut d,
+                        *screen,
+                        *color,
+                        other_cursor_scale,
+                        *locked,
+                    ),
                 }
                 if snap_centre.is_none() && other_cursor_scale >= 0.5 {
                     world::draw_cursor_label(&mut d, *screen, name, other_cursor_scale);
@@ -1648,13 +1985,49 @@ fn main() {
         let own_brush = me.map(|me| {
             let user = ctx.db.user().identity().find(&me);
             (
-                user.as_ref().map_or((0, 40, 100), |u| (u.hue, u.sat, u.val)),
+                user.as_ref()
+                    .map_or((0, 40, 100), |u| (u.hue, u.sat, u.val)),
                 user.as_ref().map_or(0, |u| u.xp),
                 user.as_ref().is_some_and(|u| u.locked),
             )
         });
+        if replay_mode {
+            if let Some(clock) = replay_clock.as_ref() {
+                let total =
+                    ctx.db.island_cell().count() as usize + ctx.db.margin_cell().count() as usize;
+                let visible = ctx
+                    .db
+                    .island_cell()
+                    .iter()
+                    .filter(|cell| clock.is_visible(cell.painted_at.to_micros_since_unix_epoch()))
+                    .count()
+                    + ctx
+                        .db
+                        .margin_cell()
+                        .iter()
+                        .filter(|cell| {
+                            clock.is_visible(cell.painted_at.to_micros_since_unix_epoch())
+                        })
+                        .count();
+                replay::draw_overlay(&mut d, clock, visible, total);
+            } else {
+                d.draw_text(
+                    "Loading replay...",
+                    286,
+                    350,
+                    20,
+                    Color::new(235, 235, 240, 255),
+                );
+            }
+        }
         if let (Some(me), Some((brush, xp, locked))) = (me, own_brush) {
-            let hues: Vec<u16> = ctx.db.inventory().iter().filter(|i| i.owner == me).map(|i| i.hue).collect();
+            let hues: Vec<u16> = ctx
+                .db
+                .inventory()
+                .iter()
+                .filter(|i| i.owner == me)
+                .map(|i| i.hue)
+                .collect();
             let level = world::level_of(xp);
             let short_id = short_hex(me);
             let rerank_secs = ctx
@@ -1681,32 +2054,44 @@ fn main() {
                 link_id: my_island(&ctx, me).and_then(|isl| isl.itch_rate_id),
                 is_admin: is_admin(&ctx, me),
             };
-            if let Some(name) = export_name.as_deref() {
-                ui::draw_export_frame(&mut d, name, info.link_id);
-            } else {
-                ui::draw(&mut d, &ui_state, &info, mouse_screen);
-
-                // F9.6 item 1: eraser mode draws the cursor in a neutral gray
-                // instead of the brush hue, plus a small eraser badge — visibly
-                // distinct from paint mode at a glance.
-                let (hue, sat, val) = brush;
-                let cursor_color =
-                    if ui_state.tool == ui::Tool::Erase { Color::new(210, 210, 216, 255) } else { world::hsv_color(hue, sat, val) };
-                // F13 (author follow-up): visually snaps to the hexagon slot
-                // while merging — painting/hover logic above still uses the
-                // real `mouse_world`/`mouse_screen`, only this draw call moves
-                // (and, follow-up #2, rotates to aim at the cluster centre).
-                if ui_state.tool == ui::Tool::Eyedropper {
-                    ui::draw_eyedropper_cursor(&mut d, mouse_screen, eyedropper_preview);
+            if !replay_mode {
+                if let Some(name) = export_name.as_deref() {
+                    ui::draw_export_frame(&mut d, name, info.link_id);
                 } else {
-                    match my_hexa_screen {
-                        Some((tip, centre)) => world::draw_cursor_snapped(&mut d, tip, centre, cursor_color, hexa_cursor_scale, locked),
-                        None => world::draw_cursor(&mut d, mouse_screen, cursor_color, locked),
+                    ui::draw(&mut d, &ui_state, &info, mouse_screen);
+
+                    // F9.6 item 1: eraser mode draws the cursor in a neutral gray
+                    // instead of the brush hue, plus a small eraser badge — visibly
+                    // distinct from paint mode at a glance.
+                    let (hue, sat, val) = brush;
+                    let cursor_color = if ui_state.tool == ui::Tool::Erase {
+                        Color::new(210, 210, 216, 255)
+                    } else {
+                        world::hsv_color(hue, sat, val)
+                    };
+                    // F13 (author follow-up): visually snaps to the hexagon slot
+                    // while merging — painting/hover logic above still uses the
+                    // real `mouse_world`/`mouse_screen`, only this draw call moves
+                    // (and, follow-up #2, rotates to aim at the cluster centre).
+                    if ui_state.tool == ui::Tool::Eyedropper {
+                        ui::draw_eyedropper_cursor(&mut d, mouse_screen, eyedropper_preview);
+                    } else {
+                        match my_hexa_screen {
+                            Some((tip, centre)) => world::draw_cursor_snapped(
+                                &mut d,
+                                tip,
+                                centre,
+                                cursor_color,
+                                hexa_cursor_scale,
+                                locked,
+                            ),
+                            None => world::draw_cursor(&mut d, mouse_screen, cursor_color, locked),
+                        }
                     }
                 }
             }
         }
-        if export_name.is_none() {
+        if export_name.is_none() && !replay_mode {
             if ui_state.tool == ui::Tool::Erase {
                 world::draw_eraser_badge(&mut d, mouse_screen);
             } else if hover_takeable && matches!(ui_state.tool, ui::Tool::Paint | ui::Tool::Erase) {
@@ -1714,9 +2099,14 @@ fn main() {
                 // take-hint (which promises a long-press merge) would mislead.
                 world::draw_plus_hint(&mut d, mouse_screen);
             }
-            if let Some(frac) = long_press.as_ref().filter(|lp| !lp.fired && lp.target.is_some()).map(|lp| {
-                (lp.press_at.elapsed().as_secs_f32() / LONG_PRESS_HOLD.as_secs_f32()).clamp(0.0, 1.0)
-            }) {
+            if let Some(frac) = long_press
+                .as_ref()
+                .filter(|lp| !lp.fired && lp.target.is_some())
+                .map(|lp| {
+                    (lp.press_at.elapsed().as_secs_f32() / LONG_PRESS_HOLD.as_secs_f32())
+                        .clamp(0.0, 1.0)
+                })
+            {
                 world::draw_hold_ring(&mut d, mouse_screen, frac);
             }
             // Author-requested: sits in the header band (drawn here, not inside
@@ -1726,13 +2116,15 @@ fn main() {
             // should show there) and colored to match the header's grey
             // rather than raylib's own green/yellow/red `draw_fps`.
             if !ui_state.title_active {
-                world::draw_fps_grey(&mut d, 440, 4, fps);
+                world::draw_fps_grey(&mut d, 8, 32, fps);
             }
         }
         // EndDrawing must happen before raylib can read the completed frame.
         drop(d);
         if export_name.is_some() {
-            let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
             let filename = format!("hexel-island-{stamp}.png");
             rl.take_screenshot(&thread, &filename);
             ui_state.show_info_toast(format!("island image saved as {filename}"));

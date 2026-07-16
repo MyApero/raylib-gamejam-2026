@@ -30,7 +30,7 @@
 //! shape often (add/remove/rename a meme clip), and a fixed list here would
 //! need editing — and silently drift out of sync — every time it does.
 
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use raylib::prelude::*;
 
 static GIFT_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/assets/gift");
@@ -55,12 +55,19 @@ impl<'aud> Sfx<'aud> {
     /// itself as fallible, before this ever runs.
     pub fn load(audio: &'aud RaylibAudio) -> Self {
         let load_one = |ext: &str, bytes: &'static [u8]| -> Sound<'aud> {
-            let wave = audio.new_wave_from_memory(ext, bytes).expect("embedded sfx is a valid audio file");
-            audio.new_sound_from_wave(&wave).expect("sound from embedded wave")
+            let wave = audio
+                .new_wave_from_memory(ext, bytes)
+                .expect("embedded sfx is a valid audio file");
+            audio
+                .new_sound_from_wave(&wave)
+                .expect("sound from embedded wave")
         };
 
         let mut theme = audio
-            .new_music_from_memory(".ogg", include_bytes!("../assets/free_rights_sfx/theme.ogg"))
+            .new_music_from_memory(
+                ".ogg",
+                include_bytes!("../assets/free_rights_sfx/theme.ogg"),
+            )
             .expect("embedded theme is a valid ogg");
         theme.set_looping(true);
         theme.set_volume(0.35);
@@ -74,11 +81,20 @@ impl<'aud> Sfx<'aud> {
             .collect();
 
         Sfx {
-            merge: load_one(".wav", include_bytes!("../assets/free_rights_sfx/merge.wav")),
+            merge: load_one(
+                ".wav",
+                include_bytes!("../assets/free_rights_sfx/merge.wav"),
+            ),
             error: load_one(".wav", include_bytes!("../assets/sfx/error.wav")),
             xp: load_one(".wav", include_bytes!("../assets/free_rights_sfx/xp.wav")),
-            levelup: load_one(".ogg", include_bytes!("../assets/free_rights_sfx/levelup.ogg")),
-            new_color: load_one(".wav", include_bytes!("../assets/free_rights_sfx/new-color.wav")),
+            levelup: load_one(
+                ".ogg",
+                include_bytes!("../assets/free_rights_sfx/levelup.ogg"),
+            ),
+            new_color: load_one(
+                ".wav",
+                include_bytes!("../assets/free_rights_sfx/new-color.wav"),
+            ),
             gift_memes,
             theme,
         }

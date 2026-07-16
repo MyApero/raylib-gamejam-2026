@@ -28,6 +28,34 @@ spacetime start                             # local instance on http://localhost
 cargo run -p client                         # run 2+ instances to see multiplayer
 ```
 
+## World timestamp replay
+
+Press the **Replay** button in the game header (native or web) to run the
+current retained world as a read-only, whole-map animation. Replay deliberately
+shows hidden island borders and disables the low-zoom flat-island optimization
+and view culling, so every island and painted tile participates in the reveal.
+
+The native client can also start replay immediately from the command line. The
+argument is the number of real seconds used to travel from the oldest retained
+timestamp to the newest:
+
+```bash
+cargo run -p client --bin client -- --replay 30
+# equivalent: HEXEL_REPLAY_SECONDS=30 cargo run -p client --bin client
+```
+
+During playback, use the on-screen **Slower**, **Pause**, **Faster**, **Restart**,
+and **X** controls; the native/desktop keyboard equivalents are `-`, `Space`,
+`+`, `R`, and `Escape`. At 100% it becomes a live viewer and newly painted
+cells appear as their subscription updates arrive.
+
+This first replay uses the timestamps available through normal subscriptions:
+island creation and each currently retained tile's latest paint. SpacetimeDB's
+internal commitlog also retains overwritten colors and erased tiles for database
+recovery, but it does not expose that log as a historical client subscription;
+recovering those intermediate states requires a separate commitlog exporter or
+an application-level paint-history table.
+
 Re-run `generate_module_bindings.sh` after any change to `server/src/lib.rs`.
 
 ## HEXA demo bots

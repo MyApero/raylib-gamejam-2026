@@ -40,11 +40,13 @@
       // a code bug (heart rendering already lives in shared ui.rs). Bump
       // BUILD_VERSION on every deploy so both the script tag below and the
       // wasm fetch (via Module.locateFile) get a fresh URL each time.
-      var BUILD_VERSION = '20260712b';
+      var BUILD_VERSION = '20260715h';
       var Module = {
         canvas: document.getElementById('canvas'),
         locateFile: function (path) {
-          return path.endsWith('.wasm') ? path + '?v=' + BUILD_VERSION : path;
+          return (path.endsWith('.wasm') || path.endsWith('.data'))
+            ? path + '?v=' + BUILD_VERSION
+            : path;
         },
         print: (function () {
           var el = document.getElementById('output');
@@ -311,20 +313,98 @@
               importError = 'Import failed: that ID was rejected (invalid or expired).';
             };
           },
+          // Keep downloads in one browser-tested path.  Appending the anchor
+          // briefly matters on Safari and embedded web views, where clicking
+          // a detached anchor is ignored.
+          downloadBlob: function (blob, filename) {
+            if (!blob || !blob.size) {
+              console.warn('Export produced no data for ' + filename + '.');
+              return false;
+            }
+            var link = document.createElement('a');
+            var url = URL.createObjectURL(blob);
+            link.href = url;
+            link.download = filename;
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
+            return true;
+          },
           // The Rust frame has already rendered the clean share card when
           // this runs. Turning the game canvas into a Blob keeps the web
           // export a real PNG download rather than an OS-specific screenshot.
           downloadIslandImage: function () {
+            var api = this;
             var canvas = document.getElementById('canvas');
             if (!canvas || !canvas.toBlob) return;
             canvas.toBlob(function (blob) {
-              if (!blob) return;
-              var link = document.createElement('a');
-              link.href = URL.createObjectURL(blob);
-              link.download = 'hexel-island.png';
-              link.click();
-              setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
+              api.downloadBlob(blob, 'hexel-island.png');
             }, 'image/png');
+          },
+          // Browser-native replay export. `captureStream` records the exact
+          // canvas the player sees (including the replay controls) without
+          // moving hundreds of megabytes of frames through wasm. WebM is
+          // broadly supported by Chromium and Firefox; it can be converted
+          // to GIF/MP4 afterwards when a different delivery format is needed.
+          startReplayRecording: function () {
+            var api = this;
+            var canvas = document.getElementById('canvas');
+            if (!canvas || !canvas.captureStream || !window.MediaRecorder) {
+              console.warn('Replay recording is not supported by this browser.');
+              return false;
+            }
+            if (this.replayRecorder && this.replayRecorder.state !== 'inactive') return false;
+            var mimeType = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+              .find(function (type) { return MediaRecorder.isTypeSupported(type); });
+            var chunks = [];
+            var recorder;
+            try {
+              recorder = mimeType
+                ? new MediaRecorder(canvas.captureStream(60), { mimeType: mimeType })
+                : new MediaRecorder(canvas.captureStream(60));
+            } catch (error) {
+              console.warn('Could not start replay recording.', error);
+              return false;
+            }
+            this.replayRecorder = recorder;
+            recorder.ondataavailable = function (event) {
+              if (event.data && event.data.size) chunks.push(event.data);
+            };
+            recorder.onstop = function () {
+              api.replayRecorder = null;
+              if (!chunks.length) {
+                console.warn('Replay recording completed without video data.');
+                return;
+              }
+              var blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' });
+              api.downloadBlob(blob, 'hexel-island-timelapse.webm');
+            };
+            // One final dataavailable event is emitted by stop(), so no
+            // periodic chunks are required before the eight-second export
+            // completes. This is more reliable in Firefox and Safari.
+            recorder.start();
+            return true;
+          },
+          stopReplayRecording: function () {
+            var recorder = this.replayRecorder;
+            if (recorder && recorder.state !== 'inactive') recorder.stop();
+          },
+          // The compact GIF bytes are encoded in wasm by raylib's bundled
+          // msf_gif implementation. Copy them out of wasm memory before the
+          // Rust caller frees the encoder result, then download normally.
+          downloadReplayGif: function (ptr, length) {
+            // Emscripten keeps HEAPU8 in its generated script scope. The
+            // normal build exposes it globally; Module.HEAPU8 is supported
+            // too for builds that explicitly export runtime methods.
+            var heap = typeof HEAPU8 !== 'undefined'
+              ? HEAPU8
+              : (window.Module && window.Module.HEAPU8);
+            if (!ptr || !length || !heap) return false;
+            var bytes = heap.slice(ptr, ptr + length);
+            var blob = new Blob([bytes], { type: 'image/gif' });
+            return this.downloadBlob(blob, 'hexel-island-timelapse.gif');
           },
         };
       })();
