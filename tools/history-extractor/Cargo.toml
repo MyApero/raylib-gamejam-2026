@@ -9,10 +9,16 @@ publish = false
 [dependencies]
 anyhow = "1"
 shared = { path = "../../shared" }
-spacetimedb-commitlog = { path = "../../../SpacetimeDB/crates/commitlog" }
-spacetimedb-datastore = { path = "../../../SpacetimeDB/crates/datastore" }
-spacetimedb-fs-utils = { path = "../../../SpacetimeDB/crates/fs-utils" }
-spacetimedb-paths = { path = "../../../SpacetimeDB/crates/paths" }
-spacetimedb-primitives = { path = "../../../SpacetimeDB/crates/primitives" }
-spacetimedb-sats = { path = "../../../SpacetimeDB/crates/sats" }
+# Pinned to the exact commit the installed `spacetime` CLI is built from
+# (`spacetime --version` -> Commit: 052c83f...), not a plain crates.io
+# version, because this tool parses the on-disk commitlog format directly
+# and needs byte-for-byte compatibility with the replica that wrote it.
+# Bump the tag here in lockstep whenever the local `spacetime` install is
+# upgraded.
+spacetimedb-commitlog = { git = "https://github.com/clockworklabs/SpacetimeDB", tag = "v2.6.1" }
+spacetimedb-datastore = { git = "https://github.com/clockworklabs/SpacetimeDB", tag = "v2.6.1" }
+spacetimedb-fs-utils = { git = "https://github.com/clockworklabs/SpacetimeDB", tag = "v2.6.1" }
+spacetimedb-paths = { git = "https://github.com/clockworklabs/SpacetimeDB", tag = "v2.6.1" }
+spacetimedb-primitives = { git = "https://github.com/clockworklabs/SpacetimeDB", tag = "v2.6.1" }
+spacetimedb-sats = { git = "https://github.com/clockworklabs/SpacetimeDB", tag = "v2.6.1" }
 thiserror = "1"

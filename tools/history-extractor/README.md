@@ -9,6 +9,25 @@ The recovered local artifact is deliberately ignored by Git:
 
 `tools/history-extractor/output/hexel-tile-history.bin`
 
+## Prerequisites
+
+This tool links against SpacetimeDB's own `commitlog`/`datastore` crates to
+parse the on-disk log directly, so it needs to be built against the *exact*
+commit the local `spacetime` server was built from — not just a compatible
+semver. `Cargo.toml` pins those crates to a `git` dependency at tag
+`v2.6.1`, which matches the CLI this project currently targets:
+
+```sh
+spacetime --version   # Commit: 052c83fe... -> tag v2.6.1
+```
+
+If the installed `spacetime` gets upgraded, bump the `tag = "v2.6.1"` value
+in `tools/history-extractor/Cargo.toml` (all six `spacetimedb-*` entries) to
+match, then rebuild — a mismatched commit can silently misparse the log
+format. The first build fetches that tag over git, so it needs network
+access and can't use `--offline`; once Cargo has it cached, subsequent
+builds/runs can go `--offline` again.
+
 ## Recreate or resume it
 
 ```sh
@@ -17,6 +36,11 @@ cargo run --offline --quiet --manifest-path tools/history-extractor/Cargo.toml -
   tools/history-extractor/output/hexel-tile-history-v3.checkpoint \
   tools/history-extractor/output/hexel-tile-history-v3.bin
 ```
+
+Arguments, in order: the replica's `clog` directory (required), a checkpoint
+file path (optional — omit it to run without resumability), and an output
+file path (optional — omit it for a dry-run scan that only prints the
+`transactions=`/`tile_inserts=`/`tile_deletes=` summary and writes nothing).
 
 The checkpoint makes a long scan resumable. It is only advanced after the
 matching output bytes have been flushed. On resume, any partial bytes beyond
