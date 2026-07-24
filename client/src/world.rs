@@ -104,12 +104,16 @@ pub mod constants {
     pub const BORDERLESS_ZOOM_THRESHOLD: f32 = 20.0;
     /// World-unit margin past the screen edges within which an off-screen
     /// island still renders, so panning/zooming doesn't pop islands in and
-    /// out right at the viewport edge. Author-requested: shrunk from
-    /// `ISLAND_RADIUS * 2.0 * 5.0` (150, generous anti-pop-in margin) to
-    /// make the off-screen cull itself visibly observable while testing,
-    /// then hand-tuned to `ISLAND_RADIUS * 1.2` (18) — tight enough to see
-    /// the cull happen, with a little slack so an island's edge isn't
-    /// clipped mid-pan.
+    /// out right at the viewport edge. Replaces the old flat-hex low-zoom
+    /// LOD switch (drawing one hex instead of an island's 721 cells below a
+    /// zoom threshold), which caused islands to visibly disappear rather
+    /// than simplify when dezooming — removed in favor of always drawing
+    /// real cells and tuning the cull margin instead. Author-requested:
+    /// shrunk from `ISLAND_RADIUS * 2.0 * 5.0` (150, generous anti-pop-in
+    /// margin) to make the off-screen cull itself visibly observable while
+    /// testing, then hand-tuned to `ISLAND_RADIUS * 1.5` (22.5) — tight
+    /// enough to see the cull happen, with enough slack that an island's
+    /// edge isn't clipped mid-pan/zoom.
     pub const VIEW_CULL_PAD: f32 = ISLAND_RADIUS as f32 * 1.5;
     /// F9.6 item 6: keyboard pan speed, world units/sec at zoom 1.0
     /// (divided by the current zoom so it feels like a constant SCREEN
