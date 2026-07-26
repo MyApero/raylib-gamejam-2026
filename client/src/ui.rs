@@ -275,6 +275,7 @@ pub enum ExportTarget {
 impl ExportTarget {
     /// The `island_filter` shape `start_replay`/`RecoveredReplay` already
     /// take: `Some(id)` for one island, `None` for the whole world.
+    #[allow(dead_code)] // web-only: the native bin has no export flow
     pub fn island_id(self) -> Option<u32> {
         match self {
             ExportTarget::Island(id) => Some(id),
@@ -1723,7 +1724,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         return actions;
     }
 
-    /// Island-info: two very different UIs share `island_popup`.
+    // Island-info: two very different UIs share `island_popup`.
     // Own island (via the "My Isle" footer button, a deliberate action) is
     // still the full modal panel below, with a close button and the link
     // editor. A FOREIGN island's popup (opened by hovering) is
@@ -2553,8 +2554,7 @@ const BUTTON_TOOLTIPS: &[(fn() -> Rectangle, &str, &[&str])] = &[
         brush_btn_rect,
         "Eyedropper  [F]",
         &[
-            "Click or tap, then select",
-            "a painted tile",
+            "Copy the color of a painted tile",
             "Merging is disabled while active",
         ],
     ),
