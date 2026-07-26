@@ -27,6 +27,15 @@ if [ ! -f "$HISTORY_SOURCE" ]; then
 fi
 cp "$HISTORY_SOURCE" "$HISTORY_WEB"
 
+# Served alongside the page, NOT preloaded: the wasm carries its own copy of
+# this bake for the first frame, then fetches these at runtime and swaps to
+# them. That is what lets a re-rank refresh the title backdrop without
+# rebuilding the bundle — see `hexelLoadTitleMap` in game.html. Seeded from
+# the compiled-in pair so a fresh checkout serves something.
+for asset in title-map.png title-map-view.txt; do
+    cp "client/assets/$asset" "client/web/$asset"
+done
+
 # Export HEAPU8 as well: the GIF encoder hands its completed byte buffer to
 # browser JavaScript, which must copy those bytes before Rust frees it.
 export EMCC_CFLAGS="-O3 -sUSE_GLFW=3 -sASSERTIONS=1 -sWASM=1 -sASYNCIFY -sGL_ENABLE_GET_PROC_ADDRESS=1 -sINITIAL_MEMORY=268435456 -sEXPORTED_RUNTIME_METHODS=HEAPU8 --preload-file $HISTORY_WEB@/hexel-tile-history.bin"

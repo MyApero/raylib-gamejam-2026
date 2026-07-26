@@ -87,6 +87,12 @@ server/target/
 client/target/
 tools/history-extractor/output/
 client/web/hexel-tile-history.bin
+# Served copies of the title bake, produced by build-web.sh and refreshed by
+# the re-rank watcher. The tracked originals live in client/assets/.
+client/web/title-map.png
+client/web/title-map-view.txt
+# Island layout the title map was last baked at — local watcher state.
+tools/map-image/.island-layout
 
 raylib
 emsdk
