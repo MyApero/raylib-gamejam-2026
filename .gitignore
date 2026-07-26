@@ -87,6 +87,10 @@ server/target/
 client/target/
 tools/history-extractor/output/
 client/web/hexel-tile-history.bin
+# Precompressed siblings built alongside it, served by Caddy's
+# `file_server { precompressed }`. Derived artifacts, like the .bin itself.
+client/web/hexel-tile-history.bin.zst
+client/web/hexel-tile-history.bin.gz
 # Served copies of the title bake, produced by build-web.sh and refreshed by
 # the re-rank watcher. The tracked originals live in client/assets/.
 client/web/title-map.png

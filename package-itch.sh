@@ -20,8 +20,13 @@ LIMIT=$((64 * 1024 * 1024))       # itch jam hard limit: 64 MB
 ./build-web.sh
 
 # 2. Stage the single-pane page + build outputs, index.html at the root.
-# web.data is the --preload-file package holding the replay history: web.js
-# fetches it as a run dependency, so without it main() never runs at all.
+# hexel-tile-history.bin used to travel as web.data, the --preload-file
+# package. It is now a plain sibling file that game.html's hexelEnsureHistory
+# fetches only when a replay is opened, so main() no longer waits on it — but
+# it still has to be IN the zip, because itch serves the unzipped folder as
+# static files and the fetch would otherwise 404 the moment someone presses
+# Export. The .zst/.gz siblings are deliberately left out: itch does its own
+# content negotiation and they would only eat into the 64 MB budget.
 # title-map.png/-view.txt are deliberately NOT shipped — game.html's fetch of
 # them falls back to the bake compiled into the wasm, which for a static zip
 # is the same image.
@@ -30,11 +35,14 @@ mkdir -p "$STAGE"
 cp client/web/game.html "$STAGE/index.html"
 cp client/web/web.js    "$STAGE/web.js"
 cp client/web/web.wasm  "$STAGE/web.wasm"
-cp client/web/web.data  "$STAGE/web.data"
+cp client/web/hexel-tile-history.bin "$STAGE/hexel-tile-history.bin"
+cp client/web/favicon.ico "$STAGE/favicon.ico"
 
-# 3. Zip with index.html at the archive root.
+# 3. Zip with index.html at the archive root. The history is what the 64 MB
+# check below is really measuring — deflate takes its 258 MiB down to well
+# under the limit, which is why this fits at all.
 rm -f "$OUT"
-( cd "$STAGE" && zip -q -r "$OUT" index.html web.js web.wasm web.data )
+( cd "$STAGE" && zip -q -r "$OUT" index.html web.js web.wasm hexel-tile-history.bin favicon.ico )
 
 # 3b. Every sibling web.js loads by name must be in the archive; itch serves
 # the unzipped folder as static files, so a missing one is a 404 at boot.
@@ -42,6 +50,10 @@ for required in $(grep -oE '"[A-Za-z0-9_.-]+\.(wasm|data)"' "$STAGE/web.js" | tr
   unzip -l "$OUT" | grep -qE "[[:space:]]$required\$" \
     || { echo "ERROR: web.js loads '$required' but it is not in the zip." >&2; exit 1; }
 done
+# The history isn't referenced from web.js any more (game.html fetches it by
+# name), so the loop above cannot catch a missing one — check it explicitly.
+unzip -l "$OUT" | grep -qE '[[:space:]]hexel-tile-history\.bin$' \
+  || { echo "ERROR: hexel-tile-history.bin is not in the zip; replay/export would 404." >&2; exit 1; }
 
 # 4. Report + enforce the 64 MB limit.
 echo

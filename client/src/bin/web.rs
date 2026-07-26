@@ -1256,9 +1256,15 @@ struct State {
     /// Local-only retained-world replay. `None` is ordinary gameplay;
     /// `Some` suppresses mutations and chronologically reveals timestamps.
     replay_clock: Option<replay::ReplayClock>,
-    /// Full local history for web replay, loaded from the preloaded recovery
-    /// artifact rather than inferred from the latest table snapshot.
+    /// Full local history for web replay, loaded from the recovery artifact
+    /// rather than inferred from the latest table snapshot.
     recovered_replay: Option<RecoveredReplay>,
+    /// A replay the player asked for before the history had been fetched.
+    /// The artifact is no longer an emscripten preload (it gated startup on
+    /// a 258 MiB download — see build-web.sh), so the first replay of a
+    /// session has to wait for `hexelEnsureHistory` to write it into MEMFS.
+    /// Held here and retried from `frame` once the fetch reports ready.
+    history_pending: Option<PendingReplay>,
     /// Browser canvas recording is active until replay reaches its end (or
     /// the viewer is closed), then JavaScript downloads a WebM file.
     replay_recording: bool,
@@ -1521,7 +1527,63 @@ fn start_replay_with_duration(
     true
 }
 
+/// A replay request parked until the recovered history finishes downloading.
+#[derive(Clone, Copy)]
+struct PendingReplay {
+    island_filter: Option<u32>,
+    /// Export requests land back in `start_export_replay` so they still get
+    /// the "Set speed and cut" hint; plain ones in `start_replay`.
+    export: bool,
+}
+
+/// How far `hexelEnsureHistory` has got. Mirrors the compact strings
+/// `window.hexelHistoryStatus` returns in game.html.
+enum HistoryStatus {
+    Idle,
+    Loading(f32),
+    Ready,
+    Error(String),
+}
+
+fn history_status() -> HistoryStatus {
+    let raw = run_js("window.hexelHistoryStatus ? window.hexelHistoryStatus() : 'idle'");
+    if raw == "ready" {
+        return HistoryStatus::Ready;
+    }
+    if let Some(fraction) = raw.strip_prefix("loading:") {
+        return HistoryStatus::Loading(fraction.parse().unwrap_or(0.0));
+    }
+    if let Some(message) = raw.strip_prefix("error:") {
+        return HistoryStatus::Error(message.to_string());
+    }
+    HistoryStatus::Idle
+}
+
+/// Gate every replay entry point on the history actually being in MEMFS.
+///
+/// Returns true only when `RecoveredReplay::open` can succeed right now.
+/// Otherwise it starts (or joins) the fetch, parks the request, and leaves
+/// the caller to bail — `frame` replays it once the download lands, so the
+/// button press is honoured rather than dropped.
+fn ensure_history_ready(state: &mut State, island_filter: Option<u32>, export: bool) -> bool {
+    if matches!(history_status(), HistoryStatus::Ready) {
+        return true;
+    }
+    run_js("window.hexelEnsureHistory && window.hexelEnsureHistory()");
+    state.history_pending = Some(PendingReplay {
+        island_filter,
+        export,
+    });
+    state
+        .ui_state
+        .show_info_toast("Fetching replay history… 0%".to_string());
+    false
+}
+
 fn start_replay(state: &mut State, island_filter: Option<u32>) -> bool {
+    if !ensure_history_ready(state, island_filter, false) {
+        return false;
+    }
     start_replay_with_duration(state, island_filter, replay::DEFAULT_DURATION_SECS)
 }
 
@@ -1548,6 +1610,9 @@ fn format_bytes(bytes: f32) -> String {
 /// captures whatever state it is in by then. Every open replay offers
 /// download, so this only differs from `start_replay` by the hint.
 fn start_export_replay(state: &mut State, island_filter: Option<u32>) {
+    if !ensure_history_ready(state, island_filter, true) {
+        return;
+    }
     if !start_replay_with_duration(state, island_filter, replay::DEFAULT_DURATION_SECS) {
         return;
     }
@@ -1698,6 +1763,40 @@ fn frame(state: &mut State) {
     }
     if data.title_map_ready {
         swap_title_map(state);
+    }
+
+    // Drive a replay that was requested before the history had downloaded.
+    // The toast is re-shown every frame rather than posted once: each call
+    // resets `shown_at`, so it neither expires mid-download nor needs a
+    // second, persistent widget just for this.
+    if let Some(pending) = state.history_pending {
+        match history_status() {
+            HistoryStatus::Ready => {
+                state.history_pending = None;
+                if pending.export {
+                    start_export_replay(state, pending.island_filter);
+                } else {
+                    start_replay(state, pending.island_filter);
+                }
+            }
+            HistoryStatus::Loading(fraction) => {
+                state.ui_state.show_info_toast(format!(
+                    "Fetching replay history… {}%",
+                    (fraction * 100.0).round() as i32
+                ));
+            }
+            HistoryStatus::Error(message) => {
+                state.history_pending = None;
+                state
+                    .ui_state
+                    .show_info_toast(format!("Replay history unavailable: {message}"));
+            }
+            // The fetch hasn't reported in yet (or a reload cleared it):
+            // ask again rather than waiting forever on a dropped request.
+            HistoryStatus::Idle => {
+                run_js("window.hexelEnsureHistory && window.hexelEnsureHistory()");
+            }
+        }
     }
 
     let mut stop_replay_recording = false;
@@ -3675,6 +3774,7 @@ fn main() {
         ui_state: ui::UiState::new(),
         replay_clock: None,
         recovered_replay: None,
+        history_pending: None,
         replay_recording: false,
         clean_timeline_export: false,
         gif_recording: false,

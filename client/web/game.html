@@ -2,7 +2,11 @@
 <html lang="en-us">
   <head>
     <meta charset="utf-8">
-    <title>hexel — raylib 6.0 + SpacetimeDB</title>
+    <title>hexel</title>
+    <!-- ?v= for the same reason web.js carries one: this zone has a
+         Cloudflare Browser Cache TTL that rewrites the origin's
+         Cache-Control, so a changed icon otherwise stays stale at the edge. -->
+    <link rel="icon" href="favicon.ico?v=20260726r" sizes="any">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
       /* One unit of the game's internal 720x720 render space, in CSS pixels.
@@ -120,7 +124,7 @@
       // a code bug (heart rendering already lives in shared ui.rs). Bump
       // BUILD_VERSION on every deploy so both the script tag below and the
       // wasm fetch (via Module.locateFile) get a fresh URL each time.
-      var BUILD_VERSION = '20260726p';
+      var BUILD_VERSION = '20260726q';
       var Module = {
         canvas: document.getElementById('canvas'),
         locateFile: function (path) {
@@ -647,6 +651,95 @@
             // draw the map in the wrong place.
 .then(function () { window.hexelTitleMapReady = true; })
 .catch(function () { /* keep the embedded bake */ });
+        };
+      })();
+
+      // Recovered replay history, fetched on demand.
+      //
+      // This was an emscripten --preload-file until it became the single
+      // worst thing about the load: preloaded files are run dependencies,
+      // and emscripten blocks main() until they all resolve, so every
+      // visitor waited on 258 MiB before the title screen drew its first
+      // frame. Nothing touches it before `RecoveredReplay::open`, which
+      // only ever runs from a replay/export button, so it is fetched the
+      // first time one is pressed instead.
+      //
+      // Served precompressed (see build-web.sh + the Caddyfile), so what
+      // actually crosses the wire is ~15 MiB; `fetch` transparently
+      // inflates it. The progress fraction below is therefore measured
+      // against the DECOMPRESSED size, which Content-Length does not give
+      // us — hence the constant.
+      (function () {
+        var HISTORY_PATH = '/hexel-tile-history.bin';
+        // Uncompressed byte count, only used to render a progress bar. A
+        // stale value degrades the bar, never the download: the fetch is
+        // driven by the stream ending, not by reaching this number.
+        var HISTORY_BYTES = 270767160;
+        var state = 'idle';
+        var progress = 0;
+        var message = '';
+
+        // Polled from wasm each frame while a replay is pending — see
+        // `history_status` in bin/web.rs. Kept to a compact string because
+        // it crosses the boundary through emscripten_run_script_string.
+        window.hexelHistoryStatus = function () {
+          if (state === 'loading') return 'loading:' + progress.toFixed(4);
+          if (state === 'error') return 'error:' + message;
+          return state;
+        };
+
+        // Idempotent: repeated presses while a fetch is in flight are
+        // no-ops rather than parallel 258 MiB downloads.
+        window.hexelEnsureHistory = function () {
+          if (state === 'loading' || state === 'ready') return;
+          state = 'loading';
+          progress = 0;
+          // ?v= rather than no-store: the bytes are immutable for a given
+          // build, and the Caddyfile marks them cacheable for a year, so a
+          // second visit should hit cache instead of re-downloading.
+          fetch(HISTORY_PATH + '?v=' + BUILD_VERSION)
+.then(function (r) {
+              if (!r.ok) throw new Error('HTTP ' + r.status);
+              // No streaming body (older Safari): fall back to a single
+              // arrayBuffer, which works but can't report progress.
+              if (!r.body || !r.body.getReader) {
+                return r.arrayBuffer().then(function (buf) {
+                  return new Uint8Array(buf);
+                });
+              }
+              var reader = r.body.getReader();
+              var chunks = [];
+              var received = 0;
+              return (function pump() {
+                return reader.read().then(function (result) {
+                  if (result.done) {
+                    var all = new Uint8Array(received);
+                    var at = 0;
+                    for (var i = 0; i < chunks.length; i++) {
+                      all.set(chunks[i], at);
+                      at += chunks[i].length;
+                    }
+                    return all;
+                  }
+                  chunks.push(result.value);
+                  received += result.value.length;
+                  progress = Math.min(received / HISTORY_BYTES, 0.999);
+                  return pump();
+                });
+              })();
+            })
+.then(function (bytes) {
+              // Straight into MEMFS at the path RECOVERED_HISTORY_PATH
+              // opens. Same filesystem the preload used to populate, so
+              // the Rust side is unchanged from here on.
+              FS.writeFile(HISTORY_PATH, bytes);
+              progress = 1;
+              state = 'ready';
+            })
+.catch(function (error) {
+              state = 'error';
+              message = String((error && error.message) || error);
+            });
         };
       })();
     </script>
