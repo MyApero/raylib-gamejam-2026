@@ -35,6 +35,23 @@
         overflow-y: auto;
         margin: 0;
       }
+      /* Portrait (i.e. a phone): the square is 100vmin = the full width, so
+         all the slack is vertical. Put the game at the BOTTOM, in thumb
+         reach, and push the log above it.
+         The 85vh cap is what keeps the in-game footer on screen: the log
+         above takes up to 15vh, and `body` clips its overflow, so a plain
+         100vmin square would have its bottom strip — the footer — cut off
+         on any viewport less than ~1.18x taller than it is wide. */
+      @media (orientation: portrait) {
+        body { display: flex; flex-direction: column; min-height: 100vh; }
+        #output { order: -1; min-height: 0; }
+        canvas#canvas {
+          flex: none;
+          margin-top: auto;
+          width: min(100vw, 85vh);
+          height: min(100vw, 85vh);
+        }
+      }
       /* Export panel. Mirrors the in-game modal in ui.rs `draw_island_export`
          — same panel fill (24,24,30), same 2px (90,90,100) border, same
          button colours — so it reads as part of the game rather than browser
@@ -88,7 +105,7 @@
       // a code bug (heart rendering already lives in shared ui.rs). Bump
       // BUILD_VERSION on every deploy so both the script tag below and the
       // wasm fetch (via Module.locateFile) get a fresh URL each time.
-      var BUILD_VERSION = '20260726o';
+      var BUILD_VERSION = '20260726p';
       var Module = {
         canvas: document.getElementById('canvas'),
         locateFile: function (path) {
