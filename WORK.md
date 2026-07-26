@@ -222,3 +222,49 @@ sudo systemctl restart hexel-bot@heart.service hexel-bot@hexagon.service hexel-b
 
 (First deploy of the `center` bot: also `sudo systemctl enable --now
 hexel-bot@center.service` once, same as the original two were enabled.)
+
+### Presence-gated bots
+
+The bots only have a job while somebody is there to see them, so
+`tools/bot-presence/bot_presence.py` stops the heart bot's unit while the
+world is empty and starts it again as soon as a human connects. The check
+lives outside the bot on purpose: a disconnected client cannot watch the
+`user` table for someone arriving, so a self-managing bot would have to
+reconnect every few seconds to look — and that flicker is exactly what
+players would see. It identifies bots by the identity inside each persisted
+credential file, not by display name, since `heart` and `center` share one.
+
+```bash
+./tools/bot-presence/bot_presence.py --dry-run     # report only, touch nothing
+./tools/bot-presence/bot_presence.py heart center  # manage several units
+```
+
+Enable the timer on the server (`heart` is the default target). `HOME` is set
+because the script reads the CLI token and the bots' credentials out of the
+home directory, while `systemctl start/stop` on a system unit needs root:
+
+```ini
+# /etc/systemd/system/hexel-bot-presence.service
+[Service]
+Type=oneshot
+Environment=HOME=/home/antoine
+ExecStart=/home/antoine/delivery/perso/raylib-gamejam-2026/tools/bot-presence/bot_presence.py
+
+# /etc/systemd/system/hexel-bot-presence.timer
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=20s
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now hexel-bot-presence.timer
+```
+
+20s is the worst case a new arrival waits for the bot to come back. The bot
+units keep `Restart=always`, which only governs a crash — an explicit
+`systemctl stop` still stops them. If the database is unreachable the script
+leaves every unit exactly as it is rather than reading the outage as an
+empty world.
