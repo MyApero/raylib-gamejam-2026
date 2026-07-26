@@ -1540,7 +1540,7 @@ struct PendingReplay {
 /// `window.hexelHistoryStatus` returns in game.html.
 enum HistoryStatus {
     Idle,
-    Loading(f32),
+    Loading,
     Ready,
     Error(String),
 }
@@ -1550,8 +1550,8 @@ fn history_status() -> HistoryStatus {
     if raw == "ready" {
         return HistoryStatus::Ready;
     }
-    if let Some(fraction) = raw.strip_prefix("loading:") {
-        return HistoryStatus::Loading(fraction.parse().unwrap_or(0.0));
+    if raw == "loading" {
+        return HistoryStatus::Loading;
     }
     if let Some(message) = raw.strip_prefix("error:") {
         return HistoryStatus::Error(message.to_string());
@@ -1562,9 +1562,13 @@ fn history_status() -> HistoryStatus {
 /// Gate every replay entry point on the history actually being in MEMFS.
 ///
 /// Returns true only when `RecoveredReplay::open` can succeed right now.
-/// Otherwise it starts (or joins) the fetch, parks the request, and leaves
-/// the caller to bail — `frame` replays it once the download lands, so the
-/// button press is honoured rather than dropped.
+/// Since the download starts as soon as the title screen is up (see
+/// `frame`), by the time anyone reaches Export it has almost always landed
+/// and this is just a check. On the rare miss it parks the request and
+/// leaves the caller to bail — `frame` replays it once the data arrives, so
+/// the button press is honoured rather than dropped. No percentage: at
+/// ~13 MiB on the wire the wait is short enough that a progress readout
+/// draws more attention to it than it deserves.
 fn ensure_history_ready(state: &mut State, island_filter: Option<u32>, export: bool) -> bool {
     if matches!(history_status(), HistoryStatus::Ready) {
         return true;
@@ -1576,7 +1580,7 @@ fn ensure_history_ready(state: &mut State, island_filter: Option<u32>, export: b
     });
     state
         .ui_state
-        .show_info_toast("Fetching replay history… 0%".to_string());
+        .show_info_toast("Preparing replay…".to_string());
     false
 }
 
@@ -1760,6 +1764,13 @@ fn frame(state: &mut State) {
     if !state.title_map_requested {
         state.title_map_requested = true;
         run_js("window.hexelLoadTitleMap && window.hexelLoadTitleMap()");
+        // Prefetch the replay history in the same breath. It is ~13 MiB on
+        // the wire, so it lands quietly while the player is still on the
+        // title screen, and Export then opens instantly instead of stopping
+        // to download. Kicked off here rather than from `main` for the same
+        // reason as the title map: emscripten's filesystem has to exist
+        // before JS can write the result into it.
+        run_js("window.hexelEnsureHistory && window.hexelEnsureHistory()");
     }
     if data.title_map_ready {
         swap_title_map(state);
@@ -1779,11 +1790,8 @@ fn frame(state: &mut State) {
                     start_replay(state, pending.island_filter);
                 }
             }
-            HistoryStatus::Loading(fraction) => {
-                state.ui_state.show_info_toast(format!(
-                    "Fetching replay history… {}%",
-                    (fraction * 100.0).round() as i32
-                ));
+            HistoryStatus::Loading => {
+                state.ui_state.show_info_toast("Preparing replay…".to_string());
             }
             HistoryStatus::Error(message) => {
                 state.history_pending = None;

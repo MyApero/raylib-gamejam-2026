@@ -124,7 +124,7 @@
       // a code bug (heart rendering already lives in shared ui.rs). Bump
       // BUILD_VERSION on every deploy so both the script tag below and the
       // wasm fetch (via Module.locateFile) get a fresh URL each time.
-      var BUILD_VERSION = '20260726q';
+      var BUILD_VERSION = '20260726r';
       var Module = {
         canvas: document.getElementById('canvas'),
         locateFile: function (path) {
@@ -654,81 +654,48 @@
         };
       })();
 
-      // Recovered replay history, fetched on demand.
+      // Recovered replay history, prefetched in the background.
       //
       // This was an emscripten --preload-file until it became the single
       // worst thing about the load: preloaded files are run dependencies,
       // and emscripten blocks main() until they all resolve, so every
       // visitor waited on 258 MiB before the title screen drew its first
       // frame. Nothing touches it before `RecoveredReplay::open`, which
-      // only ever runs from a replay/export button, so it is fetched the
-      // first time one is pressed instead.
+      // only ever runs from a replay/export button.
       //
       // Served precompressed (see build-web.sh + the Caddyfile), so what
-      // actually crosses the wire is ~15 MiB; `fetch` transparently
-      // inflates it. The progress fraction below is therefore measured
-      // against the DECOMPRESSED size, which Content-Length does not give
-      // us — hence the constant.
+      // actually crosses the wire is ~13 MiB — small enough that bin/web.rs
+      // simply starts this once the title screen is up and lets it land
+      // while the player reads the menu, rather than making them wait at
+      // the point of export.
       (function () {
         var HISTORY_PATH = '/hexel-tile-history.bin';
-        // Uncompressed byte count, only used to render a progress bar. A
-        // stale value degrades the bar, never the download: the fetch is
-        // driven by the stream ending, not by reaching this number.
-        var HISTORY_BYTES = 270767160;
         var state = 'idle';
-        var progress = 0;
         var message = '';
 
-        // Polled from wasm each frame while a replay is pending — see
+        // Polled from wasm only while a replay is waiting on this — see
         // `history_status` in bin/web.rs. Kept to a compact string because
         // it crosses the boundary through emscripten_run_script_string.
         window.hexelHistoryStatus = function () {
-          if (state === 'loading') return 'loading:' + progress.toFixed(4);
           if (state === 'error') return 'error:' + message;
           return state;
         };
 
-        // Idempotent: repeated presses while a fetch is in flight are
-        // no-ops rather than parallel 258 MiB downloads.
+        // Idempotent: the startup prefetch and any later button press share
+        // one download rather than starting parallel ones.
         window.hexelEnsureHistory = function () {
           if (state === 'loading' || state === 'ready') return;
           state = 'loading';
-          progress = 0;
           // ?v= rather than no-store: the bytes are immutable for a given
           // build, and the Caddyfile marks them cacheable for a year, so a
           // second visit should hit cache instead of re-downloading.
           fetch(HISTORY_PATH + '?v=' + BUILD_VERSION)
 .then(function (r) {
               if (!r.ok) throw new Error('HTTP ' + r.status);
-              // No streaming body (older Safari): fall back to a single
-              // arrayBuffer, which works but can't report progress.
-              if (!r.body || !r.body.getReader) {
-                return r.arrayBuffer().then(function (buf) {
-                  return new Uint8Array(buf);
-                });
-              }
-              var reader = r.body.getReader();
-              var chunks = [];
-              var received = 0;
-              return (function pump() {
-                return reader.read().then(function (result) {
-                  if (result.done) {
-                    var all = new Uint8Array(received);
-                    var at = 0;
-                    for (var i = 0; i < chunks.length; i++) {
-                      all.set(chunks[i], at);
-                      at += chunks[i].length;
-                    }
-                    return all;
-                  }
-                  chunks.push(result.value);
-                  received += result.value.length;
-                  progress = Math.min(received / HISTORY_BYTES, 0.999);
-                  return pump();
-                });
-              })();
+              return r.arrayBuffer();
             })
-.then(function (bytes) {
+.then(function (buf) {
+              var bytes = new Uint8Array(buf);
               // Straight into MEMFS at the path RECOVERED_HISTORY_PATH
               // opens. Same filesystem the preload used to populate, so
               // the Rust side is unchanged from here on.
