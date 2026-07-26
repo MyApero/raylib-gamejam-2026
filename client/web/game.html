@@ -34,6 +34,21 @@
         max-height: 15vh;
         overflow-y: auto;
         margin: 0;
+        /* Off on the shipped page: it ate the top of a phone screen, and
+           `Module.print` mirrors every line to console.log anyway. Drop this
+           one line to get the on-page log back. */
+        display: none;
+      }
+      /* Portrait (i.e. a phone): the square is 100vmin = the full width, so
+         all the slack is vertical. Put the game at the BOTTOM, in thumb
+         reach. */
+      @media (orientation: portrait) {
+        body { display: flex; flex-direction: column; min-height: 100vh; }
+        canvas#canvas { flex: none; margin-top: auto; }
+        /* The square now occupies the bottom of the page, where this panel
+           used to sit clear of it — move it into the space above instead of
+           over the in-game footer. */
+        #export-panel { top: 3vmin; bottom: auto; }
       }
       /* Portrait (i.e. a phone): the square is 100vmin = the full width, so
          all the slack is vertical. Put the game at the BOTTOM, in thumb
