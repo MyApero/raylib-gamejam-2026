@@ -9,7 +9,7 @@ use std::collections::HashMap;
 /// `shared` crate and is re-exported here instead of hand-copied.
 mod constants {
     pub use shared::constants::ISLAND_RADIUS;
-    // Author-requested (F9.5): islands sit side by side, flat sides facing
+    // Islands sit side by side, flat sides facing
     // flat sides (a perfect hex-of-hexes tiling — see
     // `geometry::SLOT_PLACEMENT_RADIUS`/`SLOT_U`/`SLOT_V`, which do the
     // actual placement math; a naive same-axis coarse scaling can never
@@ -23,8 +23,7 @@ mod constants {
     // exactly the hexdist between any two ADJACENT islands' centers in that
     // tiling — verified computationally, not just algebra on paper.
     pub const SLOT_SPACING: i32 = 2 * (ISLAND_RADIUS + MARGIN_GAP_TILES / 2) + 1;
-    // F9.5 item 3 (author-reported: "more range to merge" / known_bugs.md):
-    // raised from 1.0 — the deployed build's range felt too short in
+    // Raised from 1.0 — the deployed build's range felt too short in
     // hand-testing. Mirrored in plan.md's constants table; re-tune both
     // together if the author's further hand-testing settles on a different
     // value.
@@ -37,7 +36,7 @@ mod constants {
     pub const XP_MERGE_NEW: u64 = 25;
     pub const XP_LIKE: u64 = 10;
     pub const XP_LINK_CLICK: u64 = 5;
-    /// F9: passive XP for staying present (fresh `last_seen`), granted by
+    /// Passive XP for staying present (fresh `last_seen`), granted by
     /// `time_xp_tick` every `TIME_XP_PERIOD_SECS`.
     pub const XP_TIME: u64 = 1;
     pub const TIME_XP_PERIOD_SECS: i64 = 60;
@@ -45,7 +44,7 @@ mod constants {
     /// Single source of truth in the `shared` crate — see its doc comment
     /// for why this is no longer hand-mirrored.
     pub use shared::constants::{START_SAT, START_VAL};
-    /// F8: how often islands re-rank, and how long the client-facing
+    /// How often islands re-rank, and how long the client-facing
     /// countdown warns before slots actually get rewritten.
     pub const RERANK_PERIOD_SECS: i64 = 300;
     pub const RERANK_WARNING_SECS: i64 = 5;
@@ -53,7 +52,7 @@ mod constants {
     /// unlocked inventory entry — lets the Hue slider nudge a shade without
     /// bloating the inventory with one row per nudge.
     pub use shared::constants::HUE_TOLERANCE;
-    /// F9.5 item 10: how often the dead-player reap sweep runs, and how
+    /// How often the dead-player reap sweep runs, and how
     /// stale (`online == false` and `last_seen` older than this) a user must
     /// be before it's even considered a candidate.
     pub const REAP_PERIOD_SECS: i64 = 60;
@@ -63,36 +62,36 @@ mod constants {
     /// XP is deliberately not part of the test, since idle time-XP ticks may
     /// have granted a few by the time they're stale enough to qualify).
     pub const REAP_MAX_INVENTORY_ROWS: usize = 1;
-    /// F10 (hexel.md's Admin section): SHA-256 of the admin password,
+    /// SHA-256 of the admin password,
     /// baked in at compile time by `build.rs` from the `ADMIN_PASSWORD` env
     /// var / gitignored `.env` (see `server/.env.example`) — never the
     /// plaintext, since this repo is public. `claim_admin` hashes the
     /// caller's input and compares hex digests. To change the admin
     /// password: edit `.env`, rebuild, republish.
     pub const ADMIN_PASSWORD_SHA256: &str = env!("ADMIN_PASSWORD_SHA256");
-    /// F11 (flying gift): SHARED with the client — `claim_gift`'s distance
+    /// SHARED with the client — `claim_gift`'s distance
     /// check and both clients' drift rendering must derive the identical
     /// position/range, so these three (unlike the tuning knobs above) live
     /// in the `shared` crate instead of being server-only.
     pub use shared::constants::{GIFT_CLAIM_DIST, GIFT_DRIFT_PERIOD_SECS, GIFT_DRIFT_RADIUS};
-    /// F11: how often the spawn/expire tick runs, and how long an unclaimed
+    /// How often the spawn/expire tick runs, and how long an unclaimed
     /// gift lasts before that tick sweeps it away. Server-only — clients
     /// just observe `gift` rows appear/disappear, no client-side timer.
     /// `GIFT_LIFETIME_SECS` < `GIFT_SPAWN_PERIOD_SECS` so there's visible
     /// down-time between gifts rather than one always being up.
     pub const GIFT_SPAWN_PERIOD_SECS: i64 = 60;
     pub const GIFT_LIFETIME_SECS: i64 = 55;
-    /// F11: flat XP on the claim coin-flip's "XP" branch — also the "hue"
+    /// Flat XP on the claim coin-flip's "XP" branch — also the "hue"
     /// branch's own fallback if 8 random rerolls all collide with a hue the
     /// claimant already owns, so a win is never silently wasted.
     pub const XP_GIFT: u64 = 20;
-    /// F13 (Hexa event): SHARED with the client — its rendering reads the
+    /// SHARED with the client — its rendering reads the
     /// server-broadcast `hexa_cluster` rows, which are keyed by this same
     /// detection radius/size, so these two (unlike the tuning knobs above)
     /// live in the `shared` crate. `XP_HEXA` is server-only but kept
-    /// alongside them as the third F13 canonical constant.
+    /// alongside them as the third canonical constant.
     pub use shared::constants::{HEXA_RADIUS, HEXA_SIZE, HEXA_UNLOCK_LEVEL, XP_HEXA};
-    /// F13: how often the `hexa_cluster` safety-net sweep runs — deletes a
+    /// How often the `hexa_cluster` safety-net sweep runs — deletes a
     /// row whose owner went stale (offline, or `last_seen` past
     /// `PRESENCE_TIMEOUT_SECS`) without ever calling `set_pos` again to
     /// clear their own row (a departing/disconnecting member's row would
@@ -105,7 +104,7 @@ mod constants {
 mod geometry {
     use super::constants::{ISLAND_RADIUS, MARGIN_GAP_TILES};
 
-    /// Hex-of-hexes tiling basis (F9.5): the two coarse-lattice generators
+    /// Hex-of-hexes tiling basis: the two coarse-lattice generators
     /// that tile hex-distance-`R` "super-hexagons" (`3R²+3R+1` cells each)
     /// with ZERO gap and ZERO overlap — a standard identity for
     /// centered-hexagonal-number clusters, verified computationally (every
@@ -280,7 +279,7 @@ mod merge {
     }
 }
 
-/// F11: flying-gift world position — a small circular drift around the
+/// Flying-gift world position — a small circular drift around the
 /// spawn point, a pure function of elapsed seconds since `Gift.spawned_at`.
 /// Mirrors `client/src/world.rs`'s `gift_drift_pos` exactly — both clients
 /// must render/hit-test the SAME position from the same inputs (no
@@ -304,7 +303,7 @@ pub struct Config {
     frozen: bool,
     #[default(None::<Identity>)]
     admin: Option<Identity>,
-    /// F8: when set, a re-rank is landing at this timestamp — clients render
+    /// When set, a re-rank is landing at this timestamp — clients render
     /// a countdown banner from it. `None` outside the `RERANK_WARNING_SECS`
     /// window before a cycle fires.
     next_rerank_at: Option<Timestamp>,
@@ -339,7 +338,7 @@ pub struct Inventory {
     hue: u16,
     obtained_at: Timestamp,
     obtained_with: Option<Identity>,
-    /// F11: true only for a flying-gift hue grant. Without this, the
+    /// True only for a flying-gift hue grant. Without this, the
     /// client's inventory-insert watch can't tell a gift-granted hue
     /// (`obtained_with: None`, same as a fresh row) apart from
     /// `reset_account`'s reseed, which it already treats specially (resets
@@ -363,7 +362,7 @@ pub struct Island {
     likes: u32,
     itch_rate_id: Option<u32>,
     created_at: Timestamp,
-    /// Author-requested: lets an owner pin their island's border to a
+    /// Lets an owner pin their island's border to a
     /// specific packed HSV color instead of always tracking their seed hue.
     /// `None` = fall back to the seed-hue default clients already render.
     /// New fields appended at the end (not inserted among the existing
@@ -371,7 +370,7 @@ pub struct Island {
     /// indexes fields by schema order, doesn't shift under it.
     #[default(None::<u32>)]
     border_color: Option<u32>,
-    /// Author-requested: hides the border entirely regardless of
+    /// Hides the border entirely regardless of
     /// `border_color` — a separate flag rather than overloading
     /// `border_color: None` for "hidden", since that value already means
     /// "use the default seed-hue color".
@@ -379,7 +378,7 @@ pub struct Island {
     border_hidden: bool,
 }
 
-/// F8: one row per (island, liker) — enforced in `like_island` rather than as
+/// One row per (island, liker) — enforced in `like_island` rather than as
 /// a DB-level compound unique constraint (this SDK only supports uniqueness
 /// on a single column).
 #[spacetimedb::table(accessor = island_like, public)]
@@ -392,7 +391,7 @@ pub struct IslandLike {
     liker: Identity,
 }
 
-/// F9: one row per (island, clicker) — same dedupe pattern as `IslandLike`,
+/// One row per (island, clicker) — same dedupe pattern as `IslandLike`,
 /// enforced in `click_link` rather than a DB-level compound unique
 /// constraint. No "unclick": a link click's XP credit is permanent, unlike a
 /// like.
@@ -406,7 +405,7 @@ pub struct IslandLinkClick {
     clicker: Identity,
 }
 
-/// F8 re-rank timer chain: a repeating loop schedules the "warning" step
+/// Re-rank timer chain: a repeating loop schedules the "warning" step
 /// every `RERANK_PERIOD_SECS`; the warning step sets `config.next_rerank_at`
 /// (for the client countdown) and schedules a ONE-SHOT fire step
 /// `RERANK_WARNING_SECS` later, which does the actual re-sort. Both tables
@@ -428,7 +427,7 @@ pub struct RerankFireSchedule {
     scheduled_at: ScheduleAt,
 }
 
-/// F9: repeating tick (see `client_connected`'s lazy seeding, same pattern as
+/// Repeating tick (see `client_connected`'s lazy seeding, same pattern as
 /// `rerank_warn_schedule`) that grants `XP_TIME` to every present user every
 /// `TIME_XP_PERIOD_SECS`. Server-internal, not `public` — clients only ever
 /// observe its effect through `user.xp`.
@@ -440,7 +439,7 @@ pub struct TimeXpSchedule {
     scheduled_at: ScheduleAt,
 }
 
-/// F9.5 item 10: repeating tick (same lazy-seeding pattern as
+/// Repeating tick (same lazy-seeding pattern as
 /// `time_xp_schedule`) that reaps drive-by players — see `reap_dead_players`.
 /// Server-internal, not `public`; clients only ever observe its effect
 /// through `user`/`island` rows disappearing.
@@ -476,7 +475,7 @@ pub struct MarginCell {
     painted_at: Timestamp,
 }
 
-/// F11 (flying gift): one row = the single currently-active pickup in the
+/// One row = the single currently-active pickup in the
 /// world — `gift_tick` only ever spawns a new one once the current row is
 /// gone (at most one at a time, the pragmatic P2 scope call). `x`/`y` are
 /// the world-cartesian SPAWN center; the actual on-screen position drifts
@@ -495,7 +494,7 @@ pub struct Gift {
     expires_at: Timestamp,
 }
 
-/// F11: repeating tick (same lazy-seeding pattern as the schedules above)
+/// Repeating tick (same lazy-seeding pattern as the schedules above)
 /// that expires stale gifts and spawns a fresh one when none remain.
 /// Server-internal, not `public` — clients only ever observe its effect
 /// through `gift` rows appearing/disappearing.
@@ -507,7 +506,7 @@ pub struct GiftSchedule {
     scheduled_at: ScheduleAt,
 }
 
-/// F13 (Hexa event): who has ever received the one-time `XP_HEXA` bonus —
+/// Who has ever received the one-time `XP_HEXA` bonus —
 /// `identity` as the primary key doubles as the "already granted?" index,
 /// same trick `IslandLike`'s per-(island, liker) dedup uses one level up.
 /// Server-internal bookkeeping only (not `public`): clients only ever
@@ -520,7 +519,7 @@ pub struct HexaReward {
     at: Timestamp,
 }
 
-/// F13: one row per ignition, purely so clients can animate it (flash the
+/// One row per ignition, purely so clients can animate it (flash the
 /// hexagon edges, play the sfx) — `public` for that reason, unlike
 /// `HexaReward` above. `cx`/`cy` are the fixed world origin and
 /// `member_count` records the six occupants. Also doubles as the "was this `None`-obtained-with
@@ -539,7 +538,7 @@ pub struct HexaEvent {
     member_count: u32,
 }
 
-/// F13 author follow-up: the server broadcasts LIVE cluster-forming state
+/// Author follow-up: the server broadcasts LIVE cluster-forming state
 /// (not just the ignition moment `HexaEvent` logs) — "the server would tell
 /// that there is an HEXA happening and give an id and position to players
 /// so that everyone sees they are merging." One row per CURRENTLY-clustered
@@ -568,7 +567,7 @@ pub struct HexaCluster {
     ignited: bool,
 }
 
-/// F13: repeating safety-net sweep (see `HEXA_SWEEP_PERIOD_SECS`'s doc
+/// Repeating safety-net sweep (see `HEXA_SWEEP_PERIOD_SECS`'s doc
 /// comment) — server-internal, not `public`, same as every other schedule
 /// table here.
 #[spacetimedb::table(accessor = hexa_sweep_schedule, scheduled(hexa_sweep))]
@@ -606,7 +605,7 @@ pub struct MergeEvent {
     merged_val: u8,
 }
 
-/// Author decision (F6 follow-up): the merge toast used to fall back to a
+/// Author decision (follow-up): the merge toast used to fall back to a
 /// partner's short identity hex when they hadn't picked a name, which leaks
 /// enough of the identity to correlate a player across merges — the same
 /// identifier decision 11 requires to stay confidential. Auto-assigning a
@@ -631,7 +630,7 @@ fn random_name(ctx: &ReducerContext) -> String {
     format!("{a}{n}")
 }
 
-/// F9.5 (dead-player reap): smallest slot `>= 1` not currently held by a
+/// Smallest slot `>= 1` not currently held by a
 /// live island — slot 0 is reserved for the admin island, never assigned
 /// here. `O(n log n)` in the current island count, called only on connect
 /// (a rare event, not a hot per-frame path), so the sort is cheap enough not
@@ -698,14 +697,14 @@ fn take_paint_token(ctx: &ReducerContext) -> Result<(User, u32), String> {
     Ok((user, color))
 }
 
-/// F10: hex-encoded SHA-256 digest of `password`, compared against
+/// Hex-encoded SHA-256 digest of `password`, compared against
 /// `constants::ADMIN_PASSWORD_SHA256` by `claim_admin`.
 fn hash_password(password: &str) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(password.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// F10: shared guard for `set_frozen`/`delete_island_cells` — both are
+/// Shared guard for `set_frozen`/`delete_island_cells` — both are
 /// admin-only, not gated by `check_not_frozen` below (the admin must still
 /// be able to act, in particular to unfreeze, while the game is frozen).
 fn require_admin(ctx: &ReducerContext) -> Result<(), String> {
@@ -716,7 +715,7 @@ fn require_admin(ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }
 
-/// F10 (hexel.md's Admin section: "can freeze the game so no one can
+/// (hexel.md's Admin section: "can freeze the game so no one can
 /// interact anymore"): shared guard called first by every player-facing
 /// mutating reducer. Scheduled/system reducers (rerank, time-XP, reap,
 /// connect/disconnect) and the three admin reducers deliberately do NOT call
@@ -1007,7 +1006,7 @@ fn apply_merge(
     }
 }
 
-/// F13 (Hexa event): pools every participant's owned hues (union, granted to
+/// Pools every participant's owned hues (union, granted to
 /// whoever's missing it) and grants `XP_HEXA` to any participant who's never
 /// received it. Pooling is idempotent for a fixed group — re-running this on
 /// a cluster that's already fully pooled and rewarded grants nothing new —
@@ -1147,7 +1146,7 @@ pub fn paint_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), Str
     if geometry::in_any_island_territory(q, r) {
         return Err("cell belongs to an island".to_string());
     }
-    // F9.5 (dead-player reap): was `ctx.db.island().count()`, which only
+    // Was `ctx.db.island().count()`, which only
     // equalled the highest live slot number while slots were never reused —
     // once reaping can delete an island out of the middle of the sequence,
     // `count()` under-reports the true highest slot still in use, which
@@ -1180,7 +1179,7 @@ pub fn paint_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), Str
     Ok(())
 }
 
-/// F9.6 item 1 (eraser, decision 18): same validation as `paint_island_cell`
+/// Same validation as `paint_island_cell`
 /// (radius bound + ownership), same token charge — an erase costs a paint
 /// token just like a paint does, so it can't be used to bypass the rate
 /// limit. Deleting a cell that was never painted is a harmless no-op (the
@@ -1204,7 +1203,7 @@ pub fn erase_island_cell(ctx: &ReducerContext, q_local: i32, r_local: i32) -> Re
     Ok(())
 }
 
-/// F14 (decision 20, 2026-07-11): the community island at slot 0 — same
+/// The community island at slot 0 — same
 /// bound check and paint-token charge as `paint_island_cell`, but with NO
 /// ownership check, since it belongs to everyone. `client_connected`
 /// guarantees the slot-0 row exists before any client could plausibly reach
@@ -1239,7 +1238,7 @@ pub fn paint_community_cell(ctx: &ReducerContext, q_local: i32, r_local: i32) ->
     Ok(())
 }
 
-/// F14 (decision 20, 2026-07-11): erase counterpart to `paint_community_cell`
+/// Erase counterpart to `paint_community_cell`
 /// — same relationship `erase_island_cell` has to `paint_island_cell`.
 #[spacetimedb::reducer]
 pub fn erase_community_cell(ctx: &ReducerContext, q_local: i32, r_local: i32) -> Result<(), String> {
@@ -1254,7 +1253,7 @@ pub fn erase_community_cell(ctx: &ReducerContext, q_local: i32, r_local: i32) ->
     Ok(())
 }
 
-/// F9.6 item 1 (eraser, decision 18): same validation as `paint_margin_cell`
+/// Same validation as `paint_margin_cell`
 /// (canvas bound, not island territory), same token charge.
 #[spacetimedb::reducer]
 pub fn erase_margin_cell(ctx: &ReducerContext, q: i32, r: i32) -> Result<(), String> {
@@ -1354,7 +1353,7 @@ pub fn reset_account(ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }
 
-/// Author follow-up (2026-07-12): self-service counterpart to
+/// Self-service counterpart to
 /// `admin_delete_island` — a player deleting their OWN island/account,
 /// reusing the same `delete_island_and_owner` cleanup (island cells, likes,
 /// link clicks, inventory, the island row, and the `User` row itself). Unlike
@@ -1372,7 +1371,7 @@ pub fn delete_account(ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }
 
-/// F8: like a foreign island once (XP to the owner); the (island, liker)
+/// Like a foreign island once (XP to the owner); the (island, liker)
 /// uniqueness plan.md asks for is enforced here rather than at the DB level
 /// (see `IslandLike`'s comment). Self-likes are rejected — an island's own
 /// "info" popup never renders a functional Like button for its owner
@@ -1384,7 +1383,7 @@ pub fn like_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
     if island.owner == ctx.sender() {
         return Err("cannot like your own island".to_string());
     }
-    // F14 author reversal: the community island (ownerless, Identity::ZERO)
+    // Author reversal: the community island (ownerless, Identity::ZERO)
     // isn't a real player's island — no likes. Server-side backstop; both
     // clients already exclude it from the like gesture entirely.
     if island.owner == Identity::ZERO {
@@ -1401,7 +1400,7 @@ pub fn like_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// F8 follow-up (author-requested): undo a like. Reverts the owner's
+/// Follow-up (author-requested): undo a like. Reverts the owner's
 /// `XP_LIKE` grant too — without this, a like/unlike/like cycle would let
 /// one liker re-earn the owner XP indefinitely, since the uniqueness check
 /// in `like_island` only looks at the CURRENT `island_like` rows.
@@ -1427,7 +1426,7 @@ pub fn unlike_island(ctx: &ReducerContext, island_id: u32) -> Result<(), String>
     Ok(())
 }
 
-/// F9: set/replace the caller's own island's itch.io link — stored as just
+/// Set/replace the caller's own island's itch.io link — stored as just
 /// the numeric submission id (decision 14); clients render the full rate URL
 /// from it. Always allowed to overwrite (no confirm step needed server-side).
 #[spacetimedb::reducer]
@@ -1438,7 +1437,7 @@ pub fn set_island_link(ctx: &ReducerContext, rate_id: u32) -> Result<(), String>
     Ok(())
 }
 
-/// Author-requested: pins the caller's island border to their CURRENT brush
+/// Pins the caller's island border to their CURRENT brush
 /// color (not the seed hue the default border tracks), and un-hides it if
 /// `disable_island_border` had previously hidden it.
 #[spacetimedb::reducer]
@@ -1451,7 +1450,7 @@ pub fn set_island_border(ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }
 
-/// Author-requested: makes the caller's island border transparent. Leaves
+/// Makes the caller's island border transparent. Leaves
 /// `border_color` untouched (rather than clearing it back to the seed-hue
 /// default) so re-running `set_island_border` isn't the only way back —
 /// nothing currently reads `border_color` while `border_hidden` is set.
@@ -1463,7 +1462,7 @@ pub fn disable_island_border(ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }
 
-/// Author-requested: the visibility toggle (Shown/Hidden) is now a separate
+/// The visibility toggle (Shown/Hidden) is now a separate
 /// action from "set border to current color", so re-showing a previously
 /// hidden border must not also clobber whatever `border_color` was set
 /// before it was hidden.
@@ -1475,15 +1474,15 @@ pub fn show_island_border(ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }
 
-/// F10 (hexel.md's Admin section): "1 identity with a password that is
+/// "1 identity with a password that is
 /// admin" — grants `config.admin` to whoever proves knowledge of the
 /// password by hashing their input and comparing against
 /// `constants::ADMIN_PASSWORD_SHA256`. Idempotent for the current admin.
-/// F14 (decision 20, 2026-07-11): no longer relocates any island — slot 0 is
+/// No longer relocates any island — slot 0 is
 /// now the permanent, ownerless community island (see `paint_community_cell`
 /// below), so admin is purely a role (freeze/moderation powers) with no
 /// physical placement.
-/// Author follow-up (2026-07-12): admin gets neither an island nor a color
+/// Admin gets neither an island nor a color
 /// restriction. `client_connected` always hands a brand-new identity an
 /// island (admin's identity is no exception — it looked like an ordinary
 /// player right up until this call), so the FIRST successful claim tears
@@ -1529,7 +1528,7 @@ pub fn claim_admin(ctx: &ReducerContext, password: String) -> Result<(), String>
     Ok(())
 }
 
-/// F10 (hexel.md's Admin section): "can freeze the game so no one can
+/// "can freeze the game so no one can
 /// interact anymore" — the panic button `check_not_frozen` enforces against
 /// every player-facing mutating reducer. Admin-only, and deliberately not
 /// itself gated by `check_not_frozen`, so the admin can always unfreeze.
@@ -1569,7 +1568,7 @@ pub fn admin_set_xp_by_name(ctx: &ReducerContext, name: String, xp: u64) -> Resu
     Ok(())
 }
 
-/// F10 (hexel.md's Admin section): "can delete tiles" — a moderation
+/// "can delete tiles" — a moderation
 /// tool for offensive/abusive island art. Wipes every painted cell on the
 /// target island; the island row itself (ownership, likes, link, border,
 /// slot) is untouched, so the owner keeps their spot and can repaint from
@@ -1709,7 +1708,7 @@ fn delete_island_and_owner(ctx: &ReducerContext, island: &Island) {
     ctx.db.user().identity().delete(island.owner);
 }
 
-/// Author follow-up (2026-07-12): admin edit modal's Delete button — wipes
+/// Admin edit modal's Delete button — wipes
 /// the island AND its owner's account entirely (name/xp/inventory/
 /// identity gone, slot freed for reuse by `lowest_free_slot`). The community
 /// island (slot 0, `Identity::ZERO` owner) has no real account behind it and
@@ -1725,7 +1724,7 @@ pub fn admin_delete_island(ctx: &ReducerContext, island_id: u32) -> Result<(), S
     Ok(())
 }
 
-/// Author follow-up (2026-07-12): admin edit modal's Save button — directly
+/// Admin edit modal's Save button — directly
 /// sets the owner's display name/xp and the island's like count. Unlike
 /// `admin_set_xp_by_name` (a by-name CLI debug tool, kept as-is), this
 /// targets an exact `island_id`/owner so it works even when names collide,
@@ -1751,7 +1750,7 @@ pub fn admin_update_island(ctx: &ReducerContext, island_id: u32, name: String, l
     Ok(())
 }
 
-/// F9: credit an island's owner with `XP_LINK_CLICK` the first time a given
+/// Credit an island's owner with `XP_LINK_CLICK` the first time a given
 /// clicker opens its itch.io rate link; later re-opens by the same clicker
 /// are free (no repeat XP) via the `island_link_click` dedupe row. Self-clicks
 /// are rejected — the popup's own-island link opens the URL directly without
@@ -1776,7 +1775,7 @@ pub fn click_link(ctx: &ReducerContext, island_id: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// F11: click/tap-to-claim. `gift_id` names the row (both clients read it
+/// Click/tap-to-claim. `gift_id` names the row (both clients read it
 /// off the same `gift` table); the caller must be within `GIFT_CLAIM_DIST`
 /// of the gift's CURRENT drifted position (`gift_drift_pos`, the same
 /// formula both clients render with), checked against the caller's
@@ -1836,10 +1835,10 @@ pub fn claim_gift(ctx: &ReducerContext, gift_id: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// F9 time XP: grants `XP_TIME` to every user whose `last_seen` is still
+/// Time XP: grants `XP_TIME` to every user whose `last_seen` is still
 /// fresh (the same presence window used for cursor visibility/merge
 /// eligibility elsewhere) at each `TIME_XP_PERIOD_SECS` tick. Restricted to
-/// the scheduler itself, same as the F8 re-rank reducers.
+/// the scheduler itself, same as the re-rank reducers.
 #[spacetimedb::reducer]
 pub fn time_xp_tick(ctx: &ReducerContext, _arg: TimeXpSchedule) -> Result<(), String> {
     if ctx.sender() != ctx.database_identity() {
@@ -1862,7 +1861,7 @@ pub fn time_xp_tick(ctx: &ReducerContext, _arg: TimeXpSchedule) -> Result<(), St
     Ok(())
 }
 
-/// F9.5 item 10: reaps "drive-by" players — connected once, never actually
+/// Reaps "drive-by" players — connected once, never actually
 /// played, then disappeared — freeing their slot and deflating the total
 /// player count. A candidate must be offline, stale
 /// (`last_seen` older than `REAP_IDLE_SECS`), have an island with ZERO
@@ -1918,7 +1917,7 @@ pub fn reap_dead_players(ctx: &ReducerContext, _arg: ReapSchedule) -> Result<(),
     Ok(())
 }
 
-/// F11: repeating tick (same lazy-seeding pattern as the other schedules) —
+/// Repeating tick (same lazy-seeding pattern as the other schedules) —
 /// sweeps any `gift` row past its `expires_at`, then spawns a fresh one if
 /// none remain. Spawn point is uniform-in-disk over the currently-occupied
 /// world bound (same `occupied_rings`/`SLOT_SPACING` math
@@ -1964,7 +1963,7 @@ pub fn hexa_sweep(ctx: &ReducerContext, _arg: HexaSweepSchedule) -> Result<(), S
     Ok(())
 }
 
-/// F8 re-rank, step 1/2 (repeating, `RERANK_PERIOD_SECS`): only sets the
+/// Re-rank, step 1/2 (repeating, `RERANK_PERIOD_SECS`): only sets the
 /// countdown clients render, then schedules the actual sort
 /// `RERANK_WARNING_SECS` later. Restricted to the scheduler itself — see the
 /// SDK's documented pattern for scheduled reducers.
@@ -1980,7 +1979,7 @@ pub fn rerank_warn(ctx: &ReducerContext, _arg: RerankWarnSchedule) -> Result<(),
     Ok(())
 }
 
-/// F8 re-rank: re-sorts islands by likes desc, then painted-tile count desc
+/// Re-rank: re-sorts islands by likes desc, then painted-tile count desc
 /// (author-requested: the "hidden leaderboard" — hexel.md — should reward
 /// active painters, not just liked ones), then owner name asc (author-
 /// requested), ties finally by `created_at`, and rewrites `island.slot`
@@ -2025,7 +2024,7 @@ fn perform_rerank(ctx: &ReducerContext) {
     }
 }
 
-/// F8 re-rank, step 2/2 (one-shot, fired by `rerank_warn`): see
+/// Re-rank, step 2/2 (one-shot, fired by `rerank_warn`): see
 /// `perform_rerank` for the actual sort/reslot logic.
 #[spacetimedb::reducer]
 pub fn rerank_fire(ctx: &ReducerContext, _arg: RerankFireSchedule) -> Result<(), String> {
@@ -2036,7 +2035,7 @@ pub fn rerank_fire(ctx: &ReducerContext, _arg: RerankFireSchedule) -> Result<(),
     Ok(())
 }
 
-/// Author follow-up (2026-07-12): Config panel's "Refresh isle placement"
+/// Config panel's "Refresh isle placement"
 /// button — runs the same re-sort `rerank_fire` does, immediately, instead of
 /// waiting for the next periodic cycle. Does not touch the periodic timer
 /// itself (`rerank_warn_schedule`/`rerank_fire_schedule` keep ticking on
@@ -2058,7 +2057,7 @@ pub fn client_connected(ctx: &ReducerContext) {
     if ctx.db.config().id().find(0).is_none() {
         ctx.db.config().insert(Config { id: 0, frozen: false, admin: None, next_rerank_at: None });
     }
-    // F14 (decision 20): the community island, lazy-seeded the same way as
+    // The community island, lazy-seeded the same way as
     // `config` — slot 0 is never assigned to a real player (`client_connected`
     // below only ever picks "next free slot >= 1"), so `Identity::ZERO` is a
     // safe, permanent sentinel meaning "no owner" without needing to touch
@@ -2084,28 +2083,28 @@ pub fn client_connected(ctx: &ReducerContext) {
             scheduled_at: TimeDuration::from_micros(constants::RERANK_PERIOD_SECS * 1_000_000).into(),
         });
     }
-    // F9: same lazy-seeding pattern as the re-rank timer above.
+    // Same lazy-seeding pattern as the re-rank timer above.
     if ctx.db.time_xp_schedule().count() == 0 {
         ctx.db.time_xp_schedule().insert(TimeXpSchedule {
             scheduled_id: 0,
             scheduled_at: TimeDuration::from_micros(constants::TIME_XP_PERIOD_SECS * 1_000_000).into(),
         });
     }
-    // F9.5 item 10: same lazy-seeding pattern as the two schedules above.
+    // Same lazy-seeding pattern as the two schedules above.
     if ctx.db.reap_schedule().count() == 0 {
         ctx.db.reap_schedule().insert(ReapSchedule {
             scheduled_id: 0,
             scheduled_at: TimeDuration::from_micros(constants::REAP_PERIOD_SECS * 1_000_000).into(),
         });
     }
-    // F11: same lazy-seeding pattern as the schedules above.
+    // Same lazy-seeding pattern as the schedules above.
     if ctx.db.gift_schedule().count() == 0 {
         ctx.db.gift_schedule().insert(GiftSchedule {
             scheduled_id: 0,
             scheduled_at: TimeDuration::from_micros(constants::GIFT_SPAWN_PERIOD_SECS * 1_000_000).into(),
         });
     }
-    // F13: same lazy-seeding pattern as the schedules above.
+    // Same lazy-seeding pattern as the schedules above.
     if ctx.db.hexa_sweep_schedule().count() == 0 {
         ctx.db.hexa_sweep_schedule().insert(HexaSweepSchedule {
             scheduled_id: 0,
@@ -2143,9 +2142,9 @@ pub fn client_connected(ctx: &ReducerContext) {
         from_gift: false,
     });
 
-    // Slot 0 is reserved for the (not yet implemented, P2/F10) admin island
+    // Slot 0 is reserved for the (not yet implemented, P2/) admin island
     // at the world center — the first real player must start at slot 1.
-    // F9.5 (dead-player reap): was `count() + 1`, which only ever assigned a
+    // Was `count() + 1`, which only ever assigned a
     // genuinely free slot while slots were never reused (no gaps possible).
     // Once reaping can delete an island out of the middle of the sequence,
     // `count()` under-counts and this would hand out a slot a still-live

@@ -36,23 +36,23 @@ pub mod constants {
     /// slider never offers a value the server would reject.
     pub const HUE_TOLERANCE: i32 = 7;
 
-    /// F11 (flying gift): world-unit radius of the small circular drift
+    /// World-unit radius of the small circular drift
     /// around the gift's spawn point. Shared because both clients render
     /// the drift AND the server's `claim_gift` validates distance against
     /// that same live position — see `gift_drift_pos` in `world.rs`/the
     /// server's mirrored copy.
     pub const GIFT_DRIFT_RADIUS: f32 = 1.2;
-    /// F11: seconds per full drift loop. Shared for the same reason as
+    /// Seconds per full drift loop. Shared for the same reason as
     /// `GIFT_DRIFT_RADIUS`.
     pub const GIFT_DRIFT_PERIOD_SECS: f32 = 5.0;
-    /// F11: max world-unit distance from the gift's CURRENT drifted
+    /// Max world-unit distance from the gift's CURRENT drifted
     /// position (not just its spawn point) a claim is accepted from —
     /// enforced server-side in `claim_gift`, and reused client-side as both
     /// the click/tap hitbox and the visual affordance radius, so "how close
     /// counts" always means the same thing on both sides.
     pub const GIFT_CLAIM_DIST: f32 = 3.0;
 
-    /// F13 (Hexa event): cursors needed in the six fixed world-centre slots
+    /// Cursors needed in the six fixed world-centre slots
     /// to ignite.
     /// Shared because the client mirrors the server's own detection to
     /// decide which cursors to snap onto hexagon-vertex render positions —
@@ -64,10 +64,10 @@ pub mod constants {
     /// fixed central formation. Ordinary merging has its own independent
     /// cursor-to-cursor distance.
     pub const HEXA_RADIUS: f32 = 2.0;
-    /// F13: one-time-per-player Hexa bonus, granted the first time a player
+    /// One-time-per-player Hexa bonus, granted the first time a player
     /// is ever part of an ignition. Server-only (client just observes the
     /// XP appear on `User.xp`), kept here anyway next to `HEXA_SIZE`/
-    /// `HEXA_RADIUS` since all three are the F13 "canonical constants" set.
+    /// `HEXA_RADIUS` since all three are the "canonical constants" set.
     pub const XP_HEXA: u64 = 150;
 
     /// Saturation a new player's brush starts at — deliberately below the

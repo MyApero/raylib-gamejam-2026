@@ -1,4 +1,4 @@
-// F10 admin password: reads ADMIN_PASSWORD from the environment (or from a
+// Admin password: reads ADMIN_PASSWORD from the environment (or from a
 // gitignored .env next to this file — see .env.example) and bakes only its
 // SHA-256 digest into the build via ADMIN_PASSWORD_SHA256 (consumed by
 // src/lib.rs's `constants::ADMIN_PASSWORD_SHA256` through `env!`). The

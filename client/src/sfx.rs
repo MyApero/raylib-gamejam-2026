@@ -1,4 +1,4 @@
-//! F12: sound effects for the toast events (merge, XP gain, level up, new
+//! Sound effects for the toast events (merge, XP gain, level up, new
 //! color unlock, rejected action) plus a looping background theme and a
 //! grab-bag of meme sounds for gift opening. Bytes are embedded via
 //! `include_bytes!` rather than loaded from a file path at runtime, so

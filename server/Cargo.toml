@@ -12,12 +12,12 @@ log = "0.4"
 # wasm32-unknown-unknown's std does not link transcendental float functions
 # (sin/cos/atan2), needed by the hue-merge circular-mean formula.
 libm = "0.2"
-# F10: hashes the admin password so only its SHA-256 digest, never the
+# Hashes the admin password so only its SHA-256 digest, never the
 # plaintext, lives in this public repo.
 sha2 = { version = "0.10", default-features = false }
 shared = { path = "../shared" }
 
-# F10: build.rs hashes ADMIN_PASSWORD (from the env or a gitignored .env —
+# Build.rs hashes ADMIN_PASSWORD (from the env or a gitignored.env —
 # see .env.example) into ADMIN_PASSWORD_SHA256 at compile time.
 [build-dependencies]
 sha2 = { version = "0.10", default-features = false }

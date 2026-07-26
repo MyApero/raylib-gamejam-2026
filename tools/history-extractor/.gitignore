@@ -94,7 +94,7 @@ emsdk
 # itch submission package
 hexel-itch.zip
 
-# Secrets (F10: real ADMIN_PASSWORD lives here, never committed — see
+# Secrets (the real ADMIN_PASSWORD lives here, never committed — see
 # server/.env.example for the template)
 .env
 

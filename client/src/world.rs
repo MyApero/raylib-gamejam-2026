@@ -1,5 +1,5 @@
 //! Shared geometry/color contract for the hex-island world, consumed
-//! identically by the native (`main.rs`) and, from F5, web (`bin/web.rs`)
+//! identically by the native (`main.rs`) and, from web (`bin/web.rs`)
 //! clients so they can never drift on hex layout, slot placement, cell id
 //! packing or color decoding. Mirrors `server/src/lib.rs`'s `geometry`
 //! module exactly — see plan.md "Geometry spec" / "Color spec". The pieces
@@ -32,7 +32,7 @@ pub mod constants {
     /// Single source of truth in the `shared` crate — see its doc comment
     /// for why this is no longer hand-mirrored.
     pub use shared::constants::{START_SAT, START_VAL};
-    /// F9.5 item 6: floor on another player's cursor's zoomed-out render
+    /// Floor on another player's cursor's zoomed-out render
     /// scale (relative to its size at the default `ISLAND_FIT_ZOOM`) — lets
     /// it shrink with the camera like a world-space object would, but never
     /// past "still findable" small.
@@ -62,12 +62,12 @@ pub mod constants {
     /// `merge_with_cell`.
     pub const LONG_PRESS_HOLD: Duration = Duration::from_millis(400);
     pub const LONG_PRESS_TOL_PX: f32 = 8.0;
-    /// Author-requested: two clean single-clicks landing on the SAME
+    /// Two clean single-clicks landing on the SAME
     /// foreign island within this window (and without drifting past
     /// `LONG_PRESS_TOL_PX`) toggle a like/unlike instead of opening the
     /// info popup — see `pending_info_click`.
     pub const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
-    /// Author-reported (mobile hand-test, 2026-07-11): double-click-to-like
+    /// Double-click-to-like
     /// wasn't registering on a phone. Root cause: the canvas is fixed at
     /// 720x720 internal render resolution (`client/web/game.html`'s
     /// `width: 100vmin`), but on most phone screens that's displayed well
@@ -81,23 +81,23 @@ pub mod constants {
     /// not for the existing single-press hold-still/drag detection, which
     /// stays as-is.
     pub const DOUBLE_CLICK_TOL_PX: f32 = 28.0;
-    /// F9.5 item 7 / decision 17: how long the cursor must sit continuously
+    /// Decision 17: how long the cursor must sit continuously
     /// over a foreign island before its info popup opens on its own — long
     /// enough that a paint stroke's cursor briefly sweeping past a
     /// neighboring border doesn't flicker it open.
     pub const HOVER_OPEN_DELAY: Duration = Duration::from_millis(200);
-    /// F9.6 item 2: middle-click eyedropper — a clean middle press+release
+    /// Middle-click eyedropper — a clean middle press+release
     /// within this tolerance/window is a "click"; drifting past it (or
     /// holding past the window without release) is the existing
     /// middle-drag PAN gesture instead, which stays completely unaffected
     /// since it's driven separately by `is_mouse_button_down` every frame
     /// regardless of this.
     pub const MIDDLE_CLICK_TOL_PX: f32 = 8.0;
-    /// F9.6 item 7: how long the launch intro's ease from the whole-world
+    /// How long the launch intro's ease from the whole-world
     /// view to the player's island takes, absent any input (which skips it
     /// instantly). Re-tuned by hand-testing 1750ms -> 3000ms (see status.md).
     pub const INTRO_DURATION: Duration = Duration::from_millis(3000);
-    /// F9.6 item 8: on-screen hex size (world-unit radius 1.0 *
+    /// On-screen hex size (world-unit radius 1.0 *
     /// `camera.zoom`, in pixels) below which the per-tile outline pass is
     /// skipped — the author's "borderless far zoom" note picked ~4-6px, the
     /// executor settled on 5, later re-tuned by hand-testing to 20.
@@ -108,45 +108,45 @@ pub mod constants {
     /// LOD switch (drawing one hex instead of an island's 721 cells below a
     /// zoom threshold), which caused islands to visibly disappear rather
     /// than simplify when dezooming — removed in favor of always drawing
-    /// real cells and tuning the cull margin instead. Author-requested:
+    /// real cells and tuning the cull margin instead. Deliberate:
     /// shrunk from `ISLAND_RADIUS * 2.0 * 5.0` (150, generous anti-pop-in
     /// margin) to make the off-screen cull itself visibly observable while
     /// testing, then hand-tuned to `ISLAND_RADIUS * 1.5` (22.5) — tight
     /// enough to see the cull happen, with enough slack that an island's
     /// edge isn't clipped mid-pan/zoom.
     pub const VIEW_CULL_PAD: f32 = ISLAND_RADIUS as f32 * 1.5;
-    /// F9.6 item 6: keyboard pan speed, world units/sec at zoom 1.0
+    /// Keyboard pan speed, world units/sec at zoom 1.0
     /// (divided by the current zoom so it feels like a constant SCREEN
     /// speed, same trick as the border-thickness fix above). Q/E zoom rate
     /// is a fraction-per-second multiplier, chosen so a held key covers
     /// roughly the same range as a few mouse-wheel notches per second.
     pub const KEY_PAN_SPEED: f32 = 400.0;
     pub const KEY_ZOOM_RATE: f32 = 1.4;
-    /// Author-requested: the hovered-tile highlight's outline should "act
+    /// The hovered-tile highlight's outline should "act
     /// like the ilot border" — a constant SCREEN pixel width (divided by
     /// camera zoom at the draw site, same trick as the island border),
     /// instead of the fixed world-unit thickness it had before, which shrank
     /// under a pixel and vanished at low zoom.
     pub const HOVER_BORDER_PX: f32 = 2.0;
 
-    /// F11: reused directly as both the click/tap hitbox (world-space, not
+    /// Reused directly as both the click/tap hitbox (world-space, not
     /// converted from screen pixels, so "close enough" means the same thing
     /// here as it does server-side) and the visual affordance radius.
     pub use shared::constants::GIFT_CLAIM_DIST;
     pub use shared::constants::GIFT_DRIFT_PERIOD_SECS;
-    /// F11 (flying gift): single source of truth in the `shared` crate —
+    /// Single source of truth in the `shared` crate —
     /// both the server's `claim_gift` distance check and this client's
     /// drift rendering must derive the identical position/range from it.
     pub use shared::constants::GIFT_DRIFT_RADIUS;
 
-    /// F13: each snapped cursor is an equilateral wedge of the completed
+    /// Each snapped cursor is an equilateral wedge of the completed
     /// hexagon. A regular hexagon's circumradius equals its side length, so
     /// deriving the world radius from the cursor's screen-space side and
     /// the fixed formation zoom makes every cursor base coincide exactly
     /// with one polygon side.
     pub const HEXA_CURSOR_SIDE_PX: f32 = 24.0;
     pub const HEXA_VERTEX_RADIUS: f32 = HEXA_CURSOR_SIDE_PX / ISLAND_FIT_ZOOM;
-    /// F13: how long a display position takes to lerp to a newly (re)assigned
+    /// How long a display position takes to lerp to a newly (re)assigned
     /// hexagon vertex slot — instant snapping reads as jarring teleportation
     /// once six cursors converge; this smooths it into a settle.
     pub const HEXA_SNAP_LERP_SECS: f32 = 0.35;
@@ -255,7 +255,7 @@ mod tests {
     }
 }
 
-/// F14 (decision 20): the community island's sentinel owner
+/// The community island's sentinel owner
 /// (`Identity::ZERO` server-side), fully-padded hex as it compares after
 /// `normalize_identity_hex`. Single source of truth for web (native keeps
 /// comparing typed `Identity::ZERO` directly, never this string).
@@ -263,7 +263,7 @@ mod tests {
 pub const COMMUNITY_OWNER_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
-/// F14 (decision 20): the community island's unpainted tiles still render
+/// The community island's unpainted tiles still render
 /// white, marking it as the shared "Free Isle" canvas at a glance. Ordinary
 /// islands no longer get a gray placeholder — an unpainted tile is simply not
 /// drawn, so the map's own background shows through and the island's border
@@ -326,7 +326,7 @@ pub fn eyedropper_pick(
 /// half of `t`.
 pub use shared::ease_in_out_cubic;
 
-/// F11: flying-gift world position — a small circular drift around the
+/// Flying-gift world position — a small circular drift around the
 /// spawn point, a pure function of elapsed seconds since `Gift.spawned_at`.
 /// Mirrors the server's own `gift_drift_pos` exactly (must derive the
 /// identical position from the same inputs — no continuous position sync,
@@ -363,7 +363,7 @@ pub fn cube_round(qf: f32, rf: f32) -> (i32, i32) {
 /// E, SE, NW, W, SW, NE.
 pub const DIRECTIONS: [(i32, i32); 6] = [(1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1)];
 
-/// Hex-of-hexes tiling basis (F9.5) — mirrors `server::geometry`'s
+/// Hex-of-hexes tiling basis — mirrors `server::geometry`'s
 /// `SLOT_PLACEMENT_RADIUS`/`SLOT_U`/`SLOT_V`/`SLOT_DET` exactly; see their
 /// comments there for why this (not a naive per-axis scale) is what makes
 /// neighboring islands share a flat edge, and why the placement radius is
@@ -519,7 +519,7 @@ pub fn draw_fps_grey(d: &mut impl RaylibDraw, x: i32, y: i32, fps: u32) {
     d.draw_text(&format!("{fps} FPS"), x, y, 12, Color::GRAY);
 }
 
-/// F9.6 item 3: heart icon for the island popup/tooltip's like count —
+/// Heart icon for the island popup/tooltip's like count —
 /// filled (solid red) if the viewer has already liked the island, outline
 /// (just the stroke) otherwise. Two lobes (circles) plus a downward-pointing
 /// triangle, the standard heart-from-primitives composition.
@@ -542,7 +542,7 @@ pub fn draw_heart(d: &mut impl RaylibDraw, center: Vector2, size: f32, filled: b
     }
 }
 
-/// F9.6 item 1: small eraser badge near the screen-space cursor, shown
+/// Small eraser badge near the screen-space cursor, shown
 /// whenever paint/erase mode is toggled on — distinct from `draw_plus_hint`
 /// (which only ever appears in paint mode, hovering a foreign tile), so the
 /// two never compete for the same corner in practice.
@@ -559,7 +559,7 @@ pub fn draw_eraser_badge(d: &mut impl RaylibDraw, m: Vector2) {
     );
 }
 
-/// F11: world-space icon for the flying-gift pickup — a rotated square
+/// World-space icon for the flying-gift pickup — a rotated square
 /// ("box") with a light cross ribbon, gently pulsing. Built from the same
 /// primitives as `draw_hex`/`draw_plus_hint` (`draw_poly` + `draw_line_ex`)
 /// rather than raylib's rectangle calls, since nothing else in this file
@@ -604,7 +604,7 @@ pub fn draw_hold_ring(d: &mut impl RaylibDraw, m: Vector2, frac: f32) {
 
 /// Filled+outlined flat-top hex at world `center` with world-unit `radius`
 /// (normally 1.0; camera zoom handles on-screen scale). `line: None` skips
-/// the outline pass entirely — F9.6 item 8 (borderless far zoom): once the
+/// the outline pass entirely — borderless far zoom: once the
 /// on-screen hex size drops below a few pixels the outline is both a wasted
 /// draw call and visual noise (the fill alone reads as a painting at that
 /// distance), so the caller passes `None` past its own zoom threshold.
@@ -628,7 +628,7 @@ pub fn draw_cursor(d: &mut impl RaylibDraw, m: Vector2, color: Color, locked: bo
     draw_cursor_scaled(d, m, color, 1.0, locked);
 }
 
-/// F9.5 item 6: other players' cursors used to always render at the same
+/// Other players' cursors used to always render at the same
 /// fixed screen size as `draw_cursor`'s 1.0 scale, which reads as roughly
 /// tile-sized at the default zoom players connect at but towers over the
 /// tiles once zoomed out far — `scale` lets the caller shrink/grow it with
@@ -721,7 +721,7 @@ fn draw_cursor_triangle(
     d.draw_line_ex(right, tip, outline_px, Color::BLACK);
 }
 
-/// F12: small name label glued above another player's cursor tip — same
+/// Small name label glued above another player's cursor tip — same
 /// small-box-near-cursor visual language as `ui::draw_button_tooltip`. This
 /// is also the render surface for the backlog's "Merge with me!" center-bot
 /// callout: the bot just sets its display name to that string over
@@ -749,14 +749,14 @@ pub fn draw_cursor_label(d: &mut impl RaylibDraw, tip: Vector2, name: &str, scal
     );
 }
 
-/// F13: regular-hexagon vertex slots around `center`, `count` of them.
+/// Regular-hexagon vertex slots around `center`, `count` of them.
 /// Client-only cosmetic — `HEXA_VERTEX_RADIUS` is picked purely for how the
 /// shape reads on screen. The server caps the central formation at six.
 /// `phase` (radians) rotates the whole ring — slot 0 sits straight up only
 /// at `phase` 0; callers now pass `count.max(6)` since seats are no longer
 /// contiguous (sticky angle-based server seating, see `refresh_central_hexa`)
 /// and a partial cluster can hold non-contiguous slots like {0, 2, 5}.
-/// Author follow-up: vertex ASSIGNMENT (which slot a given member renders
+/// Vertex ASSIGNMENT (which slot a given member renders
 /// at) is server-authoritative (`HexaCluster.vertex_index`), so both
 /// clients read the identical slot for a given member instead of each
 /// re-sorting the group themselves — this function only turns a
@@ -810,7 +810,7 @@ pub fn hexa_cluster_frame<K: Clone + Eq + std::hash::Hash>(
     (frame, vertices)
 }
 
-/// F13: advances the previous frame's persisted per-member DISPLAY position
+/// Advances the previous frame's persisted per-member DISPLAY position
 /// toward this frame's hexagon-vertex targets (read straight off the
 /// server's `hexa_cluster` rows — see that table's doc comment) — frame-rate
 /// independent exponential smoothing, reaching `HEXA_SNAP_LERP_SECS`-ish
@@ -848,7 +848,7 @@ pub fn hexa_advance_display<K: Clone + Eq + std::hash::Hash>(
     next
 }
 
-/// F13: connects a cluster's hexagon vertex slots pairwise — world-space, so
+/// Connects a cluster's hexagon vertex slots pairwise — world-space, so
 /// it naturally pans/zooms with everything else (same as `draw_gift_icon`).
 /// `ignited` (member_count >= `HEXA_SIZE`) draws it bright and thick; below
 /// that, a faint preview. With sticky angle-based seating, `vertices` is now
