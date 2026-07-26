@@ -259,7 +259,6 @@ fn have_hue(ctx: &DbConnection, me: Identity, hue: u16) -> bool {
 fn pick_color_at(
     ctx: &DbConnection,
     ui_state: &mut ui::UiState,
-    sfx: Option<&sfx::Sfx<'_>>,
     me: Identity,
     world_q: i32,
     world_r: i32,
@@ -281,10 +280,8 @@ fn pick_color_at(
             true
         }
         world::EyedropperPick::Locked => {
+            // Not an error — the long-press this arms is how you unlock it.
             ui_state.show_info_toast("not unlocked — long-press to merge".to_string());
-            if let Some(s) = sfx {
-                s.error.play();
-            }
             false
         }
         world::EyedropperPick::Empty => {
@@ -1430,7 +1427,7 @@ fn main() {
         {
             if let Some(me) = me {
                 let (wq, wr) = world::world_to_axial(mouse_world);
-                if pick_color_at(&ctx, &mut ui_state, sfx.as_ref(), me, wq, wr) {
+                if pick_color_at(&ctx, &mut ui_state, me, wq, wr) {
                     if ui_state.finish_eyedropper() {
                         let _ = ctx.reducers.set_lock(false);
                     }
@@ -1493,7 +1490,7 @@ fn main() {
                     if (dx * dx + dy * dy).sqrt() <= MIDDLE_CLICK_TOL_PX {
                         if let Some(me) = me {
                             let (wq, wr) = world::world_to_axial(mouse_world);
-                            if pick_color_at(&ctx, &mut ui_state, sfx.as_ref(), me, wq, wr) {
+                            if pick_color_at(&ctx, &mut ui_state, me, wq, wr) {
                                 if ui_state.finish_eyedropper() {
                                     let _ = ctx.reducers.set_lock(false);
                                 }
@@ -1520,8 +1517,9 @@ fn main() {
             // block above (a plain tap opens the modal) — it must not also
             // arm this gesture, which would leave `pending_info_click`
             // resolving into the old open-the-link behavior on release.
-            if ui_state.tool != ui::Tool::Eyedropper
-                && ui_state.tool != ui::Tool::AdminEdit
+            // `Eyedropper` arms this too: sampling a hue you don't own is not
+            // an error, it's an invitation to hold and merge for it.
+            if ui_state.tool != ui::Tool::AdminEdit
                 && ui_state.tool != ui::Tool::IslandExport
                 && !panning
                 && over_map_area
@@ -1543,11 +1541,14 @@ fn main() {
                     // like, matching the hover exclusion below. Its sentinel
                     // owner would otherwise pass every `owner != me` check
                     // like any other foreign island.
+                    // The eyedropper's own tap consumes the press, so it must
+                    // not also queue a popup / double-click like.
                     info_target: island_at(&ctx, wq, wr)
                         .filter(|(island, _, _)| {
                             island.owner != me && island.owner != Identity::ZERO
                         })
-                        .map(|(island, _, _)| island.id),
+                        .map(|(island, _, _)| island.id)
+                        .filter(|_| ui_state.tool != ui::Tool::Eyedropper),
                     fired: false,
                 });
             }
@@ -2300,7 +2301,12 @@ fn main() {
         if export_subject.is_none() && !replay_mode {
             if ui_state.tool == ui::Tool::Erase {
                 world::draw_eraser_badge(&mut d, mouse_screen);
-            } else if hover_takeable && matches!(ui_state.tool, ui::Tool::Paint | ui::Tool::Erase) {
+            } else if hover_takeable
+                && matches!(
+                    ui_state.tool,
+                    ui::Tool::Paint | ui::Tool::Erase | ui::Tool::Eyedropper
+                )
+            {
                 // Move tool: left-drag pans instead of merging, so the "+"
                 // take-hint (which promises a long-press merge) would mislead.
                 world::draw_plus_hint(&mut d, mouse_screen);

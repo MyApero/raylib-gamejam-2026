@@ -37,6 +37,8 @@ static GIFT_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/assets/gift");
 
 pub struct Sfx<'aud> {
     pub merge: Sound<'aud>,
+    // Unused since a locked-eyedropper pick stopped counting as a rejection.
+    #[allow(dead_code)]
     pub error: Sound<'aud>,
     pub xp: Sound<'aud>,
     pub levelup: Sound<'aud>,

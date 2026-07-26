@@ -809,7 +809,6 @@ fn have_hue(tables: &Tables, me: &str, hue: u16) -> bool {
 fn pick_color_at(
     tables: &Tables,
     ui_state: &mut ui::UiState,
-    sfx: Option<&sfx::Sfx<'_>>,
     me: &str,
     world_q: i32,
     world_r: i32,
@@ -826,10 +825,8 @@ fn pick_color_at(
             true
         }
         world::EyedropperPick::Locked => {
+            // Not an error — the long-press this arms is how you unlock it.
             ui_state.show_info_toast("not unlocked — long-press to merge".to_string());
-            if let Some(s) = sfx {
-                s.error.play();
-            }
             false
         }
         world::EyedropperPick::Empty => {
@@ -2610,7 +2607,6 @@ fn frame(state: &mut State) {
             if pick_color_at(
                 &state.tables,
                 &mut state.ui_state,
-                state.sfx.as_ref(),
                 me,
                 wq,
                 wr,
@@ -2671,7 +2667,6 @@ fn frame(state: &mut State) {
                         if pick_color_at(
                             &state.tables,
                             &mut state.ui_state,
-                            state.sfx.as_ref(),
                             me,
                             wq,
                             wr,
@@ -2695,8 +2690,9 @@ fn frame(state: &mut State) {
     } else if let Some(me) = me {
         // `AdminEdit` is handled entirely by its own
         // block above — mirrors `main.rs`'s exclusion here.
-        if state.ui_state.tool != ui::Tool::Eyedropper
-            && state.ui_state.tool != ui::Tool::AdminEdit
+        // `Eyedropper` arms this too: sampling a hue you don't own is not an
+        // error, it's an invitation to hold and merge for it.
+        if state.ui_state.tool != ui::Tool::AdminEdit
             && state.ui_state.tool != ui::Tool::IslandExport
             && !panning
             && over_map_area
@@ -2717,7 +2713,10 @@ fn frame(state: &mut State) {
                 // — no info popup, no like, matching the hover exclusion
                 // below. Its sentinel owner would otherwise pass this
                 // `owner_hex != me` check like any other foreign island.
+                // The eyedropper's own tap consumes the press, so it must not
+                // also queue a popup / double-click like.
                 info_target: island_at(&state.tables, wq, wr)
+                    .filter(|_| state.ui_state.tool != ui::Tool::Eyedropper)
                     .filter(|&(id, _, _)| {
                         state.tables.islands.get(&id).is_some_and(|isl| {
                             isl.owner_hex != me && isl.owner_hex != world::COMMUNITY_OWNER_HEX
@@ -3522,7 +3521,11 @@ fn frame(state: &mut State) {
     if export_subject.is_none() && !replay_mode {
         if state.ui_state.tool == ui::Tool::Erase {
             world::draw_eraser_badge(&mut d, mouse_screen);
-        } else if hover_takeable && matches!(state.ui_state.tool, ui::Tool::Paint | ui::Tool::Erase)
+        } else if hover_takeable
+            && matches!(
+                state.ui_state.tool,
+                ui::Tool::Paint | ui::Tool::Erase | ui::Tool::Eyedropper
+            )
         {
             // Move tool: left-drag pans instead of merging, so the "+"
             // take-hint (which promises a long-press merge) would mislead.
