@@ -655,12 +655,22 @@
       // only ever runs from a replay/export button.
       //
       // Served precompressed (see build-web.sh + the Caddyfile), so what
-      // actually crosses the wire is ~13 MiB — small enough that bin/web.rs
+      // actually crosses the wire is a few hundred KiB — small enough that bin/web.rs
       // simply starts this once the title screen is up and lets it land
       // while the player reads the menu, rather than making them wait at
       // the point of export.
       (function () {
-        var HISTORY_PATH = '/hexel-tile-history.bin';
+        // Two different namespaces that happen to share a name, kept apart
+        // deliberately. The URL is RELATIVE to this page: itch.io serves the
+        // unzipped folder from a subpath (html-classic.itch.zone/html/<id>/),
+        // where a root-absolute '/hexel-tile-history.bin' resolves to the CDN
+        // root and 404s. The web zone serves the game at its domain root, so
+        // both forms work there — which is why this only ever broke on itch.
+        var HISTORY_URL = 'hexel-tile-history.bin';
+        // The MEMFS destination, which must stay absolute: it is the path
+        // `RECOVERED_HISTORY_PATH` in bin/web.rs opens inside emscripten's
+        // filesystem, and has nothing to do with where the bytes came from.
+        var HISTORY_FS_PATH = '/hexel-tile-history.bin';
         var state = 'idle';
         var message = '';
 
@@ -680,7 +690,7 @@
           // ?v= rather than no-store: the bytes are immutable for a given
           // build, and the Caddyfile marks them cacheable for a year, so a
           // second visit should hit cache instead of re-downloading.
-          fetch(HISTORY_PATH + '?v=' + BUILD_VERSION)
+          fetch(HISTORY_URL + '?v=' + BUILD_VERSION)
 .then(function (r) {
               if (!r.ok) throw new Error('HTTP ' + r.status);
               return r.arrayBuffer();
@@ -690,7 +700,7 @@
               // Straight into MEMFS at the path RECOVERED_HISTORY_PATH
               // opens. Same filesystem the preload used to populate, so
               // the Rust side is unchanged from here on.
-              FS.writeFile(HISTORY_PATH, bytes);
+              FS.writeFile(HISTORY_FS_PATH, bytes);
               progress = 1;
               state = 'ready';
             })
