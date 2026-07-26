@@ -5,6 +5,14 @@
     <title>hexel — raylib 6.0 + SpacetimeDB</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
+      /* One unit of the game's internal 720x720 render space, in CSS pixels.
+         The canvas always renders at 720x720 internally but is *displayed* at
+         100vmin, so a DOM overlay sized in raw px sits at a different apparent
+         scale than the same number drawn in-game — on a 390px-wide phone the
+         game's 14px text lands at ~7.6 CSS px while a 14px overlay stays 14.
+         Sizing the overlay in these units keeps it locked to the game's own
+         proportions at every viewport size. */
+      :root { --game-px: calc(100vmin / 720); }
       body { margin: 0; overflow: hidden; background-color: black; }
       canvas#canvas {
         border: 0 none;
@@ -27,10 +35,50 @@
         overflow-y: auto;
         margin: 0;
       }
+      /* Export panel. Mirrors the in-game modal in ui.rs `draw_island_export`
+         — same panel fill (24,24,30), same 2px (90,90,100) border, same
+         button colours — so it reads as part of the game rather than browser
+         chrome. It has to be DOM rather than canvas: the GIF encoder samples
+         the framebuffer and the WebM recorder captures the canvas stream, so
+         anything drawn in-game would be baked into the exported file. */
+      #export-panel {
+        position: fixed;
+        left: 50%;
+        bottom: 3vmin;
+        transform: translateX(-50%);
+        z-index: 9999;
+        display: none;
+        /* Every metric below is in game pixels, so the panel keeps the same
+           apparent size as the in-game modal it mirrors. 14 matches the
+           `draw_text` size ui.rs uses for the export panel's own body text. */
+        min-width: calc(250 * var(--game-px));
+        padding: calc(12 * var(--game-px)) calc(14 * var(--game-px));
+        background: rgb(24, 24, 30);
+        border: max(1px, calc(2 * var(--game-px))) solid rgb(90, 90, 100);
+        color: #f5f5f5;
+        font-family: monospace;
+        font-size: calc(14 * var(--game-px));
+        text-align: center;
+      }
+      #export-panel-track {
+        margin-top: calc(10 * var(--game-px));
+        height: calc(8 * var(--game-px));
+        background: rgb(36, 36, 44);
+        border: max(1px, calc(1 * var(--game-px))) solid rgb(70, 70, 80);
+      }
+      #export-panel-fill {
+        height: 100%;
+        width: 0;
+        background: rgb(250, 190, 90);
+      }
     </style>
   </head>
   <body>
     <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    <div id="export-panel">
+      <div id="export-panel-label"></div>
+      <div id="export-panel-track"><div id="export-panel-fill"></div></div>
+    </div>
     <pre id="output"></pre>
     <script>
       // Cache-busting: browsers (and some CDNs) aggressively cache
@@ -40,7 +88,7 @@
       // a code bug (heart rendering already lives in shared ui.rs). Bump
       // BUILD_VERSION on every deploy so both the script tag below and the
       // wasm fetch (via Module.locateFile) get a fresh URL each time.
-      var BUILD_VERSION = '20260716a';
+      var BUILD_VERSION = '20260726o';
       var Module = {
         canvas: document.getElementById('canvas'),
         locateFile: function (path) {
@@ -61,7 +109,7 @@
       Module.printErr = Module.print;
     </script>
     <script>
-      // F9.5 item 8: Safari (macOS) trackpad scroll zooms in huge,
+      // Safari (macOS) trackpad scroll zooms in huge,
       // uncontrollable steps. The game's zoom step is `wheel_delta * 0.1`
       // (client/src/main.rs / bin/web.rs), fed by whatever raw `deltaY` the
       // browser reports through Emscripten's GLFW3 wheel handling — Chrome
@@ -138,31 +186,52 @@
         // not the same origin, so the public deploy can't reuse the page's
         // own hostname the way local/LAN dev does.
         var PUBLIC_HOST = 'spacetime.mister-esman.uk';
-        var DB = 'hexel';
+        var params = new URLSearchParams(window.location.search);
+        // `?db=` points the page at another database on the same instance,
+        // mirroring the native client's HEXEL_DB. Restricted to the safe
+        // name charset because it is interpolated straight into the socket
+        // URL path. Unset (or malformed) falls back to production.
+        var DB_DEFAULT = 'hexel';
+        var DB = (function () {
+          var requested = params.get('db');
+          return requested && /^[A-Za-z0-9_-]+$/.test(requested) ? requested : DB_DEFAULT;
+        })();
         var PROTOCOL = 'v1.json.spacetimedb';
-        var TABLES = [
+        // Split in two so the title screen isn't held up by the map. These
+        // are all small — a few thousand rows total — and carry everything
+        // the title and the local player's own state need, so Draw unlocks
+        // as soon as this snapshot lands. Mirrors main.rs's STARTUP_TABLES.
+        var STARTUP_TABLES = [
           'SELECT * FROM config',
           'SELECT * FROM user',
           'SELECT * FROM inventory',
           'SELECT * FROM island',
           'SELECT * FROM island_like',
-          'SELECT * FROM island_cell',
-          'SELECT * FROM margin_cell',
           'SELECT * FROM gift',
           'SELECT * FROM hexa_event',
           'SELECT * FROM hexa_cluster',
           'SELECT * FROM merge_event',
         ];
+        // The painted map: tens of thousands of rows, ~96% of the payload,
+        // and not drawn at all while the title is up (it shows a baked
+        // image). Subscribed immediately, but nothing waits on it.
+        var WORLD_TABLES = [
+          'SELECT * FROM island_cell',
+          'SELECT * FROM margin_cell',
+        ];
         // localStorage (not sessionStorage) so identity survives inside the
-        // itch.io iframe and across tab reloads (F6 recovery path). Same
+        // itch.io iframe and across tab reloads (recovery path). Same
         // origin normally means one shared identity across every open
         // tab/frame — the local two-player test harness (index.html) opts
         // out of that by loading this page as `game.html?slot=1|2`, which
         // namespaces the storage key so its two iframes get distinct
-        // identities despite being same-origin.
-        var params = new URLSearchParams(window.location.search);
+        // identities despite being same-origin. A non-default `?db=` is
+        // namespaced the same way: an identity only means something on the
+        // database that issued it, so pointing at another one must not
+        // clobber the production token sitting in the same localStorage.
         var slot = params.get('slot');
-        var TOKEN_KEY = slot ? 'stdb_token_slot' + slot : 'stdb_token';
+        var TOKEN_KEY = (slot ? 'stdb_token_slot' + slot : 'stdb_token')
+                      + (DB === DB_DEFAULT ? '' : '_db_' + DB);
 
         var queue = [];
         var status = 'connecting';
@@ -170,7 +239,7 @@
         var ws = null;
         var requestId = 10;
         var failedBeforeOpen = 0;
-        // Author follow-up (2026-07-12): set by a rejected trial import
+        // Set by a rejected trial import
         // connection (see `importToken` below), read-once by `frame()`, same
         // pattern as `queue`.
         var importError = null;
@@ -197,8 +266,30 @@
             opened = true;
             failedBeforeOpen = 0;
             status = 'open';
+            // SubscribeMulti, NOT Subscribe: a second `Subscribe` REPLACES
+            // the whole query set rather than adding to it (it is documented
+            // that way in client-api-messages), so sending the world set
+            // second silently unsubscribed every small table. They kept the
+            // rows from their initial snapshot and then never updated again —
+            // cursors frozen where they were, and your own brush colour stuck
+            // at whatever it was when you connected, because both read the
+            // `user` table. SubscribeMulti is additive, keyed by query_id.
+            // In this order: the wasm side treats the first snapshot of a
+            // connection as the one that resets local tables, so the light
+            // set must arrive first.
             ws.send(JSON.stringify({
-              Subscribe: { query_strings: TABLES, request_id: 1 },
+              SubscribeMulti: {
+                query_strings: STARTUP_TABLES,
+                request_id: 1,
+                query_id: { id: 1 },
+              },
+            }));
+            ws.send(JSON.stringify({
+              SubscribeMulti: {
+                query_strings: WORLD_TABLES,
+                request_id: 2,
+                query_id: { id: 2 },
+              },
             }));
           };
           ws.onmessage = function (ev) {
@@ -238,12 +329,18 @@
           frame: function () {
             var err = importError;
             importError = null;
+            var returned = !!window.hexelPageReturned;
+            window.hexelPageReturned = false;
+            var mapReady = !!window.hexelTitleMapReady;
+            window.hexelTitleMapReady = false;
             return JSON.stringify({
               status: status,
               identity: identity,
               now_micros: Date.now() * 1000,
               msgs: queue.splice(0),
               import_error: err,
+              page_returned: returned,
+              title_map_ready: mapReady,
             });
           },
           callReducer: function (name, argsJson) {
@@ -253,7 +350,7 @@
               }));
             }
           },
-          // F6 account portability: the stored token IS the reconnection
+          // Account portability: the stored token IS the reconnection
           // identifier (see plan.md decision 11), so "copy ID" really copies
           // the token. Clipboard writes need a secure context + user
           // gesture, both satisfied here (https/localhost, called from a
@@ -272,7 +369,7 @@
               fallback();
             }
           },
-          // Author follow-up (2026-07-12): the old version stored the pasted
+          // The old version stored the pasted
           // token and reloaded immediately — if the token turned out to be
           // invalid/expired, the reload's own `connect()` would fail twice
           // and silently drop it (see `failedBeforeOpen` above), leaving the
@@ -348,7 +445,7 @@
           // moving hundreds of megabytes of frames through wasm. WebM is
           // broadly supported by Chromium and Firefox; it can be converted
           // to GIF/MP4 afterwards when a different delivery format is needed.
-          startReplayRecording: function () {
+          startReplayRecording: function (scope) {
             var api = this;
             var canvas = document.getElementById('canvas');
             if (!canvas || !canvas.captureStream || !window.MediaRecorder) {
@@ -356,6 +453,7 @@
               return false;
             }
             if (this.replayRecorder && this.replayRecorder.state !== 'inactive') return false;
+            var filename = 'hexel-' + (scope === 'world' ? 'world' : 'island') + '-timelapse.webm';
             var mimeType = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
               .find(function (type) { return MediaRecorder.isTypeSupported(type); });
             var chunks = [];
@@ -379,7 +477,7 @@
                 return;
               }
               var blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' });
-              api.downloadBlob(blob, 'hexel-island-timelapse.webm');
+              api.offerExportDownload(blob, filename, 'video');
             };
             // One final dataavailable event is emitted by stop(), so no
             // periodic chunks are required before the eight-second export
@@ -391,10 +489,54 @@
             var recorder = this.replayRecorder;
             if (recorder && recorder.state !== 'inactive') recorder.stop();
           },
+          // --- Export panel (markup is in the document; see the #export-panel
+          // CSS for why this is DOM and not drawn in-game) ------------------
+          exportPanel: function () {
+            return {
+              root: document.getElementById('export-panel'),
+              label: document.getElementById('export-panel-label'),
+              fill: document.getElementById('export-panel-fill'),
+              track: document.getElementById('export-panel-track'),
+            };
+          },
+          showExportProgress: function (percent, label) {
+            var el = this.exportPanel();
+            if (!el.root) return false;
+            el.root.style.display = 'block';
+            el.track.style.display = 'block';
+            el.label.textContent = label;
+            el.fill.style.width = Math.max(0, Math.min(100, percent)) + '%';
+            return true;
+          },
+          hideExportProgress: function () {
+            var el = this.exportPanel();
+            // Never yank the panel out from under a finished capture that is
+            // still waiting to be downloaded — `offerExportDownload` owns the
+            // panel from that point until the user clicks (or dismisses).
+            if (el.root && !this.pendingExport) el.root.style.display = 'none';
+            return true;
+          },
+          // Holds the finished capture until the player asks for it, instead
+          // of firing a download the moment recording stops. Deliberate:
+          // an export landing in the downloads folder unannounced is jarring,
+          // and there is no way to decline the file once it is written.
+
+          // Save as soon as the capture is assembled. Recording is only ever
+          // started by the overlay's Download button (replay.rs), so by the
+          // time this runs the player has already asked for the file — there
+          // is nothing left to confirm. The WebM recorder finishes
+          // asynchronously, which is why this is a callback rather than a
+          // value returned to wasm.
+          offerExportDownload: function (blob, filename) {
+            var el = this.exportPanel();
+            if (el.root) el.root.style.display = 'none';
+            return this.downloadBlob(blob, filename);
+          },
+
           // The compact GIF bytes are encoded in wasm by raylib's bundled
           // msf_gif implementation. Copy them out of wasm memory before the
           // Rust caller frees the encoder result, then download normally.
-          downloadReplayGif: function (ptr, length) {
+          downloadReplayGif: function (ptr, length, scope) {
             // Emscripten keeps HEAPU8 in its generated script scope. The
             // normal build exposes it globally; Module.HEAPU8 is supported
             // too for builds that explicitly export runtime methods.
@@ -404,8 +546,75 @@
             if (!ptr || !length || !heap) return false;
             var bytes = heap.slice(ptr, ptr + length);
             var blob = new Blob([bytes], { type: 'image/gif' });
-            return this.downloadBlob(blob, 'hexel-island-timelapse.gif');
+            var filename = 'hexel-' + (scope === 'world' ? 'world' : 'island') + '-timelapse.gif';
+            return this.offerExportDownload(blob, filename, 'GIF');
           },
+        };
+      })();
+
+      // The game kept playing music and effects while its
+      // tab was in the background — browsers don't mute hidden tabs on their
+      // own. Suspending the audio context stops everything at once (music and
+      // effects alike) and resumes exactly where it left off, which is what
+      // raylib's own pause/volume calls can't do from outside the wasm side.
+      // Miniaudio (raylib's web audio backend) tracks one AudioContext per
+      // device on `window.miniaudio.devices`; that global only exists once
+      // the module has initialised audio, so it's looked up per event rather
+      // than captured here.
+      (function () {
+        function setAudioSuspended(suspended) {
+          var devices = window.miniaudio && window.miniaudio.devices;
+          if (!devices) return;
+          for (var i = 0; i < devices.length; i++) {
+            var context = devices[i] && devices[i].webaudio;
+            if (!context) continue;
+            // Both return promises that reject harmlessly if the context is
+            // already in the target state, or if resume() is called before
+            // the first user gesture.
+            var pending = suspended ? context.suspend() : context.resume();
+            if (pending && pending.catch) pending.catch(function () {});
+          }
+        }
+        // `visibilitychange` (not blur/focus): it fires for the tab as a
+        // whole, including inside the itch.io iframe, and doesn't mute merely
+        // because focus moved to the URL bar or devtools.
+        document.addEventListener('visibilitychange', function () {
+          setAudioSuspended(document.hidden);
+          // Read once per frame by stdb.frame(); see FrameData.page_returned.
+          if (!document.hidden) window.hexelPageReturned = true;
+        });
+      })();
+
+      // The title backdrop is baked from the world, and islands change slot
+      // on every leaderboard re-rank, so a bake compiled into the wasm goes
+      // stale as soon as the next one fires. A copy is served next to this
+      // page and re-rendered after each re-rank; the wasm draws its own
+      // embedded bake immediately and swaps to this one when it arrives.
+      // Cache-busted by time rather than BUILD_VERSION, since the whole point
+      // is that it changes without a rebuild.
+      (function () {
+        function fetchInto(url, path, binary) {
+          return fetch(url + '?t=' + Date.now(), { cache: 'no-store' })
+.then(function (r) {
+              if (!r.ok) throw new Error(r.status);
+              return binary ? r.arrayBuffer() : r.text();
+            })
+.then(function (body) {
+              FS.writeFile(path, binary ? new Uint8Array(body) : body);
+            });
+        }
+        // Called from wasm once its filesystem exists — see `frame`'s
+        // title-map request latch.
+        window.hexelLoadTitleMap = function () {
+          Promise.all([
+            fetchInto('title-map.png', '/title-map-live.png', true),
+            fetchInto('title-map-view.txt', '/title-map-live-view.txt', false),
+          ])
+            // Only once BOTH have landed: the image and the camera pose it
+            // was rendered at get swapped together, and half a pair would
+            // draw the map in the wrong place.
+.then(function () { window.hexelTitleMapReady = true; })
+.catch(function () { /* keep the embedded bake */ });
         };
       })();
     </script>

@@ -39,6 +39,8 @@
 mod replay;
 #[path = "../sfx.rs"]
 mod sfx;
+#[path = "../title_map.rs"]
+mod title_map;
 #[path = "../ui.rs"]
 mod ui;
 #[path = "../world.rs"]
@@ -60,9 +62,11 @@ const RECOVERED_HISTORY_PATH: &str = "/hexel-tile-history.bin";
 // island's resolved border color as of that point in history (owner's
 // `border_color` pin, else their seed hue) instead of always 0 — see
 // `tools/history-extractor`'s matching `HISTORY_MAGIC` bump for why replay
-// needs this baked in rather than resolved from live tables.
-const RECOVERED_HISTORY_MAGIC: &[u8] = b"HEXELHIST\x03";
-const RECOVERED_HISTORY_RECORD_BYTES: u64 = 25;
+// needs this baked in rather than resolved from live tables. Version 4 drops
+// the leading transaction offset, which this parser never read: at eight of
+// twenty-five bytes it was most of what limited how much history could ship.
+const RECOVERED_HISTORY_MAGIC: &[u8] = b"HEXELHIST\x04";
+const RECOVERED_HISTORY_RECORD_BYTES: u64 = 17;
 // Mirrors `tools/history-extractor`'s `UNKNOWN_BORDER_COLOR` — never a valid
 // packed HSV value, so it unambiguously means "the extractor couldn't
 // resolve this island's border color at that point in history".
@@ -85,10 +89,18 @@ unsafe extern "C" {
 const GIF_EXPORT_SIZE: i32 = 240;
 const GIF_CAPTURE_EVERY_FRAMES: u32 = 6; // 10 FPS at the game's 60 FPS target
 const GIF_FRAME_DELAY_CS: i32 = 10;
-/// Exports should complete promptly after the player chooses them.  The
-/// normal replay remains configurable through its controls, while a saved
-/// timelapse uses this compact fixed presentation length.
-const TIMELAPSE_EXPORT_DURATION_SECS: f32 = 15.0;
+/// Frames a GIF samples per second of real time (every
+/// `GIF_CAPTURE_EVERY_FRAMES`th frame at the 60 FPS target).
+const GIF_CAPTURE_FPS: f32 = 60.0 / GIF_CAPTURE_EVERY_FRAMES as f32;
+/// Rough bytes per pixel a GIF frame compresses to for this game's flat,
+/// few-colour pixel art, and the rough VP9 bitrate MediaRecorder settles on
+/// for the 720x720 canvas. Both feed the size figures shown before recording
+/// starts — deliberately approximate, and labelled as estimates in the UI.
+const GIF_BYTES_PER_PIXEL: f32 = 0.18;
+const WEBM_BITS_PER_SEC: f32 = 2_500_000.0;
+/// How long the Download button confirms with "Downloaded" before offering
+/// another capture. Long enough to read, short enough not to look stuck.
+const DOWNLOADED_BADGE_SECS: f32 = 2.0;
 
 /// Everything the JS side hands us once per frame — see stdb.frame() in
 /// client/web/game.html.
@@ -102,12 +114,22 @@ struct FrameData {
     now_micros: i64,
     #[serde(default)]
     msgs: Vec<String>,
-    /// Author follow-up (2026-07-12): set once by `window.stdb.frame()` the
+    /// Set once by `window.stdb.frame()` the
     /// frame after a trial import connection (see `importToken` in
     /// game.html) gets rejected — read-once, same as `msgs`, so a stale
     /// error can't linger and pop up again on some unrelated later frame.
     #[serde(default)]
     import_error: Option<String>,
+    /// The tab became visible again since the last frame. Read-once, like
+    /// `msgs`. The frame loop is throttled or stopped while hidden, so a
+    /// timed UI state (the "Downloaded" badge) would otherwise resume its
+    /// countdown mid-way on return instead of being over with.
+    #[serde(default)]
+    page_returned: bool,
+    /// A fresher title bake has been written to the emscripten filesystem and
+    /// is ready to swap in. Read-once, like `msgs`.
+    #[serde(default)]
+    title_map_ready: bool,
 }
 
 #[derive(Clone)]
@@ -126,20 +148,20 @@ struct UserRow {
 struct InventoryRow {
     owner_hex: String,
     hue: u16,
-    /// F13: needed (unlike everywhere else that's skipped `obtained_at` —
+    /// Needed (unlike everywhere else that's skipped `obtained_at` —
     /// see `GiftRow`'s comment) to join a `None`-`obtained_with_hex` row
     /// against a `hexa_event` row stamped with the identical `ctx.timestamp`
     /// — see `apply_hexa`'s server-side comment on why this is a timestamp
     /// join rather than a new bool field.
     obtained_at_micros: i64,
     obtained_with_hex: Option<String>,
-    /// F11: mirrors `main.rs`'s `Inventory.from_gift` — a flying-gift hue
+    /// Mirrors `main.rs`'s `Inventory.from_gift` — a flying-gift hue
     /// grant, distinct from `reset_account`'s reseed even though both leave
     /// `obtained_with_hex: None`.
     from_gift: bool,
 }
 
-/// F11: mirrors `main.rs`'s `Gift` binding — one row = the single currently-
+/// Mirrors `main.rs`'s `Gift` binding — one row = the single currently-
 /// active flying-gift pickup. `expires_at` isn't read client-side (the row
 /// simply disappears once the server's tick expires it), so it's skipped
 /// here, same as `parse_inventory` already skips `obtained_at`.
@@ -149,7 +171,7 @@ struct GiftRow {
     spawned_at_micros: i64,
 }
 
-/// F13: mirrors `main.rs`'s `HexaEvent` binding, trimmed to the one field
+/// Mirrors `main.rs`'s `HexaEvent` binding, trimmed to the one field
 /// this client actually reads — the inventory-toast join described on
 /// `InventoryRow::obtained_at_micros` (the ignited-hexagon flash is driven
 /// by `HexaClusterRow.ignited` instead, so `cx`/`cy`/`member_count` aren't
@@ -171,7 +193,7 @@ struct MergeEventRow {
     at_micros: i64,
 }
 
-/// F13: mirrors `main.rs`'s `HexaCluster` binding — one row per currently-
+/// Mirrors `main.rs`'s `HexaCluster` binding — one row per currently-
 /// clustered user, server-authoritative (see the server-side table's doc
 /// comment for why: every client renders the exact same group instead of
 /// each guessing its own approximate clustering).
@@ -206,14 +228,14 @@ struct MarginCellRow {
     painted_at_micros: i64,
 }
 
-/// F8: one row per (island, liker) — see the server-side comment on
+/// One row per (island, liker) — see the server-side comment on
 /// `IslandLike` for why uniqueness is enforced in the reducer, not here.
 struct IslandLikeRow {
     island_id: u32,
     liker_hex: String,
 }
 
-/// F8: `next_rerank_at` drives the countdown banner. `admin_hex` (author
+/// `next_rerank_at` drives the countdown banner. `admin_hex` (author
 /// request, admin "draw anywhere") is consumed by `is_admin` below; `frozen`
 /// still has no client behavior.
 struct ConfigRow {
@@ -624,7 +646,7 @@ fn call_reducer(name: &str, args: Value) {
 enum Paintable {
     OwnIsland(i32, i32),
     Margin(i32, i32),
-    /// F14 (decision 20): the slot-0 community island — paintable by anyone.
+    /// The slot-0 community island — paintable by anyone.
     Community(i32, i32),
     /// Author request (admin "draw anywhere"): absolute world coords on
     /// someone else's island, paintable only because `me` is admin.
@@ -665,7 +687,7 @@ fn classify(tables: &Tables, me: &str, world_q: i32, world_r: i32) -> Paintable 
             return Paintable::OwnIsland(lq, lr);
         }
     }
-    // F14: slot 0 is always the origin (fixed geometry, never a real
+    // Slot 0 is always the origin (fixed geometry, never a real
     // player's island), so no island lookup needed.
     let (q0, r0) = world::slot_coords(0);
     let (ccx0, ccy0) = world::slot_center(q0, r0);
@@ -708,7 +730,7 @@ fn merge_target_at(tables: &Tables, world_q: i32, world_r: i32) -> Option<(u8, u
         .map(|(&id, c)| (0u8, id, world::unpack_hsv(c.color).0))
 }
 
-/// F9.6 item 2 (middle-click eyedropper): mirrors `main.rs`'s
+/// Mirrors `main.rs`'s
 /// `painted_color_at` — the color at world axial `(q, r)`, any island's cell
 /// or a margin cell, whichever it is.
 fn painted_color_at(tables: &Tables, world_q: i32, world_r: i32) -> Option<(u16, u8, u8)> {
@@ -726,7 +748,7 @@ fn painted_color_at(tables: &Tables, world_q: i32, world_r: i32) -> Option<(u16,
         .map(|c| world::unpack_hsv(c.color))
 }
 
-/// F9.6 item 7 (launch intro): mirrors `main.rs`'s `world_fit` — a camera
+/// Mirrors `main.rs`'s `world_fit` — a camera
 /// pose framing every currently-known island's center.
 fn world_fit(tables: &Tables, fallback: Vector2, fallback_zoom: f32) -> (Vector2, f32) {
     world_fit_with_min_zoom(tables, fallback, fallback_zoom, 0.25)
@@ -763,7 +785,7 @@ fn world_fit_with_min_zoom(
 /// Falls back to a generic label, never the partner's identity — mirrors
 /// `main.rs`'s `player_label`, see its comment for why.
 fn player_label(tables: &Tables, id: &str) -> String {
-    // F14 (decision 20): mirrors `main.rs` — the community island's sentinel
+    // Mirrors `main.rs` — the community island's sentinel
     // owner isn't a real player.
     if id == world::COMMUNITY_OWNER_HEX {
         return "Free Isle".to_string();
@@ -817,7 +839,7 @@ fn pick_color_at(
     }
 }
 
-/// F8: mirrors `main.rs`'s `format_age` exactly, just in raw micros instead
+/// Mirrors `main.rs`'s `format_age` exactly, just in raw micros instead
 /// of `Timestamp` (this binary has no SDK time type).
 fn format_age(now_micros: i64, created_at_micros: i64) -> String {
     let secs = now_micros.saturating_sub(created_at_micros) / 1_000_000;
@@ -841,7 +863,7 @@ fn already_liked(tables: &Tables, island_id: u32, me: &str) -> bool {
         .any(|l| l.island_id == island_id && l.liker_hex == me)
 }
 
-/// Author-requested: mirrors `main.rs`'s `resolve_border_color` — what an
+/// Mirrors `main.rs`'s `resolve_border_color` — what an
 /// island's border currently resolves to, ignoring `border_hidden` (the
 /// custom pin, or the seed-hue default when unset). Feeds the "Set border to
 /// current color" popup preview swatch.
@@ -859,7 +881,7 @@ fn resolve_border_color(tables: &Tables, island: &IslandRow) -> Color {
     }
 }
 
-/// F8: mirrors `main.rs`'s `open_island_info`, reading from the local
+/// Mirrors `main.rs`'s `open_island_info`, reading from the local
 /// `Tables` cache instead of `ctx.db`.
 fn open_island_info(state: &mut State, island_id: u32) {
     let Some(island) = state.tables.islands.get(&island_id) else {
@@ -888,7 +910,7 @@ fn open_island_info(state: &mut State, island_id: u32) {
     });
 }
 
-/// Author follow-up (2026-07-12): mirrors `main.rs`'s `open_admin_edit`,
+/// Mirrors `main.rs`'s `open_admin_edit`,
 /// reading from the local `Tables` cache instead of `ctx.db`.
 fn open_admin_edit(state: &mut State, island_id: u32) {
     let Some(island) = state.tables.islands.get(&island_id) else {
@@ -904,7 +926,7 @@ fn open_admin_edit(state: &mut State, island_id: u32) {
 }
 
 /// In-flight long-press-to-merge gesture — mirrors `main.rs`'s `LongPress`.
-/// Also tracks the F8 island-info target, fired instead on a plain click —
+/// Also tracks the island-info target, fired instead on a plain click —
 /// see `main.rs`'s comment on the same struct.
 struct LongPress {
     press_screen: Vector2,
@@ -934,6 +956,15 @@ struct RecoveredReplay {
     /// period from its creation through its last mutation.
     playback_start: usize,
     playback_end: usize,
+    /// First event that must be applied to reconstruct world state, as
+    /// opposed to `playback_start`, where the *visible* replay begins.
+    ///
+    /// A `Cut` moves `playback_start` forward but never this: the events
+    /// before the cut still built the world (islands only exist once their
+    /// creation event has been applied, and every earlier paint is part of
+    /// the picture), so they are replayed instantly to seed the starting
+    /// frame. Dropping them instead left the canvas empty with no islands.
+    seed_start: usize,
     applied_events: usize,
     /// Island cells use island-local coordinates, so their island id must be
     /// part of the key. Using just `(q, r)` collapses every player's island
@@ -953,6 +984,12 @@ struct RecoveredReplay {
     /// when scrubbing back to before its deletion — `state.tables.islands`
     /// (live) has nothing left to look up by then.
     island_border: HashMap<u32, u32>,
+    /// Slot each island ends the recorded history in, from a scan of the
+    /// whole file at open. Backs the overlay's "Islands: fixed" mode, which
+    /// holds every island still instead of following its re-ranks — a
+    /// re-rank moves an island's whole artwork across the map mid-replay,
+    /// which is history but reads as a glitch in an exported video.
+    final_slots: HashMap<u32, u32>,
     /// `None` replays the whole world; `Some(id)` retains only that island.
     island_filter: Option<u32>,
 }
@@ -980,47 +1017,72 @@ impl RecoveredReplay {
             return Err("replay history has an unknown format".to_string());
         }
         let total_events = (payload / RECOVERED_HISTORY_RECORD_BYTES) as usize;
-        let (playback_start, playback_end) = match island_filter {
-            None => (0, total_events),
-            Some(target_id) => {
-                // Scanning this compact fixed-width file once lets a focused
-                // replay start at the island's actual creation instead of
-                // spending most of the world timeline on an empty screen.
-                let mut scan = BufReader::new(
-                    File::open(RECOVERED_HISTORY_PATH)
-                        .map_err(|error| format!("could not scan replay history: {error}"))?,
-                );
-                scan.seek(SeekFrom::Start(RECOVERED_HISTORY_MAGIC.len() as u64))
-                    .map_err(|error| format!("could not scan replay history: {error}"))?;
-                let mut bytes = [0_u8; RECOVERED_HISTORY_RECORD_BYTES as usize];
-                let mut first = None;
-                let mut last = 0;
-                for index in 0..total_events {
-                    scan.read_exact(&mut bytes)
-                        .map_err(|error| format!("could not scan replay event {index}: {error}"))?;
-                    let kind = bytes[0];
-                    let island_id =
-                        u32::from_le_bytes(bytes[9..13].try_into().expect("fixed replay event"));
-                    if matches!(kind, 0 | 1 | 4 | 5) && island_id == target_id {
-                        first.get_or_insert(index);
-                        last = index + 1;
-                    }
+        // One pass over this compact fixed-width file collects both the final
+        // slot layout and, for a focused replay, the target island's own
+        // range — so it can start at that island's actual creation instead of
+        // spending most of the world timeline on an empty screen.
+        let mut scan = BufReader::new(
+            File::open(RECOVERED_HISTORY_PATH)
+                .map_err(|error| format!("could not scan replay history: {error}"))?,
+        );
+        scan.seek(SeekFrom::Start(RECOVERED_HISTORY_MAGIC.len() as u64))
+            .map_err(|error| format!("could not scan replay history: {error}"))?;
+        let mut bytes = [0_u8; RECOVERED_HISTORY_RECORD_BYTES as usize];
+        let mut final_slots = HashMap::new();
+        let mut first = None;
+        let mut first_paint = None;
+        let mut last_paint = 0;
+        let mut last = 0;
+        for index in 0..total_events {
+            scan.read_exact(&mut bytes)
+                .map_err(|error| format!("could not scan replay event {index}: {error}"))?;
+            let kind = bytes[0];
+            let island_id = u32::from_le_bytes(bytes[1..5].try_into().expect("fixed replay event"));
+            if kind == 5 {
+                let slot = i32::from_le_bytes(bytes[5..9].try_into().expect("fixed replay event"));
+                // Left in place on a kind-4 delete: a deleted island's cells
+                // still need somewhere to sit while scrubbed back to before
+                // its deletion, and ids are never reused.
+                final_slots.insert(island_id, slot as u32);
+            }
+            if matches!(kind, 0 | 1 | 4 | 5) && island_filter == Some(island_id) {
+                first.get_or_insert(index);
+                last = index + 1;
+                if matches!(kind, 0 | 1) {
+                    first_paint.get_or_insert(index);
+                    last_paint = index + 1;
                 }
+            }
+        }
+        let (seed_start, playback_start, playback_end) = match island_filter {
+            None => (0, 0, total_events),
+            Some(target_id) => {
                 let Some(first) = first else {
                     return Err(format!("island #{target_id} has no recovered history"));
                 };
-                (first, last)
+                // Trimmed to the island's first and last colour change. An
+                // island is created well before anyone paints on it, and
+                // re-ranks keep touching it after the last stroke — playing
+                // those back is a still frame at each end of the replay.
+                // Everything from its creation up to the first paint is still
+                // applied, instantly, as the seed.
+                match first_paint {
+                    Some(first_paint) => (first, first_paint, last_paint),
+                    None => (first, first, last),
+                }
             }
         };
         let mut replay = Self {
             reader,
             playback_start,
             playback_end,
+            seed_start,
             applied_events: playback_start,
             island_cells: HashMap::new(),
             margin_cells: HashMap::new(),
             island_slots: HashMap::new(),
             island_border: HashMap::new(),
+            final_slots,
             island_filter,
         };
         replay.reset()?;
@@ -1031,15 +1093,39 @@ impl RecoveredReplay {
         self.reader
             .seek(SeekFrom::Start(
                 RECOVERED_HISTORY_MAGIC.len() as u64
-                    + self.playback_start as u64 * RECOVERED_HISTORY_RECORD_BYTES,
+                    + self.seed_start as u64 * RECOVERED_HISTORY_RECORD_BYTES,
             ))
             .map_err(|error| format!("could not restart replay history: {error}"))?;
-        self.applied_events = self.playback_start;
+        self.applied_events = self.seed_start;
         self.island_cells.clear();
         self.margin_cells.clear();
         self.island_slots.clear();
         self.island_border.clear();
-        Ok(())
+        // Replay everything between the seed origin and the visible window in
+        // one go: it is not animated, it *is* the starting frame. Without it a
+        // cut start would begin from an empty world with no islands, so
+        // nothing the later events touch would render.
+        self.apply_until(self.playback_start)
+    }
+
+    /// Restrict playback to a sub-range of the current one, using the same
+    /// fractions the trim handles marked.
+    ///
+    /// Playback is paced uniformly over event *indices* (see `advance_to`),
+    /// not over wall-clock time, so narrowing the clock's timestamp range
+    /// alone changes nothing here — the cut has to be applied to the index
+    /// range too, which is what actually drops events from the replay and
+    /// from the count the overlay shows.
+    fn narrow(&mut self, start_fraction: f32, end_fraction: f32) -> Result<(), String> {
+        let base = self.playback_start;
+        let span = self.playback_end.saturating_sub(base) as f64;
+        let offset = |fraction: f32| base + (span * fraction.clamp(0.0, 1.0) as f64) as usize;
+        let new_start = offset(start_fraction);
+        // Always leave at least one event, so a replay can't end up empty.
+        let new_end = offset(end_fraction).max(new_start + 1).min(self.playback_end);
+        self.playback_start = new_start.min(new_end - 1);
+        self.playback_end = new_end;
+        self.reset()
     }
 
     fn advance_to(&mut self, progress: f32) -> Result<(), String> {
@@ -1049,6 +1135,13 @@ impl RecoveredReplay {
         if target < self.applied_events {
             self.reset()?;
         }
+        self.apply_until(target)
+    }
+
+    /// Apply events forward until `applied_events` reaches `target`, reading
+    /// sequentially from wherever the reader currently sits. Shared by the
+    /// paced playback and by `reset`'s instant seeding pass.
+    fn apply_until(&mut self, target: usize) -> Result<(), String> {
         let mut bytes = [0_u8; RECOVERED_HISTORY_RECORD_BYTES as usize];
         while self.applied_events < target {
             self.reader.read_exact(&mut bytes).map_err(|error| {
@@ -1058,13 +1151,13 @@ impl RecoveredReplay {
                 )
             })?;
             let kind = bytes[0];
-            // The transaction offset is retained for the exported format and
-            // auditability. Playback is paced uniformly by event order.
+            // Playback is paced uniformly by event order, not by the gaps
+            // between the timestamps the file was sorted on.
             let island_id =
-                u32::from_le_bytes(bytes[9..13].try_into().expect("fixed replay event"));
-            let q = i32::from_le_bytes(bytes[13..17].try_into().expect("fixed replay event"));
-            let r = i32::from_le_bytes(bytes[17..21].try_into().expect("fixed replay event"));
-            let color = u32::from_le_bytes(bytes[21..25].try_into().expect("fixed replay event"));
+                u32::from_le_bytes(bytes[1..5].try_into().expect("fixed replay event"));
+            let q = i32::from_le_bytes(bytes[5..9].try_into().expect("fixed replay event"));
+            let r = i32::from_le_bytes(bytes[9..13].try_into().expect("fixed replay event"));
+            let color = u32::from_le_bytes(bytes[13..17].try_into().expect("fixed replay event"));
             let include_island = self
                 .island_filter
                 .is_none_or(|target_id| target_id == island_id);
@@ -1106,12 +1199,21 @@ impl RecoveredReplay {
     /// the camera centre.  Presence still comes from `island_slots`, so an
     /// island only appears after its recovered creation event and disappears
     /// at its recovered deletion event.
-    fn display_slot(&self, island_id: u32) -> Option<u32> {
+    ///
+    /// `motion` is the world replay's islands toggle: false pins every island
+    /// to the slot it ends the history in, so the layout stays put while the
+    /// painting plays back.
+    fn display_slot(&self, island_id: u32, motion: bool) -> Option<u32> {
         self.island_slots.get(&island_id).map(|&historical_slot| {
             if self.island_filter == Some(island_id) {
                 0
-            } else {
+            } else if motion {
                 historical_slot
+            } else {
+                self.final_slots
+                    .get(&island_id)
+                    .copied()
+                    .unwrap_or(historical_slot)
             }
         })
     }
@@ -1128,6 +1230,20 @@ impl RecoveredReplay {
 struct State {
     rl: RaylibHandle,
     thread: RaylibThread,
+    /// Baked world map drawn behind the title screen; `None` if the embedded
+    /// PNG failed to decode, which just costs the title its backdrop.
+    title_map: Option<Texture2D>,
+    /// Camera pose and newest-paint stamp of whichever bake `title_map`
+    /// currently holds — the compiled-in one at boot, replaced together with
+    /// the texture if a fresher render is fetched (see `swap_title_map`).
+    /// They have to move as a set: the pose positions the image in the world
+    /// and the stamp decides which cells are drawn live on top of it, so a
+    /// mismatched pair puts the map in the wrong place or double-draws.
+    title_map_view: (Vector2, f32),
+    title_map_baked_at: i64,
+    /// The fetch is kicked off from the first frame rather than at startup:
+    /// emscripten's filesystem has to exist before JS can write into it.
+    title_map_requested: bool,
     my_identity: Option<String>,
     /// True only after an InitialSubscription message has been fully parsed
     /// into `tables`. SpacetimeDB applies that initial snapshot atomically;
@@ -1136,7 +1252,7 @@ struct State {
     tables: Tables,
     camera: Camera2D,
     centered_on_island: bool,
-    /// F9.6 item 7: mirrors `main.rs`'s `intro_started_at`/`intro_from`.
+    /// Mirrors `main.rs`'s `intro_started_at`/`intro_from`.
     intro_started_at: Option<Instant>,
     intro_from: Option<(Vector2, f32)>,
     ui_state: ui::UiState,
@@ -1149,25 +1265,39 @@ struct State {
     /// Browser canvas recording is active until replay reaches its end (or
     /// the viewer is closed), then JavaScript downloads a WebM file.
     replay_recording: bool,
-    /// True for an export launched from the island panel, where controls and
+    /// True for an export launched from the export panel, where controls and
     /// the cursor stay out of the captured timelapse frames.
     clean_timeline_export: bool,
-    /// A compact, real GIF capture of the selected island replay. Frames are
-    /// sampled after raylib finishes drawing, then encoded by `msf_gif`.
+    /// A compact, real GIF capture of the selected island or world replay.
+    /// Frames are sampled after raylib finishes drawing, then encoded by
+    /// `msf_gif`.
     gif_recording: bool,
+    /// The `island_filter` a `gif_recording` in progress was started with
+    /// (`None` = whole world) — snapshotted at start so the finish handler
+    /// doesn't need `state.recovered_replay`, which a mid-recording close
+    /// may already have cleared.
+    gif_export_island: Option<u32>,
     gif_frame_counter: u32,
+    /// Last whole percent pushed to the DOM export-progress bar, or -1 when
+    /// it is hidden. Tracked so the JS bridge is only crossed when the
+    /// displayed number actually changes, not on every frame of a capture.
+    export_progress_shown: i32,
+    /// Seconds left on the "Downloaded" confirmation. Counts down to zero,
+    /// at which point the button offers Download again — a capture at a
+    /// different speed or cut is a reasonable next thing to want.
+    export_saved_for: f32,
     known_inventory_ids: HashSet<u64>,
     inventory_seeded: bool,
     known_merge_event_ids: HashSet<u64>,
     merge_events_seeded: bool,
     known_hexa_event_ids: HashSet<u64>,
     hexa_events_seeded: bool,
-    /// F13: mirrors `main.rs`'s `hexa_display` — persisted, lerped hexagon-
+    /// Mirrors `main.rs`'s `hexa_display` — persisted, lerped hexagon-
     /// vertex snap positions (including the local player's own, per the
     /// author) keyed by identity hex string (this client has no SDK
     /// `Identity` type).
     hexa_display: HashMap<String, Vector2>,
-    /// F9 level-up toast: mirrors `main.rs`'s `last_level` — `None` until the
+    /// Level-up toast: mirrors `main.rs`'s `last_level` — `None` until the
     /// first frame `me` is known, so connecting already at some level
     /// doesn't fire a spurious toast.
     last_level: Option<u64>,
@@ -1178,26 +1308,26 @@ struct State {
     pending_gift_claim: Option<Instant>,
     music_started: bool,
     long_press: Option<LongPress>,
-    /// Author-requested: mirrors `main.rs`'s `pending_info_click` — a clean
+    /// Mirrors `main.rs`'s `pending_info_click` — a clean
     /// single-click on a foreign island, held pending for
     /// DOUBLE_CLICK_WINDOW before it resolves into actually opening the
     /// info popup (see the gesture block's comment for why).
     pending_info_click: Option<(Instant, Vector2, u32)>,
-    /// F9.5 item 7 / decision 17: mirrors `main.rs`'s `hover_target` —
+    /// Decision 17: mirrors `main.rs`'s `hover_target` —
     /// `(island_id, hover_started_at)` for the currently-hovered foreign
     /// island, tracked purely by cursor position, independent of
     /// `pending_info_click` above (left unchanged for double-click-to-like
     /// and touch).
     hover_target: Option<(u32, Instant)>,
     pinch: Option<Pinch>,
-    /// F9.6 item 2: mirrors `main.rs`'s `middle_click`.
+    /// Mirrors `main.rs`'s `middle_click`.
     middle_click: Option<Vector2>,
     stroke_last: Option<(u8, i32, i32)>,
     last_paint_at: Instant,
     last_sent_pos: Option<Vector2>,
     last_sent_at: Instant,
     now_micros: i64,
-    /// F9.5 item 5 (modal click-through): mirrors `main.rs`'s
+    /// Mirrors `main.rs`'s
     /// `suppress_map_until_release` — latches at press-start whether a modal
     /// was open, held for the whole press (which spans several frames), so
     /// the click that closes an overlay can't also paint the cell behind it
@@ -1217,7 +1347,7 @@ struct State {
     /// explanation. Held off level-triggered input (painting, panning) for
     /// as long as this is true.
     mouse_state_stale: bool,
-    /// F12: `None` if the audio device failed to init (no sound card,
+    /// `None` if the audio device failed to init (no sound card,
     /// browser autoplay block, headless) — every call site degrades to
     /// silence instead of unwrapping. Backed by a leaked `'static`
     /// `RaylibAudio` (see `main`'s comment) — this `State` itself is never
@@ -1240,9 +1370,29 @@ fn handle_message(state: &mut State, raw: &str) {
             state.my_identity = Some(hex);
         }
     } else if let Some(initial) = msg.get("InitialSubscription") {
-        // Reconnects replay the full table; drop stale local state first.
-        state.tables.clear();
+        // Reconnects replay the full table; drop stale local state first —
+        // but only for the first snapshot of a connection. The painted map
+        // arrives as a second, separate subscription (game.html's
+        // STARTUP_TABLES then WORLD_TABLES), and clearing on that one would
+        // wipe everything the first just delivered. `subscription_ready` is
+        // reset to false whenever the socket isn't open, so it means exactly
+        // "this connection has already had its first snapshot".
+        if !state.subscription_ready {
+            state.tables.clear();
+        }
         if let Some(db_update) = initial.get("database_update") {
+            state.tables.apply(db_update);
+        }
+        state.subscription_ready = true;
+    } else if let Some(applied) = msg.get("SubscribeMultiApplied") {
+        // What `SubscribeMulti` answers with instead of `InitialSubscription`
+        // — same snapshot, under `update` rather than `database_update`. Both
+        // are handled: the message a subscription replies with is decided by
+        // which one game.html sent.
+        if !state.subscription_ready {
+            state.tables.clear();
+        }
+        if let Some(db_update) = applied.get("update") {
             state.tables.apply(db_update);
         }
         state.subscription_ready = true;
@@ -1262,6 +1412,35 @@ fn handle_message(state: &mut State, raw: &str) {
     }
 }
 
+/// Replace the compiled-in title bake with the freshly fetched one.
+///
+/// All three pieces move together or none do: the pose places the image in
+/// the world and the stamp decides which cells are drawn live over it, so a
+/// half-applied swap misplaces the map or double-draws the newest tiles. A
+/// bad file simply leaves the embedded bake in place — it is decoration, and
+/// A slightly stale backdrop beats a missing one.
+fn swap_title_map(state: &mut State) {
+    let Ok(png) = std::fs::read("/title-map-live.png") else {
+        return;
+    };
+    let Ok(view_text) = std::fs::read_to_string("/title-map-live-view.txt") else {
+        return;
+    };
+    let Some(view) = title_map::parse_view(&view_text) else {
+        return;
+    };
+    let Some(texture) = title_map::load_png(&mut state.rl, &state.thread, &png) else {
+        return;
+    };
+    state.title_map = Some(texture);
+    state.title_map_view = view;
+    state.title_map_baked_at = title_map::parse_baked_at(&view_text);
+    // The intro eases from the pose the title was pinned at. If it was cached
+    // before the swap it belongs to the old image, and pressing Draw would
+    // jump.
+    state.intro_from = None;
+}
+
 fn recenter(camera: &mut Camera2D, island: &IslandRow) {
     camera.target = island_world_center(island);
     camera.zoom = ISLAND_FIT_ZOOM;
@@ -1275,6 +1454,28 @@ fn start_replay_with_duration(
     island_filter: Option<u32>,
     duration_secs: f32,
 ) -> bool {
+    // Reuse a replay already open on the same target rather than reopening
+    // it. Reopening resets the event range to the whole file, which silently
+    // discarded any `Cut` just made — so an export started from a trimmed
+    // replay recorded the full history instead of what the slider showed.
+    // Only the pace changes here; the (possibly narrowed) range is kept.
+    let reusable = state.replay_clock.is_some()
+        && state
+            .recovered_replay
+            .as_ref()
+            .is_some_and(|recovered| recovered.island_filter == island_filter);
+    if reusable {
+        if let Some(recovered) = state.recovered_replay.as_mut() {
+            if let Err(error) = recovered.reset() {
+                state.ui_state.show_info_toast(error);
+                return false;
+            }
+        }
+        if let Some(clock) = state.replay_clock.as_mut() {
+            clock.retime(duration_secs);
+        }
+        return true;
+    }
     let recovered = match RecoveredReplay::open(island_filter) {
         Ok(recovered) => recovered,
         Err(error) => {
@@ -1289,14 +1490,18 @@ fn start_replay_with_duration(
             .ui_state
             .show_info_toast(format!("replaying island #{island_id}"));
     }
-    state.replay_clock = Some(replay::ReplayClock::new(
-        // Recovered events are ordered by committed transaction. Replay pace
+    let mut clock = replay::ReplayClock::new(
+        // Recovered events are ordered by the time they happened. Replay pace
         // is deliberately controlled by the existing duration/speed UI, not
-        // by wall-clock gaps between historic transactions.
+        // by the wall-clock gaps between them.
         [0, total_events as i64],
         duration_secs,
         state.now_micros,
-    ));
+    );
+    if island_filter.is_none() {
+        clock.enable_island_motion();
+    }
+    state.replay_clock = Some(clock);
     state.ui_state.title_active = false;
     state.centered_on_island = true;
     if island_filter.is_some() {
@@ -1323,13 +1528,71 @@ fn start_replay(state: &mut State, island_filter: Option<u32>) -> bool {
     start_replay_with_duration(state, island_filter, replay::DEFAULT_DURATION_SECS)
 }
 
-fn start_gif_export(state: &mut State, island_id: u32) {
-    if !start_replay_with_duration(state, Some(island_id), TIMELAPSE_EXPORT_DURATION_SECS) {
+/// Approximate byte count as `~N KB` / `~N.N MB`. These are projections from
+/// the capture settings, not measurements — nothing has been recorded when
+/// they are shown — hence the tilde.
+fn format_bytes(bytes: f32) -> String {
+    if bytes >= 1024.0 * 1024.0 {
+        format!("~{:.1} MB", bytes / (1024.0 * 1024.0))
+    } else {
+        format!("~{:.0} KB", (bytes / 1024.0).max(1.0))
+    }
+}
+
+/// Open the replay for an export without recording anything yet.
+///
+/// `island_filter`: `Some(id)` exports just that island, `None` the whole
+/// world — same convention as `start_replay`/`RecoveredReplay`.
+///
+/// Recording used to start immediately at a fixed duration, which meant the
+/// file never reflected a `Cut` or a speed the player picked afterwards —
+/// there was no point at which those choices could still be made. Opening the
+/// replay instead leaves it interactive, and the overlay's Download button
+/// captures whatever state it is in by then. Every open replay offers
+/// download, so this only differs from `start_replay` by the hint.
+fn start_export_replay(state: &mut State, island_filter: Option<u32>) {
+    if !start_replay_with_duration(state, island_filter, replay::DEFAULT_DURATION_SECS) {
         return;
     }
+    state.export_saved_for = 0.0;
+    state
+        .ui_state
+        .show_info_toast("Set speed and cut, then press Download".to_string());
+}
+
+/// Record the replay exactly as it currently stands — same range (after any
+/// cut) and same speed — then hand the file to the browser.
+fn begin_export_recording(state: &mut State, format: replay::AnimationFormat) {
+    let island_filter = state
+        .recovered_replay
+        .as_ref()
+        .and_then(|recovered| recovered.island_filter);
+    // Rewind so the capture covers the full window rather than starting from
+    // wherever the playhead was parked.
+    if let Some(recovered) = state.recovered_replay.as_mut() {
+        if let Err(error) = recovered.reset() {
+            state.ui_state.show_info_toast(error);
+            return;
+        }
+    }
+    if let Some(clock) = state.replay_clock.as_mut() {
+        clock.restart();
+    }
+    match format {
+        replay::AnimationFormat::Gif => start_gif_export(state, island_filter),
+        replay::AnimationFormat::Webm => start_video_export(state, island_filter),
+    }
+}
+
+fn start_gif_export(state: &mut State, island_filter: Option<u32>) {
     if unsafe { hexel_gif_begin(GIF_EXPORT_SIZE, GIF_EXPORT_SIZE) } != 0 {
         state.gif_recording = true;
         state.gif_frame_counter = 0;
+        state.clean_timeline_export = true;
+        // `finish_gif_recording` reads this rather than re-deriving the
+        // scope from `state.recovered_replay`, which a mid-recording close
+        // (see `close_replay` in `frame`) may already have cleared by then.
+        state.gif_export_island = island_filter;
     } else {
         state
             .ui_state
@@ -1337,13 +1600,18 @@ fn start_gif_export(state: &mut State, island_id: u32) {
     }
 }
 
-fn start_video_export(state: &mut State, island_id: u32) {
-    if !start_replay_with_duration(state, Some(island_id), TIMELAPSE_EXPORT_DURATION_SECS) {
-        return;
-    }
+fn start_video_export(state: &mut State, island_filter: Option<u32>) {
     state.replay_recording = true;
     state.clean_timeline_export = true;
-    if run_js("Boolean(window.stdb && window.stdb.startReplayRecording())") != "true" {
+    let scope = if island_filter.is_some() {
+        "island"
+    } else {
+        "world"
+    };
+    if run_js(&format!(
+        "Boolean(window.stdb && window.stdb.startReplayRecording('{scope}'))"
+    )) != "true"
+    {
         state.replay_recording = false;
         state.clean_timeline_export = false;
         state.replay_clock = None;
@@ -1419,11 +1687,20 @@ fn frame(state: &mut State) {
         startup_ready,
         state.tables.islands.len(),
     );
-    // Author follow-up (2026-07-12): a rejected Import — the current account
+    // A rejected Import — the current account
     // and connection are untouched (see `importToken` in game.html), so this
     // is just user feedback, not a reconnect.
     if let Some(err) = data.import_error {
         state.ui_state.show_info_toast(err);
+    }
+    // Kicked off from the first frame, not from `main`: emscripten's
+    // filesystem has to be up before JS can write the fetched files into it.
+    if !state.title_map_requested {
+        state.title_map_requested = true;
+        run_js("window.hexelLoadTitleMap && window.hexelLoadTitleMap()");
+    }
+    if data.title_map_ready {
+        swap_title_map(state);
     }
 
     let mut stop_replay_recording = false;
@@ -1444,6 +1721,62 @@ fn frame(state: &mut State) {
         state.recovered_replay = None;
     } else if let Some(clock) = state.replay_clock.as_mut() {
         clock.tick(state.rl.get_frame_time());
+    }
+    // Download button lifecycle. It stays in place through every state so the
+    // export always reports what it is doing, rather than vanishing on click.
+    // "Downloaded" is a timed confirmation, not a terminal state. Coming back
+    // to the tab ends it outright: the badge has already served its purpose by
+    // the time the player has been away and returned.
+    state.export_saved_for = if data.page_returned {
+        0.0
+    } else {
+        (state.export_saved_for - state.rl.get_frame_time()).max(0.0)
+    };
+    // Every open replay can be downloaded, whichever door it was opened by:
+    // the world replay reached from the menu used to be the one place the
+    // button never appeared, because only the export modal armed it.
+    let download_state = if state.gif_recording || state.replay_recording {
+        replay::DownloadState::Working
+    } else if state.export_saved_for > 0.0 {
+        replay::DownloadState::Done
+    } else {
+        replay::DownloadState::Ready
+    };
+    let mut chosen_format = None;
+    if let Some(clock) = state.replay_clock.as_mut() {
+        clock.set_download_state(download_state);
+        // Refreshed while the prompt is open so the figures track the speed;
+        // both scale linearly with how long the capture actually runs.
+        if clock.prompt_open() {
+            let seconds = clock.real_duration_secs();
+            let gif_frame_bytes =
+                (GIF_EXPORT_SIZE * GIF_EXPORT_SIZE) as f32 * GIF_BYTES_PER_PIXEL;
+            clock.set_format_estimates(
+                format_bytes(seconds * WEBM_BITS_PER_SEC / 8.0),
+                format_bytes(seconds * GIF_CAPTURE_FPS * gif_frame_bytes),
+            );
+        }
+        let _ = clock.take_download_request();
+        chosen_format = clock.take_format_choice();
+    }
+    if let Some(format) = chosen_format {
+        begin_export_recording(state, format);
+    }
+    // A `Cut` narrows the clock's timestamp range, but the recovered replay
+    // is paced over event indices, so it has to be narrowed by the same
+    // fractions or the cut would change neither its playback nor its count.
+    if let Some((start_fraction, end_fraction)) = state
+        .replay_clock
+        .as_mut()
+        .and_then(replay::ReplayClock::take_applied_cut)
+    {
+        if let Some(recovered) = state.recovered_replay.as_mut() {
+            if let Err(error) = recovered.narrow(start_fraction, end_fraction) {
+                state.replay_clock = None;
+                state.recovered_replay = None;
+                state.ui_state.show_info_toast(error);
+            }
+        }
     }
     if let (Some(clock), Some(recovered)) =
         (state.replay_clock.as_ref(), state.recovered_replay.as_mut())
@@ -1505,7 +1838,7 @@ fn frame(state: &mut State) {
     let mouse_screen = state.rl.get_mouse_position();
     let mouse_world = state.rl.get_screen_to_world2D(mouse_screen, state.camera);
 
-    // F11 (flying gift): mirrors `main.rs` exactly — current drifted world
+    // Mirrors `main.rs` exactly — current drifted world
     // position of the single active gift (if any) and whether the mouse is
     // within claim range of it right now.
     let active_gift: Option<(u64, Vector2, f32)> = (!replay_mode)
@@ -1533,7 +1866,7 @@ fn frame(state: &mut State) {
         && mouse_screen.y > ui::HEADER_H
         && mouse_screen.y < (720.0 - ui::FOOTER_H);
 
-    // F9.6 item 7: launch intro — mirrors `main.rs` exactly. Camera starts
+    // Launch intro — mirrors `main.rs` exactly. Camera starts
     // framing the whole occupied world and eases to the player's island over
     // `INTRO_DURATION`; any input skips straight to the final pose.
     //
@@ -1543,24 +1876,23 @@ fn frame(state: &mut State) {
     // only starts once the Draw button dismisses the title, easing from
     // this exact pose (`intro_from` calls the same `world_fit`).
     if state.ui_state.title_active {
-        if let Some(me) = me {
-            if let Some((island, _)) = my_island(&state.tables, me) {
-                let (target, zoom) =
-                    world_fit(&state.tables, island_world_center(island), ISLAND_FIT_ZOOM);
-                state.camera.target = target;
-                state.camera.zoom = zoom;
-                state.camera.offset = Vector2::new(360.0, 360.0);
-            }
-        }
+        // Mirrors main.rs: pinned to the pose `title-map.png` was baked at,
+        // since that image is what's behind the title now. The live cursors
+        // drawn on top go through this same camera, so it has to match.
+        let (target, zoom) = state.title_map_view;
+        state.camera.target = target;
+        state.camera.zoom = zoom;
+        state.camera.offset = Vector2::new(360.0, 360.0);
     } else if let Some(me) = me {
         if !state.centered_on_island {
             if let Some((island, _)) = my_island(&state.tables, me) {
                 let to_target = island_world_center(island);
                 let to_zoom = ISLAND_FIT_ZOOM;
                 let start = *state.intro_started_at.get_or_insert_with(Instant::now);
-                let (from_target, from_zoom) = *state
-                    .intro_from
-                    .get_or_insert_with(|| world_fit(&state.tables, to_target, to_zoom));
+                // Mirrors main.rs: ease from the pose the title (and the
+                // baked map) was pinned at, so pressing Draw doesn't jump.
+                let (from_target, from_zoom) =
+                    *state.intro_from.get_or_insert(state.title_map_view);
                 let any_input = state
                     .rl
                     .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
@@ -1649,7 +1981,7 @@ fn frame(state: &mut State) {
         } else {
             for (&id, inv) in &state.tables.inventory {
                 if state.known_inventory_ids.insert(id) && inv.owner_hex == me {
-                    // F9.5 item 4: mirrors `main.rs` — a NEW obtained_with-
+                    // Mirrors `main.rs` — a NEW obtained_with-
                     // less row after the initial seed can only be
                     // `reset_account`'s reseed, never a merge.
                     if inv.from_gift {
@@ -1664,7 +1996,7 @@ fn frame(state: &mut State) {
                             );
                         }
                     } else if inv.obtained_with_hex.is_none() {
-                        // F13: mirrors `main.rs` — a Hexa-pooled grant also
+                        // Mirrors `main.rs` — a Hexa-pooled grant also
                         // leaves `obtained_with_hex: None`; told apart from a
                         // `reset_account` reseed by joining against a
                         // `hexa_event` row stamped with the identical
@@ -1742,7 +2074,7 @@ fn frame(state: &mut State) {
                 }
             }
         }
-        // F9.5 item 4: mirrors `main.rs` — seed the last-3 ring with the
+        // Mirrors `main.rs` — seed the last-3 ring with the
         // caller's current hue the first frame it's known.
         if let Some(user) = state.tables.users.get(me) {
             state.ui_state.seed_recent_once(ui::RecentColor {
@@ -1756,7 +2088,7 @@ fn frame(state: &mut State) {
     let online = state.tables.users.values().filter(|u| u.online).count();
     let total = state.tables.users.len();
 
-    // F9.5 item 5 (modal click-through): mirrors `main.rs` — latch at
+    // Mirrors `main.rs` — latch at
     // press-start whether a modal was open, held for the whole press (a
     // click's press and release land on different frames), so the click
     // that closes an overlay can't also paint the cell behind it on a later
@@ -1765,11 +2097,11 @@ fn frame(state: &mut State) {
         .rl
         .is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
     {
-        // F9.5 item 7 follow-up: mirrors `main.rs` — `any_modal_open`
+        // Mirrors `main.rs` — `any_modal_open`
         // deliberately excludes the foreign-island hover tooltip, which has
         // no interactive chrome and must not block map input.
         state.suppress_map_until_release = state.ui_state.any_modal_open();
-        // F11: mirrors `main.rs` — a press landing on the gift claims it
+        // Mirrors `main.rs` — a press landing on the gift claims it
         // immediately and consumes the whole gesture so the same press can't
         // also start a paint stroke or long-press underneath it.
         if !state.suppress_map_until_release && over_map_area && gift_hit {
@@ -1780,9 +2112,15 @@ fn frame(state: &mut State) {
             state.suppress_map_until_release = true;
         }
     }
-    if state
+    // Cleared whenever the button is simply not down, rather than only on the
+    // release edge. A release that never reaches the canvas — the pointer
+    // leaves it, or the browser takes focus for a download — used to leave
+    // this latched, and with it latched the whole map is inert: no painting,
+    // no panning, and no `set_pos`, so everyone else sees your cursor frozen
+    // where you left it.
+    if !state
         .rl
-        .is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT)
+        .is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)
     {
         state.suppress_map_until_release = false;
     }
@@ -1793,8 +2131,7 @@ fn frame(state: &mut State) {
     // `Some(name)` marks this frame as the clean, camera-centred export
     // card. It is intentionally ephemeral: after the canvas is captured at
     // the end of this frame, the normal game returns immediately.
-    let mut export_name: Option<String> = None;
-    let mut export_link_id: Option<u32> = None;
+    let mut export_subject: Option<ui::ExportSubject> = None;
     if let Some(me) = me {
         let user = state.tables.users.get(me);
         let hues: Vec<u16> = state
@@ -1808,7 +2145,7 @@ fn frame(state: &mut State) {
         let xp = user.map_or(0, |u| u.xp);
         let locked = user.is_some_and(|u| u.locked);
         let level = world::level_of(xp);
-        // F9 level-up feedback: mirrors `main.rs` exactly.
+        // Level-up feedback: mirrors `main.rs` exactly.
         let leveled = state.last_level.is_some_and(|prev| level > prev);
         if state.last_level.is_some_and(|prev| {
             prev < shared::constants::HEXA_UNLOCK_LEVEL
@@ -1853,7 +2190,7 @@ fn frame(state: &mut State) {
         state
             .ui_state
             .sync_name_once(user.and_then(|u| u.name.as_ref()));
-        // Author-caught: mirrors `main.rs`'s live-refresh so the Like button
+        // Mirrors `main.rs`'s live-refresh so the Like button
         // reflects the reducer's result immediately, not only after a page
         // reload (the popup used to be a one-time snapshot from open time).
         if let Some(island_id) = state.ui_state.island_popup.as_ref().map(|p| p.island_id) {
@@ -1871,7 +2208,7 @@ fn frame(state: &mut State) {
         }
 
         let short_id = me.to_string();
-        // F8 re-rank countdown: only `Some` while the target is still ahead
+        // Re-rank countdown: only `Some` while the target is still ahead
         // of the browser clock reported this frame.
         let rerank_secs = state
             .tables
@@ -1962,7 +2299,7 @@ fn frame(state: &mut State) {
             call_reducer("admin_force_rerank", serde_json::json!([]));
         }
         if let Some((island_id, rate_id)) = actions.click_link {
-            // plan.md F9: web opens the rate page via `window.open`, unlike
+            // Plan.md web opens the rate page via `window.open`, unlike
             // native's `OpenURL` — JSON-escaped the same way `call_reducer`
             // escapes its args, though `rate_id` is server-validated numeric
             // so this is defense in depth rather than a real injection risk.
@@ -1979,7 +2316,7 @@ fn frame(state: &mut State) {
         if actions.open_project_page {
             run_js("window.open('https://itch.io/jam/raylib-6x-gamejam/rate/4767021', '_blank')");
         }
-        // Author-requested: footer button replacing the old "click your own
+        // Footer button replacing the old "click your own
         // island" gesture, which just painted instead of opening the popup.
         // Discarding the reference half as `_` (rather than binding it) ends
         // its borrow of `state.tables` right here, so the `&mut state` call
@@ -2002,23 +2339,32 @@ fn frame(state: &mut State) {
         }
         if actions.arm_island_export {
             state.ui_state.tool = ui::Tool::IslandExport;
-            state
-                .ui_state
-                .show_info_toast("Export: click an island".to_string());
+            state.ui_state.show_info_toast(
+                "Export: click an island, or empty map for the whole world".to_string(),
+            );
         }
-        if let Some(island_id) = actions.export_island_image {
-            if let Some(island) = state.tables.islands.get(&island_id) {
-                recenter(&mut state.camera, island);
-                export_name = Some(player_label(&state.tables, &island.owner_hex));
-                export_link_id = island.itch_rate_id;
+        match actions.export_image {
+            Some(ui::ExportTarget::Island(island_id)) => {
+                if let Some(island) = state.tables.islands.get(&island_id) {
+                    recenter(&mut state.camera, island);
+                    export_subject = Some(ui::ExportSubject::Island {
+                        owner: player_label(&state.tables, &island.owner_hex),
+                        link_id: island.itch_rate_id,
+                    });
+                }
             }
+            Some(ui::ExportTarget::World) => {
+                let (target, zoom) =
+                    world_fit(&state.tables, state.camera.target, state.camera.zoom);
+                state.camera.target = target;
+                state.camera.zoom = zoom;
+                state.camera.offset = Vector2::new(360.0, 360.0);
+                export_subject = Some(ui::ExportSubject::World);
+            }
+            None => {}
         }
-        if let Some(island_id) = actions.export_island_gif {
-            start_gif_export(state, island_id);
-            replay_mode = true;
-        }
-        if let Some(island_id) = actions.export_island_video {
-            start_video_export(state, island_id);
+        if let Some(target) = actions.export_island_animation {
+            start_export_replay(state, target.island_id());
             replay_mode = true;
         }
         if actions.start_replay {
@@ -2026,7 +2372,7 @@ fn frame(state: &mut State) {
             replay_mode = true;
         }
     }
-    // F9.5 item 7 follow-up: mirrors `main.rs`.
+    // Mirrors `main.rs`.
     let map_input_allowed = !replay_mode
         && !replay_closed_this_frame
         && !state.suppress_map_until_release
@@ -2075,7 +2421,7 @@ fn frame(state: &mut State) {
         state.camera.zoom = (state.camera.zoom * (1.0 + wheel * 0.1)).clamp(0.25, 60.0);
     }
 
-    // F9.6 item 6: WASD/arrow-key pan, Q/E zoom — mirrors `main.rs` exactly,
+    // WASD/arrow-key pan, Q/E zoom — mirrors `main.rs` exactly,
     // including the text-field-focus guard.
     if map_input_allowed && !gesturing && !state.ui_state.text_field_focused() {
         let dt = state.rl.get_frame_time();
@@ -2107,7 +2453,7 @@ fn frame(state: &mut State) {
         }
     }
 
-    // F13 follow-up: the Move tool makes plain left-drag pan too, no Shift
+    // The Move tool makes plain left-drag pan too, no Shift
     // needed — mirrors `main.rs`.
     let panning = map_input_allowed
         && !gesturing
@@ -2155,7 +2501,7 @@ fn frame(state: &mut State) {
 
     // Painting/erasing: left-drag (or one-finger touch-drag), not while
     // panning (SHIFT/middle/right, two-finger gesturing, or the Move tool —
-    // see `panning` above) or two-finger gesturing. F9.6 item 1: which
+    // see `panning` above) or two-finger gesturing. which
     // reducer fires depends on `ui_state.tool` — mirrors `main.rs` exactly,
     // including the `over_map_area` guard against the header/footer HUD.
     if map_input_allowed
@@ -2232,8 +2578,14 @@ fn frame(state: &mut State) {
         if let Some((island_id, _, _)) = island_at(&state.tables, wq, wr) {
             if let Some(island) = state.tables.islands.get(&island_id) {
                 let owner_label = player_label(&state.tables, &island.owner_hex);
-                state.ui_state.open_island_export(island_id, owner_label);
+                state
+                    .ui_state
+                    .open_island_export(ui::ExportTarget::Island(island_id), owner_label);
             }
+        } else {
+            state
+                .ui_state
+                .open_island_export(ui::ExportTarget::World, "the whole world".to_string());
         }
     }
     if state
@@ -2270,7 +2622,7 @@ fn frame(state: &mut State) {
         }
     }
 
-    // Author follow-up (2026-07-12): mirrors `main.rs`'s AdminEdit click
+    // Mirrors `main.rs`'s AdminEdit click
     // block — a persistent, mobile-friendly tool state (not a right-click/
     // long-press) whose only effect is opening the admin edit modal on tap.
     if map_input_allowed
@@ -2341,7 +2693,7 @@ fn frame(state: &mut State) {
     if !map_input_allowed || gesturing {
         state.long_press = None;
     } else if let Some(me) = me {
-        // Author follow-up: `AdminEdit` is handled entirely by its own
+        // `AdminEdit` is handled entirely by its own
         // block above — mirrors `main.rs`'s exclusion here.
         if state.ui_state.tool != ui::Tool::Eyedropper
             && state.ui_state.tool != ui::Tool::AdminEdit
@@ -2358,10 +2710,10 @@ fn frame(state: &mut State) {
                 press_at: Instant::now(),
                 target: merge_target_at(&state.tables, wq, wr)
                     .filter(|&(_, _, hue)| !have_hue(&state.tables, me, hue)),
-                // F8 (author follow-up): anywhere on a FOREIGN island's
+                // Anywhere on a FOREIGN island's
                 // territory, not just its center. Mirrors `main.rs`; own
                 // island's popup now opens via the "My Isle" footer button.
-                // F14 author reversal: the community island is excluded here
+                // Author reversal: the community island is excluded here
                 // — no info popup, no like, matching the hover exclusion
                 // below. Its sentinel owner would otherwise pass this
                 // `owner_hex != me` check like any other foreign island.
@@ -2425,7 +2777,7 @@ fn frame(state: &mut State) {
     if let Some((clicked_at, _, island_id)) = state.pending_info_click {
         if clicked_at.elapsed() >= DOUBLE_CLICK_WINDOW {
             open_island_info(state, island_id);
-            // F9.5 item 7 follow-up (author-requested): mirrors `main.rs` —
+            // Follow-up (author-requested): mirrors `main.rs` —
             // the hover tooltip that replaced this click's old
             // popup-opening role is non-interactive, so a resolved single
             // click on a foreign island now directly opens its itch.io link
@@ -2446,11 +2798,11 @@ fn frame(state: &mut State) {
         }
     }
 
-    // F9.5 item 7 / decision 17: island info on hover (desktop). Mirrors
+    // Decision 17: island info on hover (desktop). Mirrors
     // `main.rs` — purely position-based, independent of the click/long-press
     // gesture block above (left untouched for double-click-to-like and
     // touch; raylib-web aliases a single touch to ordinary mouse events, so
-    // that path already covers touch taps). Author-caught: excludes the
+    // that path already covers touch taps). Excludes the
     // header/footer bands, whose screen coordinates still map to SOME world
     // tile via the camera transform — see `over_map_area` (computed above)
     // for why (a footer button click could otherwise have the hover logic
@@ -2539,16 +2891,16 @@ fn frame(state: &mut State) {
         .map(|inv| (inv.owner_hex.as_str(), inv.hue))
         .collect();
 
-    // F9.5 item 6: mirrors `main.rs` — shrinks other players' cursors with
+    // Mirrors `main.rs` — shrinks other players' cursors with
     // camera zoom (relative to their fixed size at the default
     // `ISLAND_FIT_ZOOM`), floored so they stay findable when zoomed out.
     let other_cursor_scale =
         (state.camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
 
-    // F13 (Hexa event): mirrors `main.rs` — the server-authoritative central
+    // Mirrors `main.rs` — the server-authoritative central
     // formation, with each member placed at ITS OWN
     // `vertex_index` (paired per-row, not by list position). `me`'s own row
-    // is included like everyone else's — per the author, the LOCAL player's
+    // is included like everyone else's: the LOCAL player's
     // own cursor should visibly move to its hexagon slot too (see the
     // local-cursor draw call below).
     let hexa_rows: Vec<(&String, &HexaClusterRow)> = state
@@ -2613,12 +2965,12 @@ fn frame(state: &mut State) {
         .users
         .iter()
         .filter(|_| !replay_mode)
-        // Author-reported: mirrors `main.rs` — cursors used to vanish ~3s
+        // Mirrors `main.rs` — cursors used to vanish ~3s
         // after a player stopped moving; a stationary-but-connected player
         // should stay visible the whole time they're online.
         .filter(|(id, u)| u.online && Some(id.as_str()) != me)
         .map(|(id, u)| {
-            // F13: mirrors `main.rs` — a hexagon-cluster member renders at
+            // Mirrors `main.rs` — a hexagon-cluster member renders at
             // its lerped snapped display position instead of its raw
             // cursor position, and carries its cluster's centre
             // (screen-projected) for the rotated arrow draw.
@@ -2639,7 +2991,7 @@ fn frame(state: &mut State) {
         })
         .collect();
 
-    // F13 (author follow-up): mirrors `main.rs`'s `my_hexa_screen` — the
+    // Mirrors `main.rs`'s `my_hexa_screen` — the
     // LOCAL player's own cursor also renders at its lerped hexagon-snap
     // position while participating. `None` (not clustered, or `me` unknown
     // yet) falls back to the literal mouse position at the draw call.
@@ -2665,21 +3017,91 @@ fn frame(state: &mut State) {
         .unwrap_or(Color::new(150, 150, 156, 255));
 
     let camera = state.camera;
-    // F9.6 item 8: mirrors `main.rs` — skip the per-tile outline pass past
+    // Mirrors `main.rs` — skip the per-tile outline pass past
     // this zoom (visual noise at that size; a small render win too).
     let show_tile_outline = camera.zoom >= BORDERLESS_ZOOM_THRESHOLD;
     // Grabbed before `begin_drawing` hands out its mutable borrow — mirrors
     // `main.rs`.
     let fps = state.rl.get_fps();
     let recovered_history = state.recovered_replay.as_ref();
+    let island_motion = state
+        .replay_clock
+        .as_ref()
+        .is_none_or(replay::ReplayClock::island_motion);
     let hover_takeable;
     let mut d = state.rl.begin_drawing(&state.thread);
     d.clear_background(Color::new(18, 18, 24, 255));
 
+    // Mirrors main.rs: the baked map stands in for the live hexes on the
+    // title screen and through the zoomed-out part of the launch intro,
+    // crossfading to real cells as the camera closes on the island.
+    let map_alpha = if replay_mode {
+        0.0
+    } else if state.ui_state.title_active {
+        1.0
+    } else {
+        title_map::blend_alpha(camera.zoom)
+    };
+    let skip_live_cells = map_alpha >= 1.0;
+    let title_map_view = state.title_map_view;
+    let title_map_baked_at = state.title_map_baked_at;
+
     {
         let mut d2 = d.begin_mode2D(camera);
 
-        if recovered_history.is_none() {
+        // Drawn through the camera so it tracks the intro's pan/zoom.
+        if map_alpha > 0.0 {
+            if let Some(texture) = state.title_map.as_ref() {
+                d2.draw_texture_pro(
+                    texture,
+                    Rectangle::new(0.0, 0.0, texture.width as f32, texture.height as f32),
+                    title_map::world_rect_for(title_map_view),
+                    Vector2::zero(),
+                    0.0,
+                    Color::new(255, 255, 255, (map_alpha * 255.0) as u8),
+                );
+            }
+        }
+
+        // Mirrors main.rs: anything painted since the bake, drawn live over
+        // it, so a player who paints and zooms back out still sees their own
+        // work on an image that never refreshes at runtime.
+        if skip_live_cells {
+            let baked_at = title_map_baked_at;
+            for cell in state.tables.island_cells.values() {
+                if cell.painted_at_micros <= baked_at {
+                    continue;
+                }
+                let Some(island) = state.tables.islands.get(&cell.island_id) else {
+                    continue;
+                };
+                let (q, r) = world::slot_coords(island.slot);
+                let (fcx, fcy) = world::slot_center(q, r);
+                let (h, s, v) = world::unpack_hsv(cell.color);
+                world::draw_hex(
+                    &mut d2,
+                    world::axial_to_world(fcx + cell.q, fcy + cell.r),
+                    1.0,
+                    world::hsv_color(h, s, v),
+                    None,
+                );
+            }
+            for cell in state.tables.margin_cells.values() {
+                if cell.painted_at_micros <= baked_at {
+                    continue;
+                }
+                let (h, s, v) = world::unpack_hsv(cell.color);
+                world::draw_hex(
+                    &mut d2,
+                    world::axial_to_world(cell.q, cell.r),
+                    1.0,
+                    world::hsv_color(h, s, v),
+                    None,
+                );
+            }
+        }
+
+        if recovered_history.is_none() && !skip_live_cells {
             for (&island_id, island) in &state.tables.islands {
                 if recovered_history.is_none()
                     && state
@@ -2698,7 +3120,7 @@ fn frame(state: &mut State) {
                 let mine = me == Some(island.owner_hex.as_str());
                 let unpainted_fill =
                     world::unpainted_island_fill(island.owner_hex == world::COMMUNITY_OWNER_HEX);
-                // F9.5 (FPS at scale): point-lookup each rendered cell by its
+                // Point-lookup each rendered cell by its
                 // packed id in the already-id-keyed `island_cells` map instead of
                 // collecting a fresh (island_id, q, r) -> color HashMap from
                 // EVERY island_cell row in the world every frame — cost is now
@@ -2732,11 +3154,11 @@ fn frame(state: &mut State) {
                         show_tile_outline.then_some(Color::new(40, 40, 46, 255)),
                     );
                 }
-                // Author-caught: mirrors `main.rs` — sat/val is now
+                // Mirrors `main.rs` — sat/val is now
                 // `START_SAT`/`START_VAL` exactly (was a fixed 85/95 lookalike
                 // shade).
                 //
-                // Author-requested: mirrors `main.rs` — an owner-set
+                // Mirrors `main.rs` — an owner-set
                 // `border_color`/`border_hidden` override takes priority over
                 // the seed-hue default.
                 let border_color = if island.border_hidden && !replay_mode {
@@ -2763,7 +3185,7 @@ fn frame(state: &mut State) {
                         .collect();
                     // Own island's border is thicker — still colored by
                     // identity like every other island, just easier to spot.
-                    // Author-caught: mirrors `main.rs` — thickness is now a
+                    // Mirrors `main.rs` — thickness is now a
                     // constant SCREEN pixel width (divided by zoom to convert
                     // back to world units), not a fixed world-unit value, so it
                     // no longer shrinks under a pixel (and randomly vanishes on
@@ -2780,7 +3202,7 @@ fn frame(state: &mut State) {
             // re-ranks. Draw the bases from that state rather than from the
             // current subscription snapshot, which may be a different layout.
             for &island_id in history.island_slots.keys() {
-                let Some(slot) = history.display_slot(island_id) else {
+                let Some(slot) = history.display_slot(island_id, island_motion) else {
                     continue;
                 };
                 let (q, r) = world::slot_coords(slot);
@@ -2852,7 +3274,7 @@ fn frame(state: &mut State) {
 
         if let Some(history) = recovered_history {
             for (&(island_id, q, r), &color) in &history.island_cells {
-                let Some(slot) = history.display_slot(island_id) else {
+                let Some(slot) = history.display_slot(island_id, island_motion) else {
                     // The cell belongs to an island that is not present at
                     // this point in history (for example, during the atomic
                     // delete transaction), so it has no world position.
@@ -2881,6 +3303,9 @@ fn frame(state: &mut State) {
             }
         } else {
             for cell in state.tables.margin_cells.values() {
+                if skip_live_cells {
+                    break; // covered by the baked map, same as the islands above
+                }
                 if state
                     .replay_clock
                     .as_ref()
@@ -2903,14 +3328,14 @@ fn frame(state: &mut State) {
             }
         }
 
-        // F11 (flying gift): world-space, mirrors `main.rs`.
+        // World-space, mirrors `main.rs`.
         if !replay_mode {
             if let Some((_, pos, elapsed)) = active_gift {
                 world::draw_gift_icon(&mut d2, pos, elapsed);
             }
         }
 
-        // F13 (Hexa event): world-space hexagon edges, mirrors `main.rs`.
+        // World-space hexagon edges, mirrors `main.rs`.
         for (vertices, ignited) in &hexa_polygons {
             world::draw_hexa_polygon(&mut d2, vertices, *ignited);
         }
@@ -2948,10 +3373,10 @@ fn frame(state: &mut State) {
     }
 
     let hexa_cursor_scale = camera.zoom / ISLAND_FIT_ZOOM;
-    if export_name.is_none() {
+    if export_subject.is_none() {
         for (screen, color, locked, name, snap_centre) in &other_cursors {
             match snap_centre {
-                // F13 follow-up #2: mirrors `main.rs` — a hexagon-snapped
+                // Follow-up #2: mirrors `main.rs` — a hexagon-snapped
                 // cursor aims its tip at the cluster centre.
                 Some(centre) => world::draw_cursor_snapped(
                     &mut d,
@@ -2999,7 +3424,20 @@ fn frame(state: &mut State) {
                         .values()
                         .filter(|cell| clock.is_visible(cell.painted_at_micros))
                         .count();
-                let total_tiles = state.tables.island_cells.len() + state.tables.margin_cells.len();
+                // Events inside the replay window, not every tile in the
+                // world — otherwise `Cut` visibly changes nothing.
+                let total_tiles = state
+                    .tables
+                    .island_cells
+                    .values()
+                    .filter(|cell| clock.contains(cell.painted_at_micros))
+                    .count()
+                    + state
+                        .tables
+                        .margin_cells
+                        .values()
+                        .filter(|cell| clock.contains(cell.painted_at_micros))
+                        .count();
                 replay::draw_overlay(&mut d, clock, visible_tiles, total_tiles);
             }
         }
@@ -3039,12 +3477,12 @@ fn frame(state: &mut State) {
             is_admin: is_admin(&state.tables, me),
         };
         if !replay_mode {
-            if let Some(name) = export_name.as_deref() {
-                ui::draw_export_frame(&mut d, name, export_link_id);
+            if let Some(subject) = export_subject.as_ref() {
+                ui::draw_export_frame(&mut d, subject);
             } else {
                 ui::draw(&mut d, &state.ui_state, &info, mouse_screen);
 
-                // F9.6 item 1: mirrors `main.rs` — eraser mode draws the cursor in a
+                // Mirrors `main.rs` — eraser mode draws the cursor in a
                 // neutral gray plus a small eraser badge instead of the brush hue.
                 let (hue, sat, val) = brush;
                 let cursor_color = if state.ui_state.tool == ui::Tool::Erase {
@@ -3052,12 +3490,14 @@ fn frame(state: &mut State) {
                 } else {
                     world::hsv_color(hue, sat, val)
                 };
-                // F13 (author follow-up): mirrors `main.rs` — visually snaps to the
+                // Mirrors `main.rs` — visually snaps to the
                 // hexagon slot while merging; painting/hover logic still uses the
                 // real `mouse_world`/`mouse_screen`, only this draw call moves
                 // (and, follow-up #2, rotates to aim at the cluster centre).
                 if state.ui_state.tool == ui::Tool::Eyedropper {
                     ui::draw_eyedropper_cursor(&mut d, mouse_screen, eyedropper_preview);
+                } else if state.ui_state.tool == ui::Tool::IslandExport {
+                    ui::draw_export_cursor(&mut d, mouse_screen);
                 } else {
                     match my_hexa_screen {
                         Some((tip, centre)) => world::draw_cursor_snapped(
@@ -3079,7 +3519,7 @@ fn frame(state: &mut State) {
     if state.ui_state.title_active && me.is_none() && !replay_mode {
         ui::draw_title(&mut d, &state.ui_state, mouse_screen);
     }
-    if export_name.is_none() && !replay_mode {
+    if export_subject.is_none() && !replay_mode {
         if state.ui_state.tool == ui::Tool::Erase {
             world::draw_eraser_badge(&mut d, mouse_screen);
         } else if hover_takeable && matches!(state.ui_state.tool, ui::Tool::Paint | ui::Tool::Erase)
@@ -3109,7 +3549,7 @@ fn frame(state: &mut State) {
     // draws a brush-coloured pointer. Replay suppresses painting UI, so keep
     // a neutral pointer visible for its controls instead of leaving users
     // without a cursor.
-    if export_name.is_none() && replay_mode && !state.gif_recording && !state.clean_timeline_export
+    if export_subject.is_none() && replay_mode && !state.gif_recording && !state.clean_timeline_export
     {
         world::draw_cursor(&mut d, mouse_screen, Color::RAYWHITE, false);
     }
@@ -3134,11 +3574,18 @@ fn frame(state: &mut State) {
         let data = unsafe { hexel_gif_end(&mut length) };
         state.gif_recording = false;
         if !data.is_null() && length > 0 {
+            let scope = if state.gif_export_island.is_some() {
+                "island"
+            } else {
+                "world"
+            };
             run_js(&format!(
-                "window.stdb && window.stdb.downloadReplayGif({}, {length})",
+                "window.stdb && window.stdb.downloadReplayGif({}, {length}, '{scope}')",
                 data as usize
             ));
             unsafe { hexel_gif_free(data.cast()) };
+            state.export_saved_for = DOWNLOADED_BADGE_SECS;
+            state.clean_timeline_export = false;
             state.ui_state.show_info_toast("GIF downloaded".to_string());
         } else {
             state
@@ -3149,12 +3596,39 @@ fn frame(state: &mut State) {
     if stop_replay_recording {
         run_js("window.stdb && window.stdb.stopReplayRecording()");
         state.clean_timeline_export = false;
+        // The recorder finishes asynchronously; JS saves the blob as soon as
+        // it is assembled, since the player already asked for it by clicking.
+        state.export_saved_for = DOWNLOADED_BADGE_SECS;
+        state.ui_state.show_info_toast("video downloaded".to_string());
     }
-    if export_name.is_some() {
+    if export_subject.is_some() {
         run_js("window.stdb && window.stdb.downloadIslandImage()");
         state
             .ui_state
             .show_info_toast("island image downloaded".to_string());
+    }
+
+    // Capture progress, reported to the DOM bar (see `showExportProgress` in
+    // game.html for why it can't be drawn in-game). Driven off the replay
+    // clock, which is what actually paces a timelapse export, so the bar
+    // tracks how much of the history has been recorded.
+    let capturing = state.gif_recording || state.replay_recording;
+    if capturing {
+        let percent = state
+            .replay_clock
+            .as_ref()
+            .map_or(0.0, |clock| clock.progress() * 100.0)
+            .round() as i32;
+        if percent != state.export_progress_shown {
+            state.export_progress_shown = percent;
+            let kind = if state.gif_recording { "GIF" } else { "video" };
+            run_js(&format!(
+                "window.stdb && window.stdb.showExportProgress({percent}, 'Recording {kind} - {percent}%')"
+            ));
+        }
+    } else if state.export_progress_shown >= 0 {
+        state.export_progress_shown = -1;
+        run_js("window.stdb && window.stdb.hideExportProgress()");
     }
 }
 
@@ -3165,16 +3639,24 @@ fn main() {
         .build();
     rl.hide_cursor(); // we draw our own pointer in the caller's brush color
 
-    // F12: leaked alongside `state` below (both live for the process's
+    // Leaked alongside `state` below (both live for the process's
     // whole lifetime under `emscripten_set_main_loop_arg` — see its comment).
     let audio: Option<&'static RaylibAudio> = RaylibAudio::init_audio_device()
         .ok()
         .map(|a| &*Box::leak(Box::new(a)));
     let sfx = audio.map(sfx::Sfx::load);
 
+    let title_map = title_map::load(&mut rl, &thread);
+    let title_map_view = title_map::view();
+    let title_map_baked_at = title_map::baked_at_micros();
+
     let state = Box::new(State {
         rl,
         thread,
+        title_map,
+        title_map_view,
+        title_map_baked_at,
+        title_map_requested: false,
         my_identity: None,
         subscription_ready: false,
         tables: Tables::new(),
@@ -3193,7 +3675,10 @@ fn main() {
         replay_recording: false,
         clean_timeline_export: false,
         gif_recording: false,
+        gif_export_island: None,
         gif_frame_counter: 0,
+        export_progress_shown: -1,
+        export_saved_for: 0.0,
         known_inventory_ids: HashSet::new(),
         inventory_seeded: false,
         known_merge_event_ids: HashSet::new(),
