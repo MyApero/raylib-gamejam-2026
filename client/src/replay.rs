@@ -6,6 +6,10 @@
 //! timestamps, though, so both clients can still reveal the retained snapshot
 //! in chronological order without a server migration.
 
+// Export and the recovered-history overlay are web-only; the native bin
+// compiles this module but never calls them.
+#![allow(dead_code)]
+
 use raylib::prelude::*;
 
 pub const DEFAULT_DURATION_SECS: f32 = 30.0;
@@ -939,9 +943,12 @@ mod tests {
     #[test]
     fn step_forward_and_backward_move_by_the_current_step_size_and_pause() {
         let mut replay = ReplayClock::new([0, 100], 10.0, 0);
-        assert_eq!(replay.step_fraction(), 0.05);
+        // From the presets, not a literal: the list has grown before and left
+        // this test asserting a default index it no longer had.
+        let step = STEP_PRESETS[DEFAULT_STEP_INDEX];
+        assert_eq!(replay.step_fraction(), step);
         replay.step_forward();
-        assert_eq!(replay.progress(), 0.05);
+        assert_eq!(replay.progress(), step);
         assert!(replay.is_paused());
         replay.step_backward();
         assert_eq!(replay.progress(), 0.0);

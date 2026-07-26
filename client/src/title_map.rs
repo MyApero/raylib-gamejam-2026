@@ -83,6 +83,8 @@ pub fn world_rect_for((target, zoom): (Vector2, f32)) -> Rectangle {
     )
 }
 
+// Native-only: the web client passes its own view to `world_rect_for`.
+#[allow(dead_code)]
 pub fn world_rect() -> Rectangle {
     world_rect_for(view())
 }
