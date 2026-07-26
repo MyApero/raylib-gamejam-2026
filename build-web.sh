@@ -24,10 +24,12 @@ EMSDK_DIR="${EMSDK_DIR:-./emsdk}"
 # every visitor — including the overwhelming majority who never open a
 # replay at all. Nothing reads it before `RecoveredReplay::open`, so it has
 # no business gating startup.
-# v4 (17-byte records). The v3 artifact next to it is the pre-conversion
-# original — see tools/history-extractor/convert-v3-to-v4.py. Feeding a v3
-# file to the current parser fails with "replay history has an invalid record
-# length", since 25-byte records don't divide evenly by 17.
+# v4 (17-byte records) — the name carries the format version, and refresh.sh
+# writes this exact path. The v2/v3 artifacts beside it are earlier formats
+# kept for their history, not inputs: feeding a v3 file to the current parser
+# fails with "replay history has an invalid record length", since 25-byte
+# records don't divide evenly by 17. Converting one is a manual step — see
+# tools/history-extractor/convert-v3-to-v4.py.
 HISTORY_SOURCE="tools/history-extractor/output/hexel-tile-history-v4.bin"
 HISTORY_WEB="client/web/hexel-tile-history.bin"
 if [ ! -f "$HISTORY_SOURCE" ]; then
@@ -38,11 +40,12 @@ fi
 cp "$HISTORY_SOURCE" "$HISTORY_WEB"
 
 # Precompressed siblings for Caddy's `file_server { precompressed }`. These
-# 17-byte fixed records are enormously redundant, so zstd -19 takes 258 MiB
-# down to ~15 MiB on the wire. Compressing at build time rather than via
-# Caddy's `encode` matters: `encode` would re-compress the whole 258 MiB on
-# every cache miss, burning VPS CPU to produce identical output each time.
-# Only rebuilt when the source is newer, since zstd -19 is slow.
+# 17-byte fixed records are enormously redundant, so zstd -19 puts under a
+# tenth of the artifact on the wire (4.4 MiB -> ~380 KiB today, and it grows
+# with the world). Compressing at build time rather than via Caddy's `encode`
+# matters: `encode` would re-compress the whole file on every cache miss,
+# burning VPS CPU to produce identical output each time. Only rebuilt when
+# the source is newer, since zstd -19 is slow.
 for ext in zst gz; do
     if [ ! -f "$HISTORY_WEB.$ext" ] || [ "$HISTORY_SOURCE" -nt "$HISTORY_WEB.$ext" ]; then
         echo "Compressing history -> $HISTORY_WEB.$ext (slow, cached until the history changes)"

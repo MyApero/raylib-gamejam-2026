@@ -7,7 +7,10 @@ overwrite and an erase.
 
 The recovered local artifact is deliberately ignored by Git:
 
-`tools/history-extractor/output/hexel-tile-history.bin`
+`tools/history-extractor/output/hexel-tile-history-v4.bin`
+
+The name carries the format version (see *Binary format* below); `build-web.sh`
+reads that exact path, so bumping the format means renaming it in both places.
 
 ## Prerequisites
 
@@ -35,7 +38,7 @@ cargo run --offline --quiet --manifest-path tools/history-extractor/Cargo.toml -
   "$HOME/.local/share/spacetime/data/replicas/1/clog" \
   tools/history-extractor/output/hexel-tile-history-v4.checkpoint \
   tools/history-extractor/output/hexel-tile-history-v4-raw.bin \
-  tools/history-extractor/output/hexel-tile-history-v3.bin \
+  tools/history-extractor/output/hexel-tile-history-v4.bin \
   tools/history-extractor/output/hexel-legacy-history.bin
 ```
 

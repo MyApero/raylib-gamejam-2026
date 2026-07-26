@@ -6,7 +6,7 @@
     <!-- ?v= for the same reason web.js carries one: this zone has a
          Cloudflare Browser Cache TTL that rewrites the origin's
          Cache-Control, so a changed icon otherwise stays stale at the edge. -->
-    <link rel="icon" href="favicon.ico?v=20260726s" sizes="any">
+    <link rel="icon" href="favicon.ico?v=20260726t" sizes="any">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
       /* One unit of the game's internal 720x720 render space, in CSS pixels.
@@ -124,7 +124,7 @@
       // a code bug (heart rendering already lives in shared ui.rs). Bump
       // BUILD_VERSION on every deploy so both the script tag below and the
       // wasm fetch (via Module.locateFile) get a fresh URL each time.
-      var BUILD_VERSION = '20260726s';
+      var BUILD_VERSION = '20260726t';
       var Module = {
         canvas: document.getElementById('canvas'),
         locateFile: function (path) {

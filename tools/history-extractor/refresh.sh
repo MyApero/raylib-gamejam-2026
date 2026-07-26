@@ -21,7 +21,7 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 DATA_DIR="${SPACETIME_DATA_DIR:-$HOME/.local/share/spacetime/data}"
 DB_NAME="${HEXEL_DB:-hexel}"
 OUT_DIR="$REPO_ROOT/tools/history-extractor/output"
-BIN="$OUT_DIR/hexel-tile-history-v3.bin"
+BIN="$OUT_DIR/hexel-tile-history-v4.bin"
 # Log-order working file the extractor appends to (and resumes from). The
 # shipped BIN is re-emitted from it in timestamp order every run, so this one
 # is the file the checkpoint belongs to.
@@ -116,28 +116,36 @@ if [ -x "$REPO_ROOT/tools/map-image/render_map.py" ]; then
 fi
 
 if [ "$build_bundle" -eq 1 ]; then
-    # The history is baked into web.data by emscripten's --preload-file, so
-    # refreshing the .bin alone never reaches a browser — the bundle has to be
-    # rebuilt for players to see the newer history.
+    # The history is served as a plain sibling of the page and fetched at
+    # runtime, so refreshing the .bin alone never reaches a browser — only a
+    # build copies it into client/web/ for players to see the newer history.
     log "rebuilding web bundle so the new history ships..."
-    # emscripten only re-runs its file packager when it relinks, and Cargo
-    # skips the link when no Rust source changed — so a rebuild triggered
-    # purely by a new history .bin would copy a STALE web.data/web.js pair
-    # (with the old package size baked in) and silently ship the previous
-    # history. Touching the web entry point forces the relink.
-    touch "$REPO_ROOT/client/src/bin/web.rs"
     (cd "$REPO_ROOT" && ./build-web.sh >/dev/null)
-    packaged=$(grep -oE 'remote_package_size:[0-9]*' "$REPO_ROOT/client/web/web.js" | head -1 | cut -d: -f2)
-    # emscripten only repackages when it relinks, so a mismatch here means the
-    # bundle still carries the PREVIOUS history while everything reports
-    # success — the exact failure the `touch` above exists to prevent.
+    served="$REPO_ROOT/client/web/hexel-tile-history.bin"
     expected=$(stat -c %s "$BIN")
-    if [ "${packaged:-0}" != "$expected" ]; then
-        log "ERROR: bundle packaged ${packaged:-none} bytes but the history is $expected"
-        log "the web build did not repackage; players would get the previous history"
+    if [ "$(stat -c %s "$served" 2>/dev/null || echo 0)" != "$expected" ]; then
+        log "ERROR: $served is not the $expected bytes just extracted"
+        log "the web build did not copy the history; players would get the previous one"
         exit 1
     fi
-    log "web bundle rebuilt (packaged history: $packaged bytes)"
+    # Caddy serves the precompressed siblings, not this file, to anyone who
+    # accepts zstd/gzip — and build-web.sh only rebuilds them when the source
+    # is NEWER, so a restored .bin or a clock skew can leave a stale pair
+    # behind a build that reports success. Comparing decompressed sizes costs
+    # a second and catches a stale sibling as well as a truncated one, which
+    # is how a corrupt .gz shipped once (see the ?v= bump in game.html).
+    for ext in zst gz; do
+        case "$ext" in
+            zst) size=$(zstd -dc "$served.$ext" 2>/dev/null | wc -c) || size=0 ;;
+            gz)  size=$(gzip -dc "$served.$ext" 2>/dev/null | wc -c) || size=0 ;;
+        esac
+        if [ "$size" != "$expected" ]; then
+            log "ERROR: $served.$ext decompresses to $size bytes, not $expected"
+            log "browsers accepting $ext would get a stale or truncated history"
+            exit 1
+        fi
+    done
+    log "web bundle rebuilt (history: $expected bytes, .zst/.gz verified)"
 else
     log "skipping web rebuild (--no-build); run ./build-web.sh to ship this history"
 fi

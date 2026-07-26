@@ -16,7 +16,7 @@ STAGE="$ROOT/build/itch"          # under build/, which .gitignore ignores
 OUT="$ROOT/hexel-itch.zip"
 LIMIT=$((64 * 1024 * 1024))       # itch jam hard limit: 64 MB
 
-# 1. (Re)build web.js + web.wasm + web.data into client/web/.
+# 1. (Re)build web.js + web.wasm + hexel-tile-history.bin into client/web/.
 ./build-web.sh
 
 # 2. Stage the single-pane page + build outputs, index.html at the root.
@@ -38,9 +38,11 @@ cp client/web/web.wasm  "$STAGE/web.wasm"
 cp client/web/hexel-tile-history.bin "$STAGE/hexel-tile-history.bin"
 cp client/web/favicon.ico "$STAGE/favicon.ico"
 
-# 3. Zip with index.html at the archive root. The history is what the 64 MB
-# check below is really measuring — deflate takes its 258 MiB down to well
-# under the limit, which is why this fits at all.
+# 3. Zip with index.html at the archive root. Deflate is what the 64 MB check
+# below is really measuring: the wasm dominates the archive, and the history's
+# fixed-width records compress to a fraction of their size — it was the
+# history that made this a close call back when it shipped 258 MiB of v3
+# records.
 rm -f "$OUT"
 ( cd "$STAGE" && zip -q -r "$OUT" index.html web.js web.wasm hexel-tile-history.bin favicon.ico )
 
