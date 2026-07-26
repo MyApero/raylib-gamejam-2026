@@ -9,7 +9,7 @@ use spacetimedb_primitives::TableId;
 use spacetimedb_sats::buffer::BufReader;
 use spacetimedb_sats::{AlgebraicType, AlgebraicValue, ProductType, ProductValue, bsatn};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufWriter, Read, Seek, Write};
@@ -28,7 +28,23 @@ const ST_COLUMN_ID: TableId = TableId(2);
 // since deleted (`admin_delete_island`/`delete_account` remove the owner's
 // `Inventory` rows too, so nothing live is left to resolve from). Must stay
 // in sync with `client/src/bin/web.rs`'s `RECOVERED_HISTORY_MAGIC`.
-const HISTORY_MAGIC: &[u8] = b"HEXELHIST\x03";
+const HISTORY_MAGIC: &[u8] = b"HEXELHIST\x04";
+/// Version 4 drops the transaction offset the client never read. It cost
+/// eight of the twenty-five bytes, and the working file keeps it, so nothing
+/// is lost for auditing — only the download shrinks, which is what decides
+/// how much history can ship at all.
+const HISTORY_RECORD_BYTES: usize = 17;
+/// Working file the extractor appends to, in commitlog order, one record per
+/// event with the transaction offset and the sort timestamp. Never shipped:
+/// the client reads the chronologically sorted `HISTORY_MAGIC` file emitted
+/// from this one. Kept separately because a checkpoint resume can only append
+/// to log order, while the shipped order has to be rebuilt whole every run.
+const RAW_MAGIC: &[u8] = b"HEXELRAW\x01";
+const RAW_RECORD_BYTES: usize = 33;
+/// Start of the `island_id, q, r, color` block — identical in both formats,
+/// so the shipped record is this block with the kind byte in front.
+const RAW_PAYLOAD_AT: usize = 9;
+const RAW_TIME_AT: usize = 25;
 // Mirrors `client/src/bin/web.rs`'s `UNKNOWN_BORDER_COLOR` — a kind-5
 // record's `color` when neither an explicit `border_color` pin nor the
 // owner's seed hue could be resolved at extraction time (never a valid
@@ -42,6 +58,11 @@ struct HistoryEvent {
     q: i32,
     r: i32,
     color: u32,
+    /// When this event happened, in microseconds since the epoch — the row's
+    /// own `painted_at`/`created_at`, adjusted by `record_replay_event`. The
+    /// shipped file is sorted on it, which is the only thing that puts a
+    /// bulk-imported world back into the order it was actually painted in.
+    time_micros: i64,
 }
 
 /// A read-only commitlog repository. The production `Fs` repository requires
@@ -227,6 +248,25 @@ struct State {
     /// run; a from-scratch extraction always sees every `inventory` insert
     /// in order.
     owner_seed_hue: BTreeMap<AlgebraicValue, (u64, u16)>,
+    /// Latest `painted_at` seen so far — a running "now" for the point the
+    /// walk has reached. Events whose own row timestamp does not say when
+    /// they happened (any delete; an `island` re-insert at a new leaderboard
+    /// slot, which keeps its original `created_at`) are stamped with this
+    /// instead. Only cell timestamps advance it: `created_at` values arrive
+    /// out of order during a bulk import and would ratchet it to the newest
+    /// island before the older ones had been read.
+    log_time: i64,
+}
+
+/// What a delete and an insert have to agree on to be one update. An island's
+/// slot is deliberately excluded — a re-rank changes exactly that, and the
+/// pair still describes one island moving.
+fn dedupe_key(event: &HistoryEvent) -> (u8, u32, i32, i32) {
+    match event.kind {
+        0 | 1 => (0, event.island_id, event.q, event.r),
+        2 | 3 => (1, 0, event.q, event.r),
+        _ => (2, event.island_id, 0, 0),
+    }
 }
 
 fn pack_hsv(h: u16, s: u8, v: u8) -> u32 {
@@ -243,6 +283,20 @@ fn option_is_none(value: &AlgebraicValue) -> Result<bool> {
             AlgebraicValue::Product(product) if product.elements.is_empty()
         )),
         other => bail!("expected an Option field, found {other:?}"),
+    }
+}
+
+/// Microseconds out of a `Timestamp` column. SATS may hand the special type
+/// back either already flattened to its payload or still wrapped in the
+/// one-field product it is defined as, so both shapes are accepted.
+fn timestamp_micros(value: &AlgebraicValue) -> Result<i64> {
+    match value {
+        AlgebraicValue::I64(micros) => Ok(*micros),
+        AlgebraicValue::Product(product) => match product.elements.as_ref() {
+            [AlgebraicValue::I64(micros)] => Ok(*micros),
+            _ => bail!("expected a Timestamp field, found {value:?}"),
+        },
+        other => bail!("expected a Timestamp field, found {other:?}"),
     }
 }
 
@@ -263,12 +317,13 @@ impl State {
             output.flush()?;
         }
         let mut output = format!(
-            "H\t{}\t{}\t{}\t{}\t{}\n",
+            "H\t{}\t{}\t{}\t{}\t{}\t{}\n",
             self.current_offset,
             self.transaction_count,
             self.tile_inserts,
             self.tile_deletes,
-            self.output_bytes
+            self.output_bytes,
+            self.log_time
         );
         for (table_id, name) in &self.table_names {
             output.push_str(&format!("T\t{}\t{name}\n", table_id.0));
@@ -309,6 +364,14 @@ impl State {
                     state.tile_inserts = inserts.parse()?;
                     state.tile_deletes = deletes.parse()?;
                     state.output_bytes = output_bytes.parse()?;
+                }
+                ["H", offset, transactions, inserts, deletes, output_bytes, log_time] => {
+                    state.current_offset = offset.parse()?;
+                    state.transaction_count = transactions.parse()?;
+                    state.tile_inserts = inserts.parse()?;
+                    state.tile_deletes = deletes.parse()?;
+                    state.output_bytes = output_bytes.parse()?;
+                    state.log_time = log_time.parse()?;
                 }
                 ["T", table_id, name] => {
                     state
@@ -443,6 +506,13 @@ impl State {
                 self.current_offset
             ),
         };
+        let time_field = |name| match field(name) {
+            Some(value) => timestamp_micros(value),
+            None => bail!(
+                "replay table {table_id:?} is missing {name} at transaction {}",
+                self.current_offset
+            ),
+        };
         let is_insert = match operation {
             "insert" => true,
             "delete" => false,
@@ -456,6 +526,7 @@ impl State {
                 q: i32_field("q")?,
                 r: i32_field("r")?,
                 color: u32_field("color")?,
+                time_micros: time_field("painted_at")?,
             },
             Some("margin_cell") => HistoryEvent {
                 kind: if is_insert { 3 } else { 2 },
@@ -463,6 +534,7 @@ impl State {
                 q: i32_field("q")?,
                 r: i32_field("r")?,
                 color: u32_field("color")?,
+                time_micros: time_field("painted_at")?,
             },
             Some("island") => {
                 // Resolved once here rather than left for replay to look up
@@ -494,6 +566,7 @@ impl State {
                     q: u32_field("slot")? as i32,
                     r: 0,
                     color,
+                    time_micros: time_field("created_at")?,
                 }
             }
             _ => unreachable!("validated by table_is_replayable"),
@@ -581,6 +654,13 @@ impl State {
         let Some(event) = self.replay_event(table_id, row, operation)? else {
             return Ok(());
         };
+        // A cell insert's `painted_at` is when it happened, so it is the only
+        // event that both times itself and advances the running clock. The
+        // rest are stamped at the end of the transaction — see
+        // `flush_replay_events`.
+        if matches!(event.kind, 1 | 3) {
+            self.log_time = self.log_time.max(event.time_micros);
+        }
         match operation {
             "insert" => {
                 self.tile_inserts += 1;
@@ -605,7 +685,8 @@ impl State {
         output.write_all(&event.q.to_le_bytes())?;
         output.write_all(&event.r.to_le_bytes())?;
         output.write_all(&event.color.to_le_bytes())?;
-        self.output_bytes += 25;
+        output.write_all(&event.time_micros.to_le_bytes())?;
+        self.output_bytes += RAW_RECORD_BYTES as u64;
         Ok(())
     }
 
@@ -615,7 +696,32 @@ impl State {
         // visible at the transaction boundary.
         let deletes = std::mem::take(&mut self.pending_deletes);
         let inserts = std::mem::take(&mut self.pending_inserts);
-        for event in deletes.into_iter().chain(inserts) {
+        // An update reaches the log as a delete plus an insert of the same
+        // row. Replay applies an insert by overwriting, so writing the delete
+        // too only makes the thing blink out and back: a whole leaderboard
+        // re-rank vanished and reappeared, and every repainted tile flashed
+        // empty. Only deletes with no matching insert are real removals.
+        let replaced: BTreeSet<_> = inserts.iter().map(dedupe_key).collect();
+        let deletes = deletes
+            .into_iter()
+            .filter(|event| !replaced.contains(&dedupe_key(event)));
+        for mut event in deletes.chain(inserts) {
+            // Stamped here, not on arrival, so that everything a transaction
+            // did carries one time. Stamping as rows were visited let a
+            // re-rank's delete and its matching re-insert land on either side
+            // of a paint in the same transaction, which sorted the insert
+            // ahead of the delete and left the island deleted for good.
+            event.time_micros = match event.kind {
+                1 | 3 => event.time_micros,
+                // Everything else happened at the transaction's clock, but
+                // never before the row it acts on was itself created: a quiet
+                // spell leaves the clock behind the row, and a delete stamped
+                // earlier than its own insert sorts ahead of it and never
+                // takes effect. Keeping `created_at` as the floor is also
+                // what makes a bulk-imported island appear when it was
+                // founded rather than when the import ran.
+                _ => event.time_micros.max(self.log_time),
+            };
             self.write_event(event)?;
         }
         Ok(())
@@ -797,6 +903,190 @@ impl Decoder for &Extractor {
     }
 }
 
+type RawRecord = [u8; RAW_RECORD_BYTES];
+
+fn record_time(record: &RawRecord) -> i64 {
+    i64::from_le_bytes(record[RAW_TIME_AT..].try_into().expect("fixed raw record"))
+}
+
+fn record_island(record: &RawRecord) -> u32 {
+    u32::from_le_bytes(
+        record[RAW_PAYLOAD_AT..RAW_PAYLOAD_AT + 4]
+            .try_into()
+            .expect("fixed raw record"),
+    )
+}
+
+fn read_raw(path: &PathBuf) -> Result<Vec<RawRecord>> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("could not read history output {}", path.display()))?;
+    let body = bytes
+        .strip_prefix(RAW_MAGIC)
+        .with_context(|| format!("{} has an unknown format", path.display()))?;
+    if body.len() % RAW_RECORD_BYTES != 0 {
+        bail!("{} has a partial record", path.display());
+    }
+    Ok(body
+        .chunks_exact(RAW_RECORD_BYTES)
+        .map(|chunk| chunk.try_into().expect("fixed raw record"))
+        .collect())
+}
+
+/// Rewrite the log-order working file as the chronologically ordered file the
+/// client ships, dropping the sort timestamp from each record.
+///
+/// The whole history is sorted every run rather than appended to, because a
+/// bulk import lands thousands of events whose real times are spread over
+/// weeks: they only fall into place relative to each other once the entire
+/// set is ordered together. The sort is stable, so events sharing a timestamp
+/// keep the log's own order — which is what keeps a delete ahead of the
+/// insert that replaces it within one transaction.
+///
+/// `legacy_path` is an optional working file extracted from a commitlog this
+/// database was seeded from. Only its island placement events are merged in:
+/// they are what a bulk import cannot carry (every island arrives at the slot
+/// it held on import day), and they are a few thousand records against the
+/// millions of paint events in the same log.
+fn emit_sorted(
+    raw_path: &PathBuf,
+    sorted_path: &PathBuf,
+    legacy_path: Option<&PathBuf>,
+) -> Result<usize> {
+    let current = read_raw(raw_path)?;
+    let imported: BTreeSet<u32> = current
+        .iter()
+        .filter(|record| record[0] == 5)
+        .map(record_island)
+        .collect();
+    let mut records: Vec<RawRecord> = Vec::new();
+    let mut legacy_islands = BTreeSet::new();
+    let mut legacy_alive: BTreeMap<u32, RawRecord> = BTreeMap::new();
+    let mut legacy_end = i64::MIN;
+    if let Some(path) = legacy_path {
+        for record in read_raw(path)? {
+            // Over every record, not just the island ones: painting carries on
+            // after the last re-rank, and an end taken from island events
+            // alone put the synthesised deletes below in the middle of it,
+            // orphaning every cell those islands were painted after.
+            legacy_end = legacy_end.max(record_time(&record));
+            if matches!(record[0], 4 | 5) {
+                let island = record_island(&record);
+                legacy_islands.insert(island);
+                if record[0] == 5 {
+                    legacy_alive.insert(island, record);
+                } else {
+                    legacy_alive.remove(&island);
+                }
+            }
+            records.push(record);
+        }
+    }
+    // The recovered history stops before the import was taken, so islands
+    // reaped in between are still standing at its last event and nothing in
+    // the imported world ever removes them — they would sit on top of
+    // whichever island later inherits the slot, for the rest of the replay.
+    // Absent from the import is the evidence they are gone; the delete is
+    // synthesised from each one's own last event, so it keeps its offset.
+    for (island, mut record) in legacy_alive {
+        if !imported.contains(&island) {
+            record[0] = 4;
+            record[RAW_TIME_AT..].copy_from_slice(&legacy_end.to_le_bytes());
+            records.push(record);
+        }
+    }
+    for mut record in current {
+        // The import that seeded this database gave every island the slot it
+        // held on import day, timestamped with when that island was founded.
+        // With the real placement history in front of it that event is no
+        // longer a founding, it is the catch-up to the layout the import
+        // froze — so it belongs where the recovered history runs out.
+        if matches!(record[0], 4 | 5)
+            && legacy_islands.contains(&record_island(&record))
+            && record_time(&record) < legacy_end
+        {
+            record[RAW_TIME_AT..].copy_from_slice(&legacy_end.to_le_bytes());
+        }
+        records.push(record);
+    }
+    records.sort_by_key(record_time);
+    let mut output = BufWriter::new(File::create(sorted_path).with_context(|| {
+            format!("could not create shipped history {}", sorted_path.display())
+        })?);
+    output.write_all(HISTORY_MAGIC)?;
+    for record in &records {
+        output.write_all(&record[..1])?;
+        output.write_all(&record[RAW_PAYLOAD_AT..RAW_TIME_AT])?;
+    }
+    output.flush()?;
+    Ok(records.len())
+}
+
+/// Re-read what was just written and refuse to ship it if it cannot be
+/// replayed coherently.
+///
+/// Every bug this file has had was silent: the replay still rendered, just
+/// wrong — cells belonging to islands that did not exist yet, islands stacked
+/// in one slot, a delete sorted ahead of the insert it was meant to replace.
+/// None of it is visible without playing the whole thing back and looking
+/// carefully, so it gets checked here instead, where a failure stops the
+/// refresh rather than reaching a player.
+fn validate_shipped(path: &PathBuf) -> Result<()> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("could not re-read shipped history {}", path.display()))?;
+    let body = bytes
+        .strip_prefix(HISTORY_MAGIC)
+        .context("shipped history does not carry the expected magic")?;
+    if body.len() % HISTORY_RECORD_BYTES != 0 {
+        bail!("shipped history has a partial record");
+    }
+    let mut slots: BTreeMap<u32, i32> = BTreeMap::new();
+    let mut orphans = 0_u64;
+    let mut events = 0_u64;
+    for record in body.chunks_exact(HISTORY_RECORD_BYTES) {
+        events += 1;
+        let island = u32::from_le_bytes(record[1..5].try_into().expect("fixed record"));
+        let q = i32::from_le_bytes(record[5..9].try_into().expect("fixed record"));
+        match record[0] {
+            5 => {
+                slots.insert(island, q);
+            }
+            4 => {
+                slots.remove(&island);
+            }
+            // A cell painted onto an island that is not standing has nowhere
+            // to be drawn, so replay skips it — history that silently never
+            // appears. Its DELETE is not a problem the same way: reaping an
+            // island drops the island and its cells in one transaction, so
+            // those deletes legitimately land just after it is gone, and
+            // removing a cell nobody is drawing is a no-op either way.
+            1 if !slots.contains_key(&island) => orphans += 1,
+            0..=3 => {}
+            other => bail!("shipped history has an unknown event kind {other}"),
+        }
+    }
+    if events == 0 {
+        bail!("shipped history is empty");
+    }
+    if orphans > 0 {
+        bail!("shipped history has {orphans} cell events whose island is not present at that point");
+    }
+    if slots.is_empty() {
+        bail!("shipped history ends with no islands standing");
+    }
+    // One island per slot is a database invariant (`island.slot` is unique),
+    // so two sharing one at the end means events were lost or misordered.
+    let mut occupants: BTreeMap<i32, u32> = BTreeMap::new();
+    for (&island, &slot) in &slots {
+        if let Some(&other) = occupants.get(&slot) {
+            bail!("shipped history ends with islands #{other} and #{island} both in slot {slot}");
+        }
+        occupants.insert(slot, island);
+    }
+    println!("validated_events={events}");
+    println!("validated_islands={}", slots.len());
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
     let path = args
@@ -805,6 +1095,8 @@ fn main() -> Result<()> {
         .context("usage: history-extractor /path/to/replica/clog")?;
     let checkpoint = args.next().map(PathBuf::from);
     let output_path = args.next().map(PathBuf::from);
+    let sorted_path = args.next().map(PathBuf::from);
+    let legacy_path = args.next().map(PathBuf::from).filter(|path| path.exists());
     let mut state = match checkpoint.as_ref().filter(|path| path.exists()) {
         Some(path) => State::load_checkpoint(path)?,
         None => State::default(),
@@ -815,13 +1107,13 @@ fn main() -> Result<()> {
         state.current_offset.saturating_add(1)
     };
     state.checkpoint = checkpoint.clone();
-    if let Some(output_path) = output_path {
+    if let Some(output_path) = output_path.clone() {
         let file = if state.transaction_count == 0 {
             let mut file = File::create(&output_path).with_context(|| {
                 format!("could not create history output {}", output_path.display())
             })?;
-            file.write_all(HISTORY_MAGIC)?;
-            state.output_bytes = HISTORY_MAGIC.len() as u64;
+            file.write_all(RAW_MAGIC)?;
+            state.output_bytes = RAW_MAGIC.len() as u64;
             file
         } else {
             let mut file = OpenOptions::new()
@@ -848,6 +1140,11 @@ fn main() -> Result<()> {
     let mut state = extractor.0.into_inner();
     if let Some(path) = &checkpoint {
         state.save_checkpoint(path)?;
+    }
+    if let (Some(raw), Some(sorted)) = (output_path, sorted_path) {
+        let events = emit_sorted(&raw, &sorted, legacy_path.as_ref())?;
+        println!("shipped_events={events}");
+        validate_shipped(&sorted)?;
     }
     println!("transactions={}", state.transaction_count);
     println!("tile_inserts={}", state.tile_inserts);
