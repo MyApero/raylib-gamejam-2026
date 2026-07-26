@@ -1,6 +1,7 @@
 mod module_bindings;
 mod replay;
 mod sfx;
+mod title_map;
 mod ui;
 mod world;
 use module_bindings::*;
@@ -17,7 +18,34 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Local SpacetimeDB instance (`spacetime start`).
 const HOST: &str = "http://localhost:3000";
+/// Default database name (production). Override with `HEXEL_DB` to point at
+/// another database on the same instance — e.g. the locally-owned `hexel2`
+/// migration target (see tools/db-migrator).
 const DB_NAME: &str = "hexel";
+
+fn db_name() -> String {
+    std::env::var("HEXEL_DB").unwrap_or_else(|_| DB_NAME.to_string())
+}
+
+/// Everything the title screen and the local player's own state need. All
+/// small tables — the whole set is a few thousand rows — so this subscription
+/// applies quickly and the Draw button unlocks without waiting for the map.
+const STARTUP_TABLES: &[&str] = &[
+    "SELECT * FROM config",
+    "SELECT * FROM user",
+    "SELECT * FROM inventory",
+    "SELECT * FROM island",
+    "SELECT * FROM island_like",
+    "SELECT * FROM gift",
+    "SELECT * FROM hexa_event",
+    "SELECT * FROM hexa_cluster",
+    "SELECT * FROM merge_event",
+];
+
+/// The painted map: tens of thousands of rows, and by far the bulk of the
+/// initial payload. Split out of `STARTUP_TABLES` so it streams behind the
+/// title screen instead of blocking it.
+const WORLD_TABLES: &[&str] = &["SELECT * FROM island_cell", "SELECT * FROM margin_cell"];
 
 /// `credentials::File` keys its storage path only by this string
 /// (`~/.spacetimedb_client_credentials/<key>`), shared by every process on
@@ -26,9 +54,10 @@ const DB_NAME: &str = "hexel";
 /// `HEXEL_PLAYER` to test as separate players locally, e.g.
 /// `HEXEL_PLAYER=p1 cargo run -p client --bin client` in one terminal
 /// and `HEXEL_PLAYER=p2 ...` in another. Unset defaults to the old
-/// shared single-player key, so solo runs are unaffected.
+/// shared single-player key, so solo runs are unaffected. The database name
+/// is mixed in so switching `HEXEL_DB` doesn't reuse the wrong player.
 fn creds_store() -> credentials::File {
-    let key = std::env::var("HEXEL_PLAYER").unwrap_or_else(|_| DB_NAME.to_string());
+    let key = std::env::var("HEXEL_PLAYER").unwrap_or_else(|_| db_name());
     credentials::File::new(key)
 }
 
@@ -54,7 +83,7 @@ fn island_world_center(island: &Island) -> Vector2 {
     world::axial_to_world(cx, cy)
 }
 
-/// F9.6 item 7 (launch intro): a camera pose (target, zoom) framing every
+/// A camera pose (target, zoom) framing every
 /// currently-known island's center — the "whole occupied world" the intro
 /// starts from before easing to the player's own island. Falls back to the
 /// player-fit pose itself if no islands are known yet (can't happen once
@@ -98,7 +127,7 @@ enum Paintable {
     OwnIsland(i32, i32),
     /// Absolute world coords in the margin.
     Margin(i32, i32),
-    /// F14 (decision 20): local offset into the slot-0 community island —
+    /// Local offset into the slot-0 community island —
     /// paintable by anyone, not just its (sentinel) "owner".
     Community(i32, i32),
     /// Author request (admin "draw anywhere"): absolute world coords on
@@ -117,7 +146,7 @@ fn classify(ctx: &DbConnection, me: Identity, world_q: i32, world_r: i32) -> Pai
             return Paintable::OwnIsland(lq, lr);
         }
     }
-    // F14: slot 0 is always the origin (fixed geometry, never a real
+    // Slot 0 is always the origin (fixed geometry, never a real
     // player's island — see `lowest_free_slot`), so no island lookup needed.
     let (q0, r0) = world::slot_coords(0);
     let (ccx0, ccy0) = world::slot_center(q0, r0);
@@ -164,7 +193,7 @@ fn merge_target_at(ctx: &DbConnection, world_q: i32, world_r: i32) -> Option<(u8
         .map(|c| (0u8, c.id, world::unpack_hsv(c.color).0))
 }
 
-/// F9.6 item 2 (middle-click eyedropper): the color actually painted at
+/// The color actually painted at
 /// absolute world axial `(q, r)`, whichever kind of cell it is — any
 /// player's island cell, or a margin cell. `None` if nothing's been painted
 /// there. Unlike `merge_target_at`, margin tiles count here (the eyedropper
@@ -199,7 +228,7 @@ fn short_hex(id: Identity) -> String {
 /// doubles as their account-recovery token, decision 11), so it must never
 /// leak to another player, not even truncated.
 fn player_label(ctx: &DbConnection, id: Identity) -> String {
-    // F14 (decision 20): the community island's sentinel owner isn't a real
+    // The community island's sentinel owner isn't a real
     // player — name it "Free Isle" rather than falling through to the
     // generic "another player".
     if id == Identity::ZERO {
@@ -265,7 +294,7 @@ fn pick_color_at(
     }
 }
 
-/// F8: coarse "N {unit} ago" label for the island-info popup — no date/time
+/// Coarse "N {unit} ago" label for the island-info popup — no date/time
 /// crate in this workspace, and a jam popup doesn't need calendar precision.
 fn format_age(now: Timestamp, created_at: Timestamp) -> String {
     let secs = now
@@ -292,7 +321,7 @@ fn already_liked(ctx: &DbConnection, island_id: u32, me: Identity) -> bool {
         .any(|l| l.island_id == island_id && l.liker == me)
 }
 
-/// Author-requested: what an island's border currently resolves to,
+/// What an island's border currently resolves to,
 /// ignoring `border_hidden` — the same custom-pin-else-seed-hue fallback the
 /// main draw loop's per-frame `seed_hues` branch uses (see the border
 /// render code below), just computed standalone here since the popup's
@@ -313,7 +342,7 @@ fn resolve_border_color(ctx: &DbConnection, island: &Island) -> Color {
     }
 }
 
-/// F8: builds the popup payload for `island_id` and opens it. A no-op if the
+/// Builds the popup payload for `island_id` and opens it. A no-op if the
 /// island has since vanished (can't happen for real islands, defensive only).
 fn open_island_info(
     ctx: &DbConnection,
@@ -340,7 +369,7 @@ fn open_island_info(
     });
 }
 
-/// Author follow-up (2026-07-12): builds and opens the admin edit modal for
+/// Builds and opens the admin edit modal for
 /// `island_id` — mirrors `open_island_info`'s "look the row up, hand it to
 /// `ui_state`" shape. A no-op if the island or its owner has since vanished.
 fn open_admin_edit(ctx: &DbConnection, ui_state: &mut ui::UiState, island_id: u32) {
@@ -361,12 +390,15 @@ fn open_island_export(ctx: &DbConnection, ui_state: &mut ui::UiState, island_id:
     let Some(island) = ctx.db.island().id().find(&island_id) else {
         return;
     };
-    ui_state.open_island_export(island_id, player_label(ctx, island.owner));
+    ui_state.open_island_export(
+        ui::ExportTarget::Island(island_id),
+        player_label(ctx, island.owner),
+    );
 }
 
 /// In-flight long-press-to-merge gesture: started on LMB press, cancelled by
 /// movement past the tolerance or button release, fires once at the hold
-/// threshold. Also tracks the F8 island-info target, which fires instead on
+/// threshold. Also tracks the island-info target, which fires instead on
 /// a plain (short, unmoved) click — the two gestures are distinguished only
 /// by hold duration, never both fire for the same press.
 struct LongPress {
@@ -384,6 +416,11 @@ fn main() {
     });
     let subscription_ready = Arc::new(AtomicBool::new(false));
     let subscription_ready_callback = Arc::clone(&subscription_ready);
+    // Painted cells are ~97% of the startup payload and nothing on the title
+    // screen needs them, so they ride a second subscription that streams
+    // while the player is still reading the title. See `WORLD_TABLES`.
+    let world_ready = Arc::new(AtomicBool::new(false));
+    let world_ready_callback = Arc::clone(&world_ready);
     let connection_ready = Arc::new(AtomicBool::new(false));
     let connection_failed = Arc::new(AtomicBool::new(false));
     let connection_ready_callback = Arc::clone(&connection_ready);
@@ -411,7 +448,7 @@ fn main() {
             eprintln!("Disconnected: {err:?}");
         })
         .with_token(creds_store().load().expect("Error loading credentials"))
-        .with_database_name(DB_NAME)
+        .with_database_name(db_name())
         .with_uri(HOST)
         .build()
         .expect("Failed to connect");
@@ -425,19 +462,21 @@ fn main() {
             subscription_failed_callback.store(true, Ordering::Release);
             eprintln!("Subscription failed: {err}");
         })
-        .subscribe([
-            "SELECT * FROM config",
-            "SELECT * FROM user",
-            "SELECT * FROM inventory",
-            "SELECT * FROM island",
-            "SELECT * FROM island_like",
-            "SELECT * FROM island_cell",
-            "SELECT * FROM margin_cell",
-            "SELECT * FROM gift",
-            "SELECT * FROM hexa_event",
-            "SELECT * FROM hexa_cluster",
-            "SELECT * FROM merge_event",
-        ]);
+        .subscribe(STARTUP_TABLES);
+
+    // Second, heavier subscription: issued immediately so it streams in the
+    // background, but nothing gates the title screen on it. Only the map
+    // render and the replay scrubber actually read these tables.
+    let world_failed_callback = Arc::clone(&connection_failed);
+    ctx.subscription_builder()
+        .on_applied(move |_ctx| {
+            world_ready_callback.store(true, Ordering::Release);
+        })
+        .on_error(move |_ctx, err| {
+            world_failed_callback.store(true, Ordering::Release);
+            eprintln!("World subscription failed: {err}");
+        })
+        .subscribe(WORLD_TABLES);
 
     let (mut rl, thread) = raylib::init()
         .size(720, 720) // jam hard constraint
@@ -445,8 +484,9 @@ fn main() {
         .build();
     rl.set_target_fps(60);
     rl.hide_cursor(); // we draw our own pointer in the caller's brush color
+    let title_map = title_map::load(&mut rl, &thread);
 
-    // F12: audio device init is an environmental boundary (no sound card,
+    // Audio device init is an environmental boundary (no sound card,
     // headless/CI) — degrade to silence instead of crashing the game over it.
     let audio = initial_replay_duration
         .is_none()
@@ -460,7 +500,7 @@ fn main() {
         rotation: 0.0,
         zoom: ISLAND_FIT_ZOOM,
     };
-    // F9.6 item 7: `None` until the launch intro starts (the first frame
+    // `None` until the launch intro starts (the first frame
     // `my_island` resolves); `Some(start_time)` while it eases toward the
     // island; `centered_on_island` (below) becomes true once it's done or
     // skipped, same as it always has, so every OTHER frame's camera logic
@@ -477,12 +517,12 @@ fn main() {
     let mut replay_clock: Option<replay::ReplayClock> = None;
     let mut replay_request = initial_replay_duration;
     let mut long_press: Option<LongPress> = None;
-    // Author-requested: a clean single-click on a foreign island, held
+    // A clean single-click on a foreign island, held
     // pending for DOUBLE_CLICK_WINDOW to see whether a second click on the
     // same island follows (-> like/unlike toggle) before it resolves into
     // actually opening the info popup. See the gesture block below.
     let mut pending_info_click: Option<(Instant, Vector2, u32)> = None;
-    // F9.5 item 7 / decision 17: `(island_id, hover_started_at)` for the
+    // Decision 17: `(island_id, hover_started_at)` for the
     // currently-hovered foreign island, tracked purely by cursor position
     // (independent of `long_press`/`pending_info_click` above, which stay
     // exactly as shipped for the double-click-to-like/touch-tap gesture).
@@ -499,7 +539,7 @@ fn main() {
     let mut merge_events_seeded = false;
     let mut known_hexa_event_ids: HashSet<u64> = HashSet::new();
     let mut hexa_events_seeded = false;
-    // F9 level-up toast: `None` until the first frame `me` is known, so
+    // Level-up toast: `None` until the first frame `me` is known, so
     // connecting at, say, level 3 doesn't fire a spurious "level up" toast —
     // mirrors `inventory_seeded`'s seed-then-diff pattern above.
     let mut last_level: Option<u64> = None;
@@ -511,7 +551,7 @@ fn main() {
     let mut pending_gift_claim: Option<Instant> = None;
     const GIFT_CLAIM_WINDOW: Duration = Duration::from_secs(5);
     let mut music_started = false;
-    // F9.5 item 5 (modal click-through): a real click's press and release
+    // A real click's press and release
     // land on DIFFERENT frames (a mouse held for even a fraction of a second
     // spans several frames at 60fps), so gating `map_input_allowed` on only
     // the CURRENT frame's modal state isn't enough — the overlay closes on
@@ -519,14 +559,14 @@ fn main() {
     // sees "no modal open" and would let the SAME press paint. Latches at
     // press-start for the whole gesture, cleared on release.
     let mut suppress_map_until_release = false;
-    // F9.6 item 2: middle-click eyedropper — press position, checked on
+    // Middle-click eyedropper — press position, checked on
     // release for `MIDDLE_CLICK_TOL_PX` drift. A clean release fires the
     // eyedropper; nothing here disables the existing middle-drag PAN (see
     // `panning` below), which runs off `is_mouse_button_down` every frame
     // regardless — a real click's incidental pan delta is imperceptible.
     let mut middle_click: Option<Vector2> = None;
-    // F13 (Hexa event): persisted display positions for hexagon-vertex-
-    // snapped cursors (including the local player's own, per the author —
+    // Persisted display positions for hexagon-vertex-
+    // snapped cursors (including the local player's own —
     // see `world::hexa_advance_display`'s doc comment), lerped frame to
     // frame from the server's authoritative `hexa_cluster` rows.
     let mut hexa_display: HashMap<Identity, Vector2> = HashMap::new();
@@ -569,6 +609,7 @@ fn main() {
         let me = ctx.try_identity();
         let now = Timestamp::now();
         let initial_subscription_ready = subscription_ready.load(Ordering::Acquire);
+        let world_subscription_ready = world_ready.load(Ordering::Acquire);
         let startup_connected = connection_ready.load(Ordering::Acquire);
         let startup_connection_failed = connection_failed.load(Ordering::Acquire);
         let startup_ready = startup_connected
@@ -585,7 +626,10 @@ fn main() {
             startup_ready,
             ctx.db.island().count() as usize,
         );
-        if replay_clock.is_none() && replay_request.is_some() && initial_subscription_ready {
+        // Gated on the world subscription, not the startup one: the clock is
+        // built from island_cell/margin_cell paint timestamps, so starting it
+        // earlier would scrub an empty history.
+        if replay_clock.is_none() && replay_request.is_some() && world_subscription_ready {
             let mut timestamps = Vec::new();
             timestamps.extend(
                 ctx.db
@@ -655,7 +699,7 @@ fn main() {
         let mouse_screen = rl.get_mouse_position();
         let mouse_world = rl.get_screen_to_world2D(mouse_screen, camera);
 
-        // F11 (flying gift): current drifted world position of the single
+        // Current drifted world position of the single
         // active gift (if any) and whether the mouse is within claim range
         // of it right now — computed once here (same "stale by one frame"
         // convention as `mouse_world` itself: this reads last frame's
@@ -694,7 +738,7 @@ fn main() {
             && mouse_screen.y > ui::HEADER_H
             && mouse_screen.y < (720.0 - ui::FOOTER_H);
 
-        // F9.6 item 7: launch intro. First frame the player's own island is
+        // Launch intro. First frame the player's own island is
         // known, camera starts framing the whole occupied world (`world_fit`)
         // and eases to the island over `INTRO_DURATION`; any input skips
         // straight to the final pose. `centered_on_island` still means
@@ -709,23 +753,27 @@ fn main() {
         // the Draw button dismisses the title, easing from this exact pose
         // (`intro_from` calls the same `world_fit`).
         if ui_state.title_active {
-            if let Some(me) = me {
-                if let Some(island) = my_island(&ctx, me) {
-                    let (target, zoom) =
-                        world_fit(&ctx, island_world_center(&island), ISLAND_FIT_ZOOM);
-                    camera.target = target;
-                    camera.zoom = zoom;
-                    camera.offset = Vector2::new(360.0, 360.0);
-                }
-            }
+            // Pinned to the pose `title-map.png` was baked at, rather than a
+            // live `world_fit`: the map behind the title is that image, so
+            // the camera has to match it exactly or the live cursors drawn
+            // on top would sit at the wrong places. Also makes the title
+            // pose independent of which islands have streamed in so far.
+            let (target, zoom) = title_map::view();
+            camera.target = target;
+            camera.zoom = zoom;
+            camera.offset = Vector2::new(360.0, 360.0);
         } else if let Some(me) = me {
             if !centered_on_island {
                 if let Some(island) = my_island(&ctx, me) {
                     let to_target = island_world_center(&island);
                     let to_zoom = ISLAND_FIT_ZOOM;
                     let start = *intro_started_at.get_or_insert_with(Instant::now);
-                    let (from_target, from_zoom) =
-                        *intro_from.get_or_insert_with(|| world_fit(&ctx, to_target, to_zoom));
+                    // Starts from the pose the title screen (and the baked
+                    // map behind it) was pinned at, not a fresh `world_fit`.
+                    // Those are different framings, so easing from `world_fit`
+                    // made the camera jump the instant Draw was pressed and
+                    // broke the illusion that the image *is* the world.
+                    let (from_target, from_zoom) = *intro_from.get_or_insert_with(title_map::view);
                     let any_input = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
                         || rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE)
                         || rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_RIGHT)
@@ -759,7 +807,7 @@ fn main() {
         // frame, so the xp/level block below shouldn't also blip xp.mp3 for
         // the same underlying XP bump (a color grant carries XP too).
         let mut reward_sound_this_frame = false;
-        // Inventory-insert watch (F4 merge feedback): toast + last3 nudge
+        // Inventory-insert watch (merge feedback): toast + last3 nudge
         // when a new row for `me` appears. Runs before the HUD snapshot below
         // so a toast fired this frame is visible in this same frame's draw.
         if let Some(me) = me {
@@ -809,7 +857,7 @@ fn main() {
             } else {
                 for inv in ctx.db.inventory().iter() {
                     if known_inventory_ids.insert(inv.id) && inv.owner == me {
-                        // F9.5 item 4: the only way a NEW `obtained_with:
+                        // The only way a NEW `obtained_with:
                         // None` row can appear after the initial seed above
                         // is `reset_account`'s reseed (merges always set
                         // `obtained_with: Some(partner)`) — reset the last-3
@@ -827,7 +875,7 @@ fn main() {
                                 );
                             }
                         } else if inv.obtained_with.is_none() {
-                            // F13: a Hexa-pooled grant ALSO leaves
+                            // A Hexa-pooled grant ALSO leaves
                             // `obtained_with: None` (same as a fresh seed
                             // hue or a `reset_account` reseed) — told apart
                             // by joining against a `hexa_event` row stamped
@@ -899,7 +947,7 @@ fn main() {
                     }
                 }
             }
-            // F9.5 item 4 (author-caught: "selected color not in recent-used
+            // (author-caught: "selected color not in recent-used
             // on launch"): seed the last-3 ring with the caller's current hue
             // the first frame it's known — a no-op once it has anything, so a
             // connection with no merge yet doesn't leave the footer empty.
@@ -912,7 +960,7 @@ fn main() {
             }
         }
 
-        // F9.5 item 5 (modal click-through): latch at the start of a press
+        // Latch at the start of a press
         // whether a modal was open at that instant, and hold it for the
         // whole press — a click's press and release land on different
         // frames, so only the moment the overlay's close button is actually
@@ -920,13 +968,13 @@ fn main() {
         // held afterward. Cleared on release so ordinary map input resumes
         // for the NEXT press.
         if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
-            // F9.5 item 7 follow-up: `any_modal_open` deliberately excludes
+            // `any_modal_open` deliberately excludes
             // the foreign-island hover tooltip — it has no interactive
             // chrome to click-through onto, and blocking map input while
             // it's up would break double-click-to-like/long-press-merge on
             // the very island it's showing info for.
             suppress_map_until_release = ui_state.any_modal_open();
-            // F11: a press landing on the gift claims it immediately and
+            // A press landing on the gift claims it immediately and
             // consumes the whole gesture (like clicking through a modal's
             // close button above), so the same press can't also start a
             // paint stroke or long-press underneath it.
@@ -938,7 +986,10 @@ fn main() {
                 suppress_map_until_release = true;
             }
         }
-        if rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT) {
+        // Not down is enough — see `bin/web.rs`: a release that never reaches
+        // the window leaves this latched, and a latched suppression makes the
+        // whole map inert, `set_pos` heartbeat included.
+        if !rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) {
             suppress_map_until_release = false;
         }
 
@@ -950,7 +1001,7 @@ fn main() {
         // `Some(name)` means this exact frame is the clean export card. It
         // stays local to the frame so the player returns immediately to the
         // game after raylib has captured it below.
-        let mut export_name: Option<String> = None;
+        let mut export_subject: Option<ui::ExportSubject> = None;
         if let Some(me) = me {
             let user = ctx.db.user().identity().find(&me);
             let hues: Vec<u16> = ctx
@@ -966,7 +1017,7 @@ fn main() {
             let xp = user.as_ref().map_or(0, |u| u.xp);
             let locked = user.as_ref().is_some_and(|u| u.locked);
             let level = world::level_of(xp);
-            // F9 level-up feedback: fire once per actual increase, not on
+            // Level-up feedback: fire once per actual increase, not on
             // the first frame `me` becomes known (that would just be
             // reporting whatever level the player already was).
             let leveled = last_level.is_some_and(|prev| level > prev);
@@ -1013,7 +1064,7 @@ fn main() {
             }
             last_xp = Some(xp);
             ui_state.sync_name_once(user.as_ref().and_then(|u| u.name.as_ref()));
-            // Author-caught: the Like button looked unresponsive because the
+            // The Like button looked unresponsive because the
             // popup's `likes`/`already_liked` were a one-time snapshot from
             // when it opened. Re-read both live every frame the popup is
             // open, same as everything else in `HudInfo`.
@@ -1033,7 +1084,7 @@ fn main() {
                     );
                 }
             }
-            // F8 re-rank countdown: `next_rerank_at.duration_since(now)` is
+            // Re-rank countdown: `next_rerank_at.duration_since(now)` is
             // `Some` only while the target is still in the future.
             let rerank_secs = ctx
                 .db
@@ -1098,7 +1149,7 @@ fn main() {
                     Err(e) => eprintln!("Failed to load credentials: {e:?}"),
                 }
             }
-            // Native token import is skipped for the jam (plan.md F6): the
+            // Native token import is skipped for the jam (plan.md): the
             // judged target is the web build, where importing reconnects via
             // a page reload; native has no equivalent hot-swap short of
             // restarting the process. `show_token_import: false` above means
@@ -1151,7 +1202,7 @@ fn main() {
             if actions.open_project_page {
                 open_url("https://itch.io/jam/raylib-6x-gamejam/rate/4767021");
             }
-            // Author-requested: footer button replacing the old "click your
+            // Footer button replacing the old "click your
             // own island" gesture, which just painted instead of opening
             // the popup.
             if actions.open_own_island {
@@ -1177,23 +1228,38 @@ fn main() {
             }
             if actions.arm_island_export {
                 ui_state.tool = ui::Tool::IslandExport;
-                ui_state.show_info_toast("Export: click an island".to_string());
+                ui_state.show_info_toast(
+                    "Export: click an island, or empty map for the whole world".to_string(),
+                );
             }
-            if let Some(island_id) = actions.export_island_image {
-                if let Some(island) = ctx.db.island().id().find(&island_id) {
-                    camera.target = island_world_center(&island);
-                    camera.zoom = ISLAND_FIT_ZOOM;
-                    camera.offset = Vector2::new(360.0, 360.0);
-                    export_name = Some(player_label(&ctx, island.owner));
+            match actions.export_image {
+                Some(ui::ExportTarget::Island(island_id)) => {
+                    if let Some(island) = ctx.db.island().id().find(&island_id) {
+                        camera.target = island_world_center(&island);
+                        camera.zoom = ISLAND_FIT_ZOOM;
+                        camera.offset = Vector2::new(360.0, 360.0);
+                        export_subject = Some(ui::ExportSubject::Island {
+                            owner: player_label(&ctx, island.owner),
+                            link_id: info.link_id,
+                        });
+                    }
                 }
+                Some(ui::ExportTarget::World) => {
+                    let (target, zoom) = world_fit(&ctx, camera.target, camera.zoom);
+                    camera.target = target;
+                    camera.zoom = zoom;
+                    camera.offset = Vector2::new(360.0, 360.0);
+                    export_subject = Some(ui::ExportSubject::World);
+                }
+                None => {}
             }
-            if actions.export_island_gif.is_some() || actions.export_island_video.is_some() {
+            if actions.export_island_animation.is_some() {
                 ui_state.show_info_toast(
                     "Timelapse export is available in the web version".to_string(),
                 );
             }
         }
-        // F9.5 item 7 follow-up: mirrors the latch above — only an OWN-
+        // Mirrors the latch above — only an OWN-
         // island popup blocks map input; a foreign tooltip must not, or
         // hovering it would disable the very double-click/long-press
         // gestures it's showing info for.
@@ -1218,7 +1284,7 @@ fn main() {
             camera.zoom = (camera.zoom * (1.0 + wheel * 0.1)).clamp(0.25, 60.0);
         }
 
-        // F9.6 item 6: WASD/arrow-key pan, Q/E zoom. Swallowed while a text
+        // WASD/arrow-key pan, Q/E zoom. Swallowed while a text
         // field owns keyboard input (name/import/link fields) so typing
         // doesn't also drive the camera.
         if map_input_allowed && !ui_state.text_field_focused() {
@@ -1250,7 +1316,7 @@ fn main() {
             }
         }
 
-        // F13 follow-up: the Move tool makes plain left-drag pan too, no
+        // The Move tool makes plain left-drag pan too, no
         // Shift needed — everything downstream that already gates on
         // `!panning` (painting, long-press-merge) is skipped for free.
         let panning = map_input_allowed
@@ -1290,7 +1356,7 @@ fn main() {
         }
 
         // Painting/erasing: left-drag, not while panning (SHIFT/middle/right
-        // held, or the Move tool active — see `panning` above). F9.6 item 1:
+        // held, or the Move tool active — see `panning` above).
         // which reducer fires depends on `ui_state.tool` — same target-cell
         // classification either way. `over_map_area`: not while the cursor
         // is over the header/footer HUD.
@@ -1372,7 +1438,7 @@ fn main() {
             }
         }
 
-        // Author follow-up (2026-07-12): Tool::AdminEdit is a persistent
+        // Tool::AdminEdit is a persistent
         // (not one-shot) mode, deliberately mobile-friendly unlike a
         // right-click or long-press — a plain tap/click on another player's
         // island opens the admin edit modal. Painting is already excluded
@@ -1401,10 +1467,15 @@ fn main() {
             let (wq, wr) = world::world_to_axial(mouse_world);
             if let Some((island, _, _)) = island_at(&ctx, wq, wr) {
                 open_island_export(&ctx, &mut ui_state, island.id);
+            } else {
+                ui_state.open_island_export(
+                    ui::ExportTarget::World,
+                    "the whole world".to_string(),
+                );
             }
         }
 
-        // F9.6 item 2: middle-click eyedropper. A clean press+release within
+        // Middle-click eyedropper. A clean press+release within
         // `MIDDLE_CLICK_TOL_PX` picks the hovered tile's color; if the caller
         // already owns that hue (within `HUE_TOLERANCE`, same window
         // `set_brush` itself enforces), it's applied with saturation clamped
@@ -1445,7 +1516,7 @@ fn main() {
         if !map_input_allowed {
             long_press = None;
         } else if let Some(me) = me {
-            // Author follow-up: `AdminEdit` is handled entirely by its own
+            // `AdminEdit` is handled entirely by its own
             // block above (a plain tap opens the modal) — it must not also
             // arm this gesture, which would leave `pending_info_click`
             // resolving into the old open-the-link behavior on release.
@@ -1462,12 +1533,12 @@ fn main() {
                     press_at: Instant::now(),
                     target: merge_target_at(&ctx, wq, wr)
                         .filter(|&(_, _, hue)| !have_hue(&ctx, me, hue)),
-                    // F8 (author follow-up): any point on a FOREIGN island's
+                    // Any point on a FOREIGN island's
                     // territory, not just its center — released here opens
                     // its info popup instead of painting. Your own island
                     // stays paint-only; its popup now opens via the "My
                     // Isle" footer button instead (`actions.open_own_island`).
-                    // F14 author reversal: the community island (owner ==
+                    // Author reversal: the community island (owner ==
                     // Identity::ZERO) is excluded here — no info popup, no
                     // like, matching the hover exclusion below. Its sentinel
                     // owner would otherwise pass every `owner != me` check
@@ -1486,7 +1557,7 @@ fn main() {
                 let moved = (dx * dx + dy * dy).sqrt() > LONG_PRESS_TOL_PX;
                 let released = !rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT);
                 if moved || released {
-                    // Author-requested (Instagram-style): a clean short
+                    // A clean short
                     // click on a foreign island no longer opens the popup
                     // immediately — it's held as `pending_info_click` for
                     // DOUBLE_CLICK_WINDOW first, in case a second click
@@ -1545,7 +1616,7 @@ fn main() {
                 if let Some(me) = me {
                     open_island_info(&ctx, &mut ui_state, island_id, me, now);
                 }
-                // F9.5 item 7 follow-up (author-requested): the hover
+                // Follow-up (author-requested): the hover
                 // tooltip that replaced this click's old popup-opening role
                 // is non-interactive, so a resolved single (non-double)
                 // click on a foreign island now directly opens its itch.io
@@ -1564,12 +1635,12 @@ fn main() {
             }
         }
 
-        // F9.5 item 7 / decision 17: island info on hover (desktop). Purely
+        // Decision 17: island info on hover (desktop). Purely
         // position-based — independent of the click/long-press gesture
         // block above, which is left untouched for double-click-to-like and
         // touch (tap opens, double-tap likes; raylib-web aliases a single
         // touch to ordinary mouse events, so that path already covers touch).
-        // Author-caught: clicking a footer button (e.g. "My Isle", itself
+        // Clicking a footer button (e.g. "My Isle", itself
         // over foreign territory at the camera's current framing) could
         // immediately have the hover logic reinterpret that same resting
         // mouse position as hovering a DIFFERENT foreign island and
@@ -1641,7 +1712,7 @@ fn main() {
             p.x >= view_min_x && p.x <= view_max_x && p.y >= view_min_y && p.y <= view_max_y
         };
 
-        // Author-requested (F8 follow-up): each island's border is drawn in
+        // Each island's border is drawn in
         // its owner's SEED hue — the color they started with (or re-rolled
         // via reset), never the live/nudged brush — so the world map is
         // browsable by "whose island is that" at a glance. Exactly one
@@ -1656,7 +1727,7 @@ fn main() {
             .map(|inv| (inv.owner, inv.hue))
             .collect();
 
-        // F9.5 item 6: render scale for other players' cursors, relative to
+        // Render scale for other players' cursors, relative to
         // their fixed on-screen size at the default `ISLAND_FIT_ZOOM` —
         // shrinks with the camera like a world-space object would (instead
         // of towering over the tiles when zoomed out), floored so it stays
@@ -1664,12 +1735,12 @@ fn main() {
         let other_cursor_scale =
             (camera.zoom / ISLAND_FIT_ZOOM).max(world::constants::CURSOR_MIN_SCALE);
 
-        // F13 (Hexa event): the server-authoritative central formation.
+        // The server-authoritative central formation.
         // Place each member on `hexagon_vertex_positions` at ITS OWN
         // `vertex_index` (paired
         // per-row, not by list position, so a momentarily incomplete
         // subscription snapshot can't misassign slots). `me`'s own row is
-        // included here like everyone else's — per the author, the LOCAL
+        // included here like everyone else's: the LOCAL
         // player's own cursor should visibly move to its hexagon slot too,
         // not stay glued to the mouse while everyone else's snaps (see the
         // local-cursor draw call below).
@@ -1730,7 +1801,7 @@ fn main() {
             .user()
             .iter()
             .filter(|_| !replay_mode)
-            // Author-reported: cursors used to vanish ~3s after a player
+            // Cursors used to vanish ~3s after a player
             // stopped moving their mouse (`is_present`'s freshness window,
             // meant for merge-eligibility, was also gating cursor
             // rendering) — a stationary-but-connected player should stay
@@ -1738,7 +1809,7 @@ fn main() {
             // actively moving.
             .filter(|u| u.online && Some(u.identity) != me)
             .map(|u| {
-                // F13: a hexagon-cluster member renders at its lerped
+                // A hexagon-cluster member renders at its lerped
                 // snapped display position instead of its raw cursor
                 // position — the real network position is untouched
                 // (detection above keeps using it), this is purely a render
@@ -1761,7 +1832,7 @@ fn main() {
             })
             .collect();
 
-        // F13 (author follow-up): the LOCAL player's own cursor also
+        // The LOCAL player's own cursor also
         // renders at its lerped hexagon-snap position while participating —
         // precomputed here for the same reason `other_cursors` is (`rl`
         // can't be borrowed again once `begin_drawing` hands out its
@@ -1795,7 +1866,23 @@ fn main() {
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::new(18, 18, 24, 255));
 
-        // F9.6 item 8: past this zoom, a tile's on-screen radius is under
+        // Baked world map stands in for the ~35k live hexes: full strength on
+        // the title screen and through the zoomed-out part of the launch
+        // intro, crossfading to the real cells as the camera closes on the
+        // island. Keeping it up across the intro is what makes that ease
+        // smooth — the live render is at its most expensive exactly when the
+        // whole world is in frame. Replay always renders live, since it needs
+        // real per-tile paint timing.
+        let map_alpha = if replay_mode {
+            0.0
+        } else if ui_state.title_active {
+            1.0
+        } else {
+            title_map::blend_alpha(camera.zoom)
+        };
+        let skip_live_cells = map_alpha >= 1.0;
+
+        // Past this zoom, a tile's on-screen radius is under
         // `BORDERLESS_ZOOM_THRESHOLD` px — skip the per-tile outline draw
         // call (visual noise at that size anyway; a small render win too).
         let show_tile_outline = camera.zoom >= BORDERLESS_ZOOM_THRESHOLD;
@@ -1803,7 +1890,70 @@ fn main() {
         {
             let mut d2 = d.begin_mode2D(camera);
 
+            // Drawn through the camera, not as a screen quad, so it tracks
+            // the intro's pan/zoom instead of only matching the frozen title
+            // pose. `world_rect` is the exact world area the PNG was baked
+            // over, so it lands pixel-aligned with the cells it replaces.
+            if map_alpha > 0.0 {
+                if let Some(texture) = title_map.as_ref() {
+                    d2.draw_texture_pro(
+                        texture,
+                        Rectangle::new(0.0, 0.0, texture.width as f32, texture.height as f32),
+                        title_map::world_rect(),
+                        Vector2::zero(),
+                        0.0,
+                        Color::new(255, 255, 255, (map_alpha * 255.0) as u8),
+                    );
+                }
+            }
+
+            // Anything painted since the bake, drawn live over it. The image
+            // is compiled in and never refreshes at runtime, so without this
+            // A player could paint, zoom back out, and not see their own
+            // work. Only runs while the bake is actually covering the cell
+            // loops, and touches a handful of rows in practice.
+            if skip_live_cells {
+                let baked_at = title_map::baked_at_micros();
+                for cell in ctx.db.island_cell().iter() {
+                    if cell.painted_at.to_micros_since_unix_epoch() <= baked_at {
+                        continue;
+                    }
+                    let Some(island) = ctx.db.island().id().find(&cell.island_id) else {
+                        continue;
+                    };
+                    let (q, r) = world::slot_coords(island.slot);
+                    let (fcx, fcy) = world::slot_center(q, r);
+                    let (h, s, v) = world::unpack_hsv(cell.color);
+                    world::draw_hex(
+                        &mut d2,
+                        world::axial_to_world(fcx + cell.q, fcy + cell.r),
+                        1.0,
+                        world::hsv_color(h, s, v),
+                        None,
+                    );
+                }
+                for cell in ctx.db.margin_cell().iter() {
+                    if cell.painted_at.to_micros_since_unix_epoch() <= baked_at {
+                        continue;
+                    }
+                    let (h, s, v) = world::unpack_hsv(cell.color);
+                    world::draw_hex(
+                        &mut d2,
+                        world::axial_to_world(cell.q, cell.r),
+                        1.0,
+                        world::hsv_color(h, s, v),
+                        None,
+                    );
+                }
+            }
+
             for island in ctx.db.island().iter() {
+                // The bake fully covers every island and margin tile at this
+                // zoom, so drawing them again would only burn frames behind
+                // an image that looks the same.
+                if skip_live_cells {
+                    break;
+                }
                 if replay_clock.as_ref().is_some_and(|clock| {
                     !clock.is_visible(island.created_at.to_micros_since_unix_epoch())
                 }) {
@@ -1817,7 +1967,7 @@ fn main() {
                 }
                 let mine = me == Some(island.owner);
                 let unpainted_fill = world::unpainted_island_fill(island.owner == Identity::ZERO);
-                // F9.5 (FPS at scale): point-lookup each rendered cell by its
+                // Point-lookup each rendered cell by its
                 // packed id via the SDK's own unique-index cache instead of
                 // collecting a HashMap from EVERY island_cell row in the
                 // world every frame — cost is now proportional to in-view
@@ -1852,13 +2002,13 @@ fn main() {
                         show_tile_outline.then_some(Color::new(40, 40, 46, 255)),
                     );
                 }
-                // Author-caught: sat/val used to be a fixed (85, 95),
+                // Sat/val used to be a fixed (85, 95),
                 // making the border a different shade than the owner's
                 // actual starting color. Matches `START_SAT`/`START_VAL`
                 // exactly so it reads as literally "their first color", not
                 // a lookalike.
                 //
-                // Author-requested: an owner can override this default via
+                // An owner can override this default via
                 // `set_island_border` (pins to their current brush color) or
                 // hide it entirely via `disable_island_border` — checked
                 // first since a hidden border skips the seed-hue fallback
@@ -1889,7 +2039,7 @@ fn main() {
                     // by identity like every other island, just easier to
                     // pick out as "mine" at a glance.
                     //
-                    // Author-caught: thickness used to be a fixed WORLD-unit
+                    // Thickness used to be a fixed WORLD-unit
                     // value, so `BeginMode2D`'s zoom scaled it down along
                     // with everything else — at low zoom it fell under a
                     // screen pixel, and different edges (each at a slightly
@@ -1908,6 +2058,9 @@ fn main() {
             }
 
             for cell in ctx.db.margin_cell().iter() {
+                if skip_live_cells {
+                    break; // covered by the baked map, same as the islands above
+                }
                 if replay_clock.as_ref().is_some_and(|clock| {
                     !clock.is_visible(cell.painted_at.to_micros_since_unix_epoch())
                 }) {
@@ -1927,13 +2080,13 @@ fn main() {
                 );
             }
 
-            // F11 (flying gift): world-space, so it naturally pans/zooms
+            // World-space, so it naturally pans/zooms
             // with everything else.
             if let Some((_, pos, elapsed)) = active_gift {
                 world::draw_gift_icon(&mut d2, pos, elapsed);
             }
 
-            // F13 (Hexa event): world-space hexagon edges for each detected
+            // World-space hexagon edges for each detected
             // cluster — see the computation above.
             for (vertices, ignited) in &hexa_polygons {
                 world::draw_hexa_polygon(&mut d2, vertices, *ignited);
@@ -1955,7 +2108,7 @@ fn main() {
             if hover_paintable {
                 let hover_center = world::axial_to_world(hq, hr);
                 d2.draw_poly(hover_center, 6, 1.0, 0.0, Color::new(255, 255, 255, 70));
-                // Author-requested: acts like the island border above — a
+                // Acts like the island border above — a
                 // constant SCREEN pixel width (divided by zoom to convert
                 // back to world units), not a fixed world-unit thickness, so
                 // it stays visible zoomed all the way out instead of
@@ -1986,10 +2139,10 @@ fn main() {
         // only the caller's own cursor needs to stay visible over the
         // header/footer/overlay, so it's drawn last, after the HUD.
         let hexa_cursor_scale = camera.zoom / ISLAND_FIT_ZOOM;
-        if export_name.is_none() {
+        if export_subject.is_none() {
             for (screen, color, locked, name, snap_centre) in &other_cursors {
                 match snap_centre {
-                    // F13 follow-up #2: a hexagon-snapped cursor aims its tip
+                    // Follow-up #2: a hexagon-snapped cursor aims its tip
                     // at the cluster centre instead of the fixed up-left arrow.
                     Some(centre) => world::draw_cursor_snapped(
                         &mut d,
@@ -2024,8 +2177,22 @@ fn main() {
         });
         if replay_mode {
             if let Some(clock) = replay_clock.as_ref() {
-                let total =
-                    ctx.db.island_cell().count() as usize + ctx.db.margin_cell().count() as usize;
+                // Events inside the replay window, not every tile in the
+                // world — otherwise `Cut` visibly changes nothing.
+                let total = ctx
+                    .db
+                    .island_cell()
+                    .iter()
+                    .filter(|cell| clock.contains(cell.painted_at.to_micros_since_unix_epoch()))
+                    .count()
+                    + ctx
+                        .db
+                        .margin_cell()
+                        .iter()
+                    .filter(|cell| {
+                            clock.contains(cell.painted_at.to_micros_since_unix_epoch())
+                        })
+                        .count();
                 let visible = ctx
                     .db
                     .island_cell()
@@ -2086,12 +2253,12 @@ fn main() {
                 is_admin: is_admin(&ctx, me),
             };
             if !replay_mode {
-                if let Some(name) = export_name.as_deref() {
-                    ui::draw_export_frame(&mut d, name, info.link_id);
+                if let Some(subject) = export_subject.as_ref() {
+                    ui::draw_export_frame(&mut d, subject);
                 } else {
                     ui::draw(&mut d, &ui_state, &info, mouse_screen);
 
-                    // F9.6 item 1: eraser mode draws the cursor in a neutral gray
+                    // Eraser mode draws the cursor in a neutral gray
                     // instead of the brush hue, plus a small eraser badge — visibly
                     // distinct from paint mode at a glance.
                     let (hue, sat, val) = brush;
@@ -2100,12 +2267,14 @@ fn main() {
                     } else {
                         world::hsv_color(hue, sat, val)
                     };
-                    // F13 (author follow-up): visually snaps to the hexagon slot
+                    // Visually snaps to the hexagon slot
                     // while merging — painting/hover logic above still uses the
                     // real `mouse_world`/`mouse_screen`, only this draw call moves
                     // (and, follow-up #2, rotates to aim at the cluster centre).
                     if ui_state.tool == ui::Tool::Eyedropper {
                         ui::draw_eyedropper_cursor(&mut d, mouse_screen, eyedropper_preview);
+                    } else if ui_state.tool == ui::Tool::IslandExport {
+                        ui::draw_export_cursor(&mut d, mouse_screen);
                     } else {
                         match my_hexa_screen {
                             Some((tip, centre)) => world::draw_cursor_snapped(
@@ -2128,7 +2297,7 @@ fn main() {
         if ui_state.title_active && me.is_none() && !replay_mode {
             ui::draw_title(&mut d, &ui_state, mouse_screen);
         }
-        if export_name.is_none() && !replay_mode {
+        if export_subject.is_none() && !replay_mode {
             if ui_state.tool == ui::Tool::Erase {
                 world::draw_eraser_badge(&mut d, mouse_screen);
             } else if hover_takeable && matches!(ui_state.tool, ui::Tool::Paint | ui::Tool::Erase) {
@@ -2146,7 +2315,7 @@ fn main() {
             {
                 world::draw_hold_ring(&mut d, mouse_screen, frac);
             }
-            // Author-requested: sits in the header band (drawn here, not inside
+            // Sits in the header band (drawn here, not inside
             // `ui::draw_header`, so it's still visible before `me`/the HUD
             // itself exists) rather than floating in its own corner. Hidden
             // on the title screen (nothing but the wordmark/Draw button
@@ -2158,7 +2327,7 @@ fn main() {
         }
         // EndDrawing must happen before raylib can read the completed frame.
         drop(d);
-        if export_name.is_some() {
+        if export_subject.is_some() {
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());

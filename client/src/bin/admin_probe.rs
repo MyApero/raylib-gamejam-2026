@@ -3,7 +3,7 @@
 //! identity + reconnection token so the token can be pasted into the web
 //! client's "Paste an ID" field to restore this same admin account
 //! elsewhere (or on another machine, e.g. against the VPS). Kept as a
-//! reusable ops tool, not deleted after use like the F11/F13 sessions'
+//! reusable ops tool, not deleted after use like the/ sessions'
 //! throwaway `hexa_probe.rs` — see WORK.md's "Admin account" section.
 //!
 //! Usage: `cargo run -p client --bin admin_probe -- <password> [host]`
@@ -19,6 +19,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const DB_NAME: &str = "hexel";
+
+/// `HEXEL_DB` overrides the target database, matching the game client — an
+/// admin token is only valid for the database it was minted against.
+fn db_name() -> String {
+    std::env::var("HEXEL_DB").unwrap_or_else(|_| DB_NAME.to_string())
+}
 
 fn main() {
     let password = std::env::args().nth(1).unwrap_or_else(|| {
@@ -51,7 +57,7 @@ fn main() {
             }
         })
         .with_token(creds_store().load().expect("Error loading credentials"))
-        .with_database_name(DB_NAME)
+        .with_database_name(db_name())
         .with_uri(&host)
         .build()
         .expect("Failed to connect");

@@ -8,7 +8,7 @@
 //! (`assist-1` through `assist-5` are the animated showcase bots; higher
 //! numbers are stationary load-test clients.)
 //!
-//! F12: positions are WORLD CARTESIAN units (1.0 = one hex outer radius,
+//! Positions are WORLD CARTESIAN units (1.0 = one hex outer radius,
 //! world origin = admin's slot-0 island center — see plan.md's geometry
 //! spec / `world::axial_to_world`), not the old fixed-canvas pixel space.
 //! `set_pos` has no ownership/paint-permission check, so a bot's cursor can
@@ -33,6 +33,13 @@ use std::time::{Duration, Instant};
 
 const HOST: &str = "http://localhost:3000";
 const DB_NAME: &str = "hexel";
+
+/// `HEXEL_DB` overrides the target database, matching the game client. The
+/// systemd units (`hexel-bot@.service`) don't set it, so production bots
+/// keep hitting `hexel`.
+fn db_name() -> String {
+    std::env::var("HEXEL_DB").unwrap_or_else(|_| DB_NAME.to_string())
+}
 /// World origin — the admin island's slot-0 center (plan.md geometry spec).
 const CENTER: (f32, f32) = (0.0, 0.0);
 /// Heart/hexagon loop radius, world units: comfortably past
@@ -104,8 +111,7 @@ impl Shape {
         }
     }
 
-    /// F12 (backlog "bot at the middle with a highlight 'Merge with me!'"):
-    /// the display name IS the on-screen callout — `world::draw_cursor_label`
+    /// The display name IS the on-screen callout — `world::draw_cursor_label`
     /// renders every online player's name above their cursor, so setting it
     /// to this string is the whole feature, no bot-specific client code.
     fn display_name(self) -> String {
@@ -304,7 +310,7 @@ fn main() {
             std::process::exit(1);
         })
         .with_token(creds_store().load().expect("Error loading credentials"))
-        .with_database_name(DB_NAME)
+        .with_database_name(db_name())
         .with_uri(HOST)
         .build()
         .expect("Failed to connect");

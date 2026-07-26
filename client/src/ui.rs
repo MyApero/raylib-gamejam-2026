@@ -16,7 +16,7 @@ const TOAST_DURATION: Duration = Duration::from_millis(2500);
 /// How long the Reset Account button stays armed after a first click, before
 /// a second click is required to actually fire the reducer.
 const RESET_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
-/// Cap on the Account overlay's import field. Author-caught (F9.5): this used
+/// Cap on the Account overlay's import field. This used
 /// to be 256, which silently truncated every real SpacetimeDB reconnect token
 /// (observed ~386 chars) into a corrupt JWT — the server then rejected it and
 /// minted a fresh anonymous identity instead, which is exactly what "import
@@ -25,7 +25,7 @@ const RESET_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
 const IMPORT_TOKEN_MAX_LEN: usize = 2048;
 
 pub const HEADER_H: f32 = 28.0;
-/// Author-requested: back to a single footer row now that Eraser/Lock are
+/// Back to a single footer row now that Eraser/Lock are
 /// icon-only and fit to the left of the name field again. Both
 /// `main.rs`/`bin/web.rs` derive the map viewport from this constant, so
 /// nothing else needed to change.
@@ -45,11 +45,11 @@ enum Drag {
     Val,
 }
 
-/// F13 follow-up: the paint/erase footer toggle grew a third state — Move,
+/// The paint/erase footer toggle grew a third state — Move,
 /// which makes plain left-drag pan the camera instead of painting/merging
 /// (no Shift/right-click needed). Cycled by `X` or the footer button, in
 /// this order: Paint -> Erase -> Move -> Paint.
-/// Author follow-up (2026-07-12): a fourth state, AdminEdit, only reachable
+/// A fourth state, AdminEdit, only reachable
 /// from the cycle while `HudInfo::is_admin` is true (see `Tool::cycle`) — a
 /// deliberately mobile-friendly way to trigger the admin edit modal (see
 /// `AdminEditIsland`/`open_admin_edit`) instead of a right-click or
@@ -104,7 +104,7 @@ fn hue_offset_signed(current: u16, base: u16) -> i32 {
 
 /// "New color obtained" feedback for a just-inserted `inventory` row of the
 /// caller's own — a toast line plus a fading flash of the new hue. `hue:
-/// None` (F9.6 item 2's plain info toasts) just skips the flash swatch.
+/// none` (the plain info toasts) just skips the flash swatch.
 /// `merge_from`, when set (cursor-merge only — see `show_merge_toast`), adds
 /// the two PRE-merge hues so the toast can render "mine + his = new" instead
 /// of just the result.
@@ -172,7 +172,7 @@ pub struct UiState {
     /// (via the resync check) and snaps the slider handle to an extreme for
     /// one frame before it settles at 0.
     pending_select: Option<u16>,
-    /// Account overlay (F6: copy/import ID, reset account) — mutually
+    /// Account overlay (copy/import ID, reset account) — mutually
     /// exclusive with `overlay_open`, same modal footprint.
     account_open: bool,
     import_input: String,
@@ -180,7 +180,7 @@ pub struct UiState {
     /// Set on the first click of "New account"; a second click within
     /// `RESET_CONFIRM_WINDOW` actually fires it, otherwise it auto-disarms.
     reset_armed_at: Option<Instant>,
-    /// Author follow-up (2026-07-12): same double-click-confirm pattern as
+    /// Same double-click-confirm pattern as
     /// `reset_armed_at`, for the Account overlay's "Delete account" button
     /// (non-admin self-service, mirrors the admin edit modal's own delete
     /// confirm).
@@ -189,21 +189,21 @@ pub struct UiState {
     /// the JS clipboard call is fire-and-forget from Rust's side (no success
     /// signal comes back), so this just confirms the click registered.
     copy_clicked_at: Option<Instant>,
-    /// F8 island-info popup, opened by the caller (`main.rs`/`bin/web.rs`)
+    /// Island-info popup, opened by the caller (`main.rs`/`bin/web.rs`)
     /// when a short click lands on a foreign island's center. Mutually
     /// exclusive with `overlay_open`/`account_open`, same modal footprint.
     pub island_popup: Option<IslandInfo>,
-    /// Author-requested: floating "+1"/"-1" feedback for a double-click
+    /// Floating "+1"/"-1" feedback for a double-click
     /// like/unlike on the map, screen-space so it survives camera pans
     /// without recomputing a world->screen projection every frame. Pruned in
     /// `handle_input` (same place `toast` expires), drawn in `draw`.
     like_anims: Vec<LikeAnim>,
-    /// F9: digits-only edit buffer for the island-info popup's "set your
+    /// Digits-only edit buffer for the island-info popup's "set your
     /// link" field, seeded from the current `itch_rate_id` (if any) each time
     /// the popup opens on the caller's own island — see `open_island_info`.
     link_edit_input: String,
     link_edit_focused: bool,
-    /// F9.6 item 1 (extended by the F13 follow-up's Move state): paint/
+    /// Paint/
     /// erase/move tool — footer button or the `X` key (not `E`, which item 6
     /// claims for keyboard zoom-in) cycles Paint -> Erase -> Move -> Paint.
     pub tool: Tool,
@@ -211,18 +211,18 @@ pub struct UiState {
     /// previously unlocked. Leaving the tool restores that prior state;
     /// players who entered already locked remain locked.
     eyedropper_restore_unlock: bool,
-    /// F9.6 item 5: minimal keybindings/help overlay, opened by Escape when
+    /// Minimal keybindings/help overlay, opened by Escape when
     /// nothing else is open (closed by Escape again, matching item 4's rule
     /// for every other overlay). Mutually exclusive with the other three.
     help_open: bool,
-    /// Author-requested: saturation/lightness is tied to each unlocked hue
+    /// Saturation/lightness is tied to each unlocked hue
     /// individually, not shared across the whole Inventory page — dragging
     /// the sliders while swatch A is selected must not visually shift every
     /// other swatch in the grid. Populated lazily as the player tunes a
     /// color; an absent entry means "still at the canonical default" (see
     /// `default_sat`/`DEFAULT_VAL`).
     swatch_hsl: HashMap<u16, (u8, u8)>,
-    /// Author follow-up (2026-07-12): admin-only edit modal for another
+    /// Admin-only edit modal for another
     /// player's island, opened by `Tool::AdminEdit` — mutually exclusive with
     /// every other modal, same footprint. `None` while closed.
     pub admin_edit: Option<AdminEditIsland>,
@@ -264,11 +264,37 @@ pub struct AdminEditIsland {
     pub island_id: u32,
 }
 
+/// What an export panel targets: one island, or a capture/replay of the
+/// whole world (opened by tapping empty map with the `IslandExport` tool).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ExportTarget {
+    Island(u32),
+    World,
+}
+
+impl ExportTarget {
+    /// The `island_filter` shape `start_replay`/`RecoveredReplay` already
+    /// take: `Some(id)` for one island, `None` for the whole world.
+    pub fn island_id(self) -> Option<u32> {
+        match self {
+            ExportTarget::Island(id) => Some(id),
+            ExportTarget::World => None,
+        }
+    }
+}
+
 /// The selected target for image/timelapse export. Kept distinct from the
 /// hover island tooltip so its buttons remain stable and touch-friendly.
 pub struct IslandExport {
-    pub island_id: u32,
+    pub target: ExportTarget,
     pub owner_label: String,
+}
+
+/// What a still export is a picture of — decided when the export is
+/// triggered, then held for the one frame `draw_export_frame` renders over.
+pub enum ExportSubject {
+    Island { owner: String, link_id: Option<u32> },
+    World,
 }
 
 /// One floating like/unlike pop — see `UiState::spawn_like_anim`.
@@ -280,7 +306,7 @@ struct LikeAnim {
 
 const LIKE_ANIM_DURATION: Duration = Duration::from_millis(600);
 
-/// Everything the F8 island-info popup needs to render, precomputed by the
+/// Everything the island-info popup needs to render, precomputed by the
 /// caller so this module stays free of SDK/DB types (mirrors `HudInfo`'s
 /// `short_id` convention).
 pub struct IslandInfo {
@@ -293,11 +319,11 @@ pub struct IslandInfo {
     pub link_id: Option<u32>,
     pub is_own: bool,
     pub already_liked: bool,
-    /// Author-requested: whether the island's border is currently hidden
+    /// Whether the island's border is currently hidden
     /// (`disable_island_border`) — drives the popup's toggle button. Only
     /// meaningful when `is_own`.
     pub border_hidden: bool,
-    /// Author-requested: the border's current color — whatever `border_color`
+    /// The border's current color — whatever `border_color`
     /// resolves to (the custom pin, or the seed-hue default when unset),
     /// regardless of `border_hidden`. Precomputed by the caller (same
     /// fallback the map-render code uses) so this module stays free of the
@@ -369,7 +395,7 @@ impl UiState {
         self.startup_islands = islands;
     }
 
-    /// F9.6 item 6: whether a text field currently owns keyboard input —
+    /// Whether a text field currently owns keyboard input —
     /// `main.rs`/`bin/web.rs` check this before letting WASD/arrows/Q/E pan
     /// or zoom the camera, so typing a name doesn't also drive it.
     pub fn text_field_focused(&self) -> bool {
@@ -390,7 +416,7 @@ impl UiState {
         std::mem::take(&mut self.eyedropper_restore_unlock)
     }
 
-    /// Author-requested: called by the caller right after firing
+    /// Called by the caller right after firing
     /// `like_island`/`unlike_island` from a map double-click, so the click
     /// gets a little visual acknowledgement even though the popup never
     /// opens for that gesture. `pos` is the click's screen position.
@@ -445,11 +471,11 @@ impl UiState {
         self.dragging = Drag::None;
     }
 
-    /// Opens the F8 island-info popup, closing the other three (mutually
+    /// Opens the island-info popup, closing the other three (mutually
     /// exclusive) modals if any was open.
     pub fn open_island_info(&mut self, info: IslandInfo) {
         self.close_all_modals();
-        // F9: seed the link edit field from the current value every time the
+        // Seed the link edit field from the current value every time the
         // popup (re)opens on your own island, so editing starts from what's
         // actually set rather than whatever was last typed.
         self.link_edit_input = if info.is_own {
@@ -461,7 +487,7 @@ impl UiState {
         self.island_popup = Some(info);
     }
 
-    /// Author follow-up (2026-07-12): opens the admin edit modal for
+    /// Opens the admin edit modal for
     /// `island_id`, seeding the three text fields from the owner's current
     /// name/likes/xp — closes every other (mutually exclusive) modal first.
     pub fn open_admin_edit(&mut self, island_id: u32, name: &str, likes: u32, xp: u64) {
@@ -472,10 +498,15 @@ impl UiState {
         self.admin_xp_input = xp.to_string();
     }
 
-    pub fn open_island_export(&mut self, island_id: u32, owner_label: String) {
+    pub fn open_island_export(&mut self, target: ExportTarget, owner_label: String) {
         self.close_all_modals();
+        // The armed click has been spent, so disarm — leaving Export armed
+        // meant the click that dismissed this modal armed another one.
+        if self.tool == Tool::IslandExport {
+            self.tool = Tool::Move;
+        }
         self.island_export = Some(IslandExport {
-            island_id,
+            target,
             owner_label,
         });
     }
@@ -523,7 +554,7 @@ impl UiState {
         self.note_used_color(color);
     }
 
-    /// F9 level-up feedback. `current_hue` just drives the toast's flash
+    /// Level-up feedback. `current_hue` just drives the toast's flash
     /// swatch (reusing `Toast`'s existing rendering) — a level-up has no
     /// color of its own the way a merge does. The Saturation slider's own
     /// max already grows on its own every frame (`HudInfo::sat_cap`), so this
@@ -547,7 +578,7 @@ impl UiState {
         });
     }
 
-    /// F9.6 item 2: plain-text toast (no flash swatch) — used for the
+    /// Plain-text toast (no flash swatch) — used for the
     /// middle-click eyedropper's "not unlocked" feedback.
     pub fn show_info_toast(&mut self, text: String) {
         self.toast = Some(Toast {
@@ -558,7 +589,7 @@ impl UiState {
         });
     }
 
-    /// F11: called by the caller when it sees a fresh `inventory` row with
+    /// Called by the caller when it sees a fresh `inventory` row with
     /// `from_gift: true` — a flying-gift hue win. Same flash-swatch
     /// treatment as `show_merge_toast`, distinct wording since there's no
     /// merge partner to name.
@@ -576,7 +607,7 @@ impl UiState {
         });
     }
 
-    /// F13: called by the caller when it sees a fresh `inventory` row that
+    /// Called by the caller when it sees a fresh `inventory` row that
     /// time-joins a `hexa_event` row — a Hexa-event pooled hue, distinct
     /// from both a merge (which always names a partner) and a gift/reset
     /// (neither of which has an event to join).
@@ -619,7 +650,7 @@ impl UiState {
         self.recent_colors.truncate(99);
     }
 
-    /// F9.5 item 4 (author-caught, `known_bugs.md`: "the selected color is
+    /// (author-caught, `known_bugs.md`: "the selected color is
     /// not in the recent color used on launch"): seed the footer's last-3
     /// ring with the caller's own starting/current hue the first time it's
     /// known, so a brand-new connection shows something there instead of
@@ -633,7 +664,7 @@ impl UiState {
         }
     }
 
-    /// F9.5 item 4 (author-caught: "reset account doesn't reset the last 3
+    /// (author-caught: "reset account doesn't reset the last 3
     /// selected colors"): `reset_account` wipes the caller's entire
     /// inventory down to one fresh hue, but prepending alone would just
     /// prepend that hue onto the EXISTING ring, leaving up to two
@@ -683,18 +714,18 @@ pub struct HudInfo<'a> {
     pub sat_cap: u8,
     pub hues: &'a [u16],
     /// Whether to render the paste-token import field in the Account
-    /// overlay. True on web (the judged target, per plan.md F6); false on
+    /// overlay. True on web (the judged target, per plan.md); false on
     /// native, where reconnecting as an imported identity would need a full
     /// process restart and is explicitly out of scope for the jam.
     pub show_token_import: bool,
-    /// Seconds remaining until the F8 re-rank fires, if `config.next_rerank_at`
+    /// Seconds remaining until the re-rank fires, if `config.next_rerank_at`
     /// is set and still in the future — drives the countdown banner.
     pub rerank_secs: Option<i64>,
     /// The caller's own island's itch.io rate id, if set — feeds the footer
     /// quick-access link field (`footer_link_edit_rect`), which syncs its
     /// display buffer from this every frame it isn't focused.
     pub link_id: Option<u32>,
-    /// Author follow-up (2026-07-12): true once the caller has claimed the
+    /// True once the caller has claimed the
     /// admin role (`Config.admin`) — gates `Tool::AdminEdit`'s reachability
     /// from the paint/erase/move cycle and the `K` shortcut for
     /// `admin_force_rerank` (see `handle_input`).
@@ -714,11 +745,15 @@ pub struct Actions {
     /// retained world snapshot. Both clients implement the same local-only
     /// action; it never calls a reducer.
     pub start_replay: bool,
-    /// Header Export arms the island-targeting export tool.
+    /// Header Export arms the export tool: tap an island, or tap empty map
+    /// for the whole world.
     pub arm_island_export: bool,
-    pub export_island_image: Option<u32>,
-    pub export_island_gif: Option<u32>,
-    pub export_island_video: Option<u32>,
+    /// Save a still PNG of the target, framed by `draw_export_frame`.
+    pub export_image: Option<ExportTarget>,
+    /// Opens the replay armed for an animated export. Which container it
+    /// ends up in (WebM or GIF) is picked later, in the replay overlay's
+    /// download prompt, where the length and size are known.
+    pub export_island_animation: Option<ExportTarget>,
     /// Copy the full reconnection token (not just the header's short hex) to
     /// the clipboard.
     pub copy_token: bool,
@@ -726,19 +761,19 @@ pub struct Actions {
     /// the Import button or Enter.
     pub import_token: Option<String>,
     pub reset_account: bool,
-    /// Author follow-up (2026-07-12): the Account overlay's (double-click-
+    /// The Account overlay's (double-click-
     /// confirmed) "Delete account" button — non-admin self-service.
     pub delete_account: bool,
-    /// F8: like the island in the currently-open island-info popup.
+    /// Like the island in the currently-open island-info popup.
     pub like_island: Option<u32>,
-    /// Author-requested: undo a like from the popup's now-toggling button.
+    /// Undo a like from the popup's now-toggling button.
     pub unlike_island: Option<u32>,
     /// Footer button: open the caller's own island-info popup.
     pub open_own_island: bool,
-    /// F9: set/replace the caller's own island's itch.io rate id, from the
+    /// Set/replace the caller's own island's itch.io rate id, from the
     /// popup's link edit field.
     pub set_island_link: Option<u32>,
-    /// F9: a foreign island's link row was clicked — `(island_id, rate_id)`.
+    /// A foreign island's link row was clicked — `(island_id, rate_id)`.
     /// The caller opens the URL AND fires `click_link` for XP; both use the
     /// same click, see the popup's link-row hit test.
     pub click_link: Option<(u32, u32)>,
@@ -746,28 +781,28 @@ pub struct Actions {
     /// Opens the URL only — `click_link` is deliberately NOT fired here, the
     /// server rejects self-clicks (see `click_link`'s reducer doc comment).
     pub open_own_link: Option<u32>,
-    /// Author-requested: pin the caller's own island's border to their
+    /// Pin the caller's own island's border to their
     /// current brush color (and un-hide it if it was disabled).
     pub set_island_border: bool,
-    /// Author-requested: hide the caller's own island's border entirely.
+    /// Hide the caller's own island's border entirely.
     /// Fired by the popup's Border: Shown/Hidden toggle when currently shown.
     pub disable_island_border: bool,
-    /// Author-requested: re-show a previously hidden border WITHOUT touching
+    /// Re-show a previously hidden border WITHOUT touching
     /// `border_color` — fired by the same toggle button when currently
     /// hidden. Kept distinct from `set_island_border`, which also repins the
     /// color to the current brush.
     pub show_island_border: bool,
-    /// Author follow-up (2026-07-12): the admin edit modal's Save button —
+    /// The admin edit modal's Save button —
     /// `(island_id, name, likes, xp)`, all three fields at once.
     pub admin_save_island: Option<(u32, String, u32, u64)>,
-    /// Author follow-up: the admin edit modal's (double-click-confirmed)
+    /// The admin edit modal's (double-click-confirmed)
     /// Delete button — deletes the island AND its owner's account.
     pub admin_delete_island: Option<u32>,
-    /// Author follow-up: the `K` shortcut (admin-only) — re-sorts island
+    /// The `K` shortcut (admin-only) — re-sorts island
     /// slots by the leaderboard (likes, then tiles painted) right now
     /// instead of waiting for the periodic re-rank.
     pub admin_force_rerank: bool,
-    /// Author-requested: clicking the "hexel" wordmark in the header opens
+    /// Clicking the "hexel" wordmark in the header opens
     /// the project's own itch.io page (distinct from `click_link`/
     /// `open_own_link`, which open a per-island rate id).
     pub open_project_page: bool,
@@ -777,6 +812,36 @@ fn footer_bg() -> Rectangle {
     Rectangle::new(0.0, SCREEN_H - FOOTER_H, SCREEN_W, FOOTER_H)
 }
 
+/// The one close button in the game: muted red, white X. Every modal draws
+/// it, and so does the replay overlay — which had its own grey version until
+/// they were pulled together here.
+pub fn draw_close_button(d: &mut impl RaylibDraw, rect: Rectangle) {
+    d.draw_rectangle_rec(rect, Color::new(60, 40, 40, 255));
+    d.draw_text(
+        "X",
+        rect.x as i32 + (rect.width as i32 - 9) / 2,
+        rect.y as i32 + (rect.height as i32 - 16) / 2,
+        16,
+        Color::RAYWHITE,
+    );
+}
+
+/// The header's "PRESS ESC for help" line, which is also a button — it names
+/// A key, so anyone on touch had no way to act on it.
+fn help_hint_rect() -> Rectangle {
+    Rectangle::new(108.0, 4.0, 118.0, 20.0)
+}
+
+/// The header's level/xp readout, hover-only — it is the one place HEXA's
+/// requirements are visible before you meet them.
+fn level_readout_rect() -> Rectangle {
+    Rectangle::new(8.0, 4.0, 96.0, 20.0)
+}
+
+/// Armed-export blue, shared by the header button's outline and the tool
+/// button's, so both readouts of the same state match.
+const EXPORT_BLUE: Color = Color::new(100, 180, 255, 255);
+
 /// A compact, icon-only share/export control. It is deliberately in the
 /// header (rather than the already busy footer) so taking a screenshot is a
 /// global action that remains easy to find on touch devices.
@@ -784,7 +849,7 @@ fn export_btn_rect() -> Rectangle {
     Rectangle::new(SCREEN_W - 34.0, 3.0, 28.0, 22.0)
 }
 
-/// Author-requested: the "hexel" wordmark in the header is clickable — opens
+/// The "hexel" wordmark in the header is clickable — opens
 /// the project's itch.io page. Matches `draw_header`'s `draw_text("hexel",
 /// 338, 6, 16, ...)` position with generous padding rather than a measured
 /// text width (the draw handle's `measure_text` isn't available here, see
@@ -798,13 +863,13 @@ fn hexel_logo_rect() -> Rectangle {
 /// the left, `center_btn_rect`/"Centre" on the right).
 const FOOTER_EDGE_PAD: f32 = 8.0;
 
-/// Author-requested: "Colors" now anchors the very bottom-left corner of
+/// "Colors" now anchors the very bottom-left corner of
 /// the footer (previously it sat mid-cluster, right of `center_btn_rect`).
 fn inventory_btn_rect() -> Rectangle {
     Rectangle::new(FOOTER_EDGE_PAD, SCREEN_H - FOOTER_H + 7.0, 88.0, 30.0)
 }
 
-/// Author-requested: a second recenter button, right of Isle Centre, that
+/// A second recenter button, right of Isle Centre, that
 /// zooms out to frame the whole world (`world_fit`) instead of the caller's
 /// own island. Anchors the very bottom-right corner of the footer.
 fn world_centre_btn_rect() -> Rectangle {
@@ -816,7 +881,7 @@ fn world_centre_btn_rect() -> Rectangle {
     )
 }
 
-/// Author-requested: icon-only (a "recenter"/geolocation glyph, see
+/// Icon-only (a "recenter"/geolocation glyph, see
 /// `draw_locate_icon`), renamed "Isle Centre" now that `world_centre_btn_rect`
 /// covers the whole-world case — sits directly left of it.
 fn center_btn_rect() -> Rectangle {
@@ -824,7 +889,7 @@ fn center_btn_rect() -> Rectangle {
     Rectangle::new(wb.x - 4.0 - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
 }
 
-/// Author-requested: the name field is centered on screen, with the last-3
+/// The name field is centered on screen, with the last-3
 /// swatches/eraser/lock built outward to its left (see below). Account/My
 /// Isle no longer flank it — they now sit next to `center_btn_rect` instead.
 fn name_field_rect() -> Rectangle {
@@ -834,14 +899,14 @@ fn name_field_rect() -> Rectangle {
     Rectangle::new(342.0, SCREEN_H - FOOTER_H + 7.0, w, 30.0)
 }
 
-/// Author-requested: icon-only (see `draw_footer`), sitting directly left of
+/// Icon-only (see `draw_footer`), sitting directly left of
 /// the name field.
 fn lock_btn_rect() -> Rectangle {
     let bb = brush_btn_rect();
     Rectangle::new(bb.x - 4.0 - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
 }
 
-/// Author-requested: icon-only (see `draw_footer`), left of the lock toggle.
+/// Icon-only (see `draw_footer`), left of the lock toggle.
 fn eraser_btn_rect() -> Rectangle {
     let lb = lock_btn_rect();
     Rectangle::new(lb.x - 4.0 - 30.0, SCREEN_H - FOOTER_H + 7.0, 30.0, 30.0)
@@ -890,7 +955,7 @@ fn recent_swatch_rect(i: usize) -> Rectangle {
     )
 }
 
-/// Author-requested: a footer button to open the caller's own island-info
+/// A footer button to open the caller's own island-info
 /// popup, replacing the old "click your own island" gesture (which just
 /// painted the cell it was released on, so the popup never actually showed).
 /// Now sits directly left of `center_btn_rect` rather than next to the name
@@ -900,7 +965,7 @@ fn my_island_btn_rect() -> Rectangle {
     Rectangle::new(cb.x - 8.0 - 56.0, SCREEN_H - FOOTER_H + 7.0, 56.0, 30.0)
 }
 
-/// Author-requested: moved out of the footer and into the header, sitting
+/// Moved out of the footer and into the header, sitting
 /// directly left of the Export button (matching its height/y so the two
 /// read as one row of header controls).
 fn account_btn_rect() -> Rectangle {
@@ -908,7 +973,7 @@ fn account_btn_rect() -> Rectangle {
     Rectangle::new(export.x - 8.0 - 60.0, 3.0, 60.0, 22.0)
 }
 
-/// Author-requested: sound on/off toggle, sitting directly left of the
+/// Sound on/off toggle, sitting directly left of the
 /// Account button — chained off it the same way `account_btn_rect` chains
 /// off `export_btn_rect`, so adding this button doesn't shift Account/
 /// Export/anything else in the header.
@@ -941,7 +1006,7 @@ fn hexa_success_ok_rect() -> Rectangle {
 
 /// Whether this frame's click should dismiss whichever modal occupies the
 /// shared panel footprint (`overlay_rect()`) — either its close button, or
-/// anywhere outside the panel (F9.6 item 4/5's rule, applied uniformly to
+/// anywhere outside the panel (the rule, applied uniformly to
 /// all four modals through this one helper instead of four separate copies).
 fn modal_dismiss_clicked(mouse: Vector2, clicked: bool) -> bool {
     clicked && (point_in(mouse, overlay_close_rect()) || !point_in(mouse, overlay_rect()))
@@ -998,7 +1063,7 @@ fn reset_btn_rect() -> Rectangle {
     Rectangle::new(o.x + 20.0, o.y + 280.0, 240.0, 36.0)
 }
 
-/// Author follow-up (2026-07-12): non-admin self-service account deletion —
+/// Non-admin self-service account deletion —
 /// sits below the New Account button and its description in the same
 /// Account overlay.
 fn delete_account_btn_rect() -> Rectangle {
@@ -1006,7 +1071,7 @@ fn delete_account_btn_rect() -> Rectangle {
     Rectangle::new(o.x + 20.0, o.y + 370.0, 260.0, 36.0)
 }
 
-/// Author follow-up (2026-07-12): admin edit modal — three stacked text
+/// Admin edit modal — three stacked text
 /// fields (name/likes/xp), same field-box styling as `link_edit_rect`.
 fn admin_name_field_rect() -> Rectangle {
     let o = overlay_rect();
@@ -1033,7 +1098,7 @@ fn admin_delete_btn_rect() -> Rectangle {
     Rectangle::new(o.x + 20.0, o.y + 340.0, 320.0, 40.0)
 }
 
-/// F9: own-island popup only — numeric input for the itch.io rate id. Fills
+/// Own-island popup only — numeric input for the itch.io rate id. Fills
 /// the row's full width now that there's no separate Set button (submits
 /// automatically as you type, see `handle_input`).
 fn link_edit_rect() -> Rectangle {
@@ -1041,7 +1106,7 @@ fn link_edit_rect() -> Rectangle {
     Rectangle::new(o.x + 20.0, o.y + 180.0, 310.0, 32.0)
 }
 
-/// Author-requested: footer quick-access shortcut for the itch.io rate id —
+/// Footer quick-access shortcut for the itch.io rate id —
 /// fills the gap left by moving the Account button into the header, so a
 /// player can set/see their island's jam link without opening the full My
 /// Isle popup. Shares `link_edit_input`/`link_edit_focused` with
@@ -1062,7 +1127,7 @@ fn link_row_rect() -> Rectangle {
     Rectangle::new(o.x + 20.0, o.y + 130.0, 320.0, 20.0)
 }
 
-/// Author-requested: itch.io jam rate ids are always 7 digits — `Some` only
+/// Itch.io jam rate ids are always 7 digits — `Some` only
 /// at exactly that length, `None` if shorter or longer. This is the "Your
 /// link" row's clickable/blue condition; red covers the rest, grey is the
 /// separate empty-field case (see `draw_island_popup`). Checked against the
@@ -1076,7 +1141,7 @@ fn typed_link_id(state: &UiState) -> Option<u32> {
     typed.parse().ok()
 }
 
-/// F9: digits-only typing for `link_edit_input`, submitting every keystroke
+/// Digits-only typing for `link_edit_input`, submitting every keystroke
 /// that parses (no separate Set button). Shared by both places that can
 /// focus the field — the My Isle popup's own row and the footer's
 /// quick-access shortcut (`footer_link_edit_rect`) — so the two can never
@@ -1105,7 +1170,7 @@ fn handle_link_edit_typing(rl: &mut RaylibHandle, input: &mut String, actions: &
     }
 }
 
-/// Author follow-up (2026-07-12): digits-only typing for the admin edit
+/// Digits-only typing for the admin edit
 /// modal's Likes/XP fields — unlike `handle_link_edit_typing`, these don't
 /// auto-submit per keystroke (the modal has an explicit Save button that
 /// commits all three fields together), so this just accumulates the buffer.
@@ -1120,7 +1185,7 @@ fn handle_digits_typing(rl: &mut RaylibHandle, input: &mut String, max_len: usiz
     }
 }
 
-/// Author-requested: own-island popup only — pin the border to the caller's
+/// Own-island popup only — pin the border to the caller's
 /// current brush color. Draws a before (border) `->` after (cursor) preview,
 /// see `draw_island_popup`.
 fn border_set_btn_rect() -> Rectangle {
@@ -1128,7 +1193,7 @@ fn border_set_btn_rect() -> Rectangle {
     Rectangle::new(o.x + 20.0, o.y + 230.0, 250.0, 36.0)
 }
 
-/// Author-requested: own-island popup only — toggles the border between
+/// Own-island popup only — toggles the border between
 /// shown and hidden, independent of `border_set_btn_rect`'s color pin. Label
 /// reads "Border: Shown"/"Border: Hidden" so the button's own text carries
 /// the state, replacing the old separate status line + "Disable border"
@@ -1146,11 +1211,6 @@ fn island_export_image_btn_rect() -> Rectangle {
 fn island_export_gif_btn_rect() -> Rectangle {
     let o = overlay_rect();
     Rectangle::new(o.x + 30.0, o.y + 210.0, o.width - 60.0, 46.0)
-}
-
-fn island_export_video_btn_rect() -> Rectangle {
-    let o = overlay_rect();
-    Rectangle::new(o.x + 30.0, o.y + 270.0, o.width - 60.0, 46.0)
 }
 
 fn rerank_banner_rect() -> Rectangle {
@@ -1213,7 +1273,7 @@ fn effective_hue(state: &UiState, info: &HudInfo) -> u16 {
     state.pending_select.unwrap_or(info.brush.0)
 }
 
-/// F9.6 item 4: `info.hues` reflects DB iteration order (effectively
+/// `info.hues` reflects DB iteration order (effectively
 /// insertion order); the inventory grid instead shows them sorted by hue so
 /// nearby colors sit next to each other. Both `handle_input`'s swatch click
 /// loop and `draw_overlay` call this so index `i` -> `swatch_rect(i)` always
@@ -1224,7 +1284,7 @@ fn sorted_hues(info: &HudInfo) -> Vec<u16> {
     hues
 }
 
-/// F9.6 item 4: swatch hex code, as actually rendered (current brush
+/// Swatch hex code, as actually rendered (current brush
 /// sat/val, not some canonical 100/100) — mirrors `swatch_color`.
 fn color_hex(c: Color) -> String {
     format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
@@ -1331,7 +1391,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     let held = rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT);
     let released = rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT);
 
-    // F9.6 item 5: Escape closes whatever single modal is open (item 4's
+    // Escape closes whatever single modal is open (item 4's
     // rule, applied uniformly to all four — safe to close all of them at
     // once since the group is mutually exclusive by construction); with
     // nothing open, it toggles the help overlay instead. Checked first and
@@ -1345,7 +1405,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         }
         return actions;
     }
-    // F9.6 item 1 (F13 follow-up: Paint -> Erase -> Move -> Paint) — `X`
+    // `X`
     // (not `E`, which item 6 gives to keyboard zoom-in), swallowed while a
     // text field owns keyboard input so typing a name containing "x"
     // doesn't cycle it.
@@ -1364,11 +1424,60 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
             state.tool = state.tool.cycle(info.is_admin);
         }
     }
-    // Author follow-up (2026-07-12): admin-only shortcut for
+    // Admin-only shortcut for
     // `admin_force_rerank` — replaces the earlier Config-panel button, which
     // only ever held this one action and wasn't worth a whole modal.
     if info.is_admin && rl.is_key_pressed(KeyboardKey::KEY_K) && !state.text_field_focused() {
         actions.admin_force_rerank = true;
+    }
+    // One key per HUD control, each doing exactly what
+    // clicking that button does. All swallowed while a text field owns the
+    // keyboard, so typing a name never trips one.
+    if !state.text_field_focused() {
+        if rl.is_key_pressed(KeyboardKey::KEY_C) {
+            let opening = !state.overlay_open;
+            state.close_all_modals();
+            state.overlay_open = opening;
+            return actions;
+        }
+        if rl.is_key_pressed(KeyboardKey::KEY_R) {
+            let opening = !state.recent_open;
+            state.close_all_modals();
+            state.recent_open = opening;
+            return actions;
+        }
+        if rl.is_key_pressed(KeyboardKey::KEY_L) && state.tool != Tool::Eyedropper {
+            actions.set_lock = Some(!info.locked);
+        }
+        if rl.is_key_pressed(KeyboardKey::KEY_P) {
+            // Leaving the eyedropper releases the lock it took, same as
+            // picking a color does.
+            if state.tool == Tool::Eyedropper && state.finish_eyedropper() {
+                actions.set_lock = Some(false);
+            }
+            state.tool = Tool::Paint;
+        }
+        if rl.is_key_pressed(KeyboardKey::KEY_M) {
+            if state.tool == Tool::Eyedropper && state.finish_eyedropper() {
+                actions.set_lock = Some(false);
+            }
+            state.tool = Tool::Move;
+        }
+        if rl.is_key_pressed(KeyboardKey::KEY_I) {
+            actions.center_camera = true;
+        }
+        if rl.is_key_pressed(KeyboardKey::KEY_U) {
+            actions.center_world = true;
+        }
+        if rl.is_key_pressed(KeyboardKey::KEY_F) {
+            if state.tool == Tool::Eyedropper {
+                if state.finish_eyedropper() {
+                    actions.set_lock = Some(false);
+                }
+            } else if state.arm_eyedropper(info.locked) {
+                actions.set_lock = Some(true);
+            }
+        }
     }
     if clicked && point_in(mouse, eraser_btn_rect()) {
         if state.tool == Tool::Eyedropper {
@@ -1389,6 +1498,11 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         }
     }
 
+    if clicked && point_in(mouse, help_hint_rect()) {
+        state.close_all_modals();
+        state.help_open = true;
+        return actions;
+    }
     if clicked && point_in(mouse, center_btn_rect()) {
         actions.center_camera = true;
     }
@@ -1400,7 +1514,13 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         return actions;
     }
     if clicked && point_in(mouse, export_btn_rect()) {
-        actions.arm_island_export = true;
+        // Second press disarms. Move rather than Paint, so backing out of an
+        // export can't put a stray stroke on someone's island.
+        if state.tool == Tool::IslandExport {
+            state.tool = Tool::Move;
+        } else {
+            actions.arm_island_export = true;
+        }
         return actions;
     }
     if clicked && point_in(mouse, hexel_logo_rect()) {
@@ -1520,7 +1640,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         }
     }
 
-    // F9.6 item 5: help overlay is modal too — closes on its X button or an
+    // Help overlay is modal too — closes on its X button or an
     // outside click (matching item 4's rule for the inventory overlay),
     // besides the Escape toggle handled at the top of this function.
     if state.help_open {
@@ -1589,7 +1709,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 state.reset_armed_at = Some(Instant::now());
             }
         }
-        // Author follow-up (2026-07-12): non-admin self-service — admin has
+        // Non-admin self-service — admin has
         // no island/account of their own to delete this way (see
         // `claim_admin`), so the button isn't drawn (or clickable) for them.
         if !info.is_admin && clicked && point_in(mouse, delete_account_btn_rect()) {
@@ -1603,10 +1723,10 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         return actions;
     }
 
-    // F8/F9.5 island-info: two very different UIs share `island_popup`.
+    /// Island-info: two very different UIs share `island_popup`.
     // Own island (via the "My Isle" footer button, a deliberate action) is
     // still the full modal panel below, with a close button and the link
-    // editor. A FOREIGN island's popup (F9.5 item 7: opened by hovering) is
+    // editor. A FOREIGN island's popup (opened by hovering) is
     // a small, non-interactive tooltip drawn by `draw_island_tooltip` —
     // no close button (it closes itself on hover-out, in
     // `main.rs`/`bin/web.rs`) and no click handling here at all;
@@ -1620,7 +1740,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 state.island_popup = None;
                 return actions;
             }
-            // Author-requested: once the typed id is a well-formed 7-digit
+            // Once the typed id is a well-formed 7-digit
             // itch.io rate id (blue, not red/grey — see `typed_link_id`),
             // the "Your link" row itself opens it. Same click gesture as a
             // foreign island's link row, but `click_link` is deliberately
@@ -1631,9 +1751,9 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                     actions.open_own_link = Some(id);
                 }
             }
-            // F9: own-island link editing — digits only (it's a numeric
+            // Own-island link editing — digits only (it's a numeric
             // itch.io submission id), same Ctrl+V-friendly typing as the
-            // Account overlay's token import field. Author-requested: no
+            // account overlay's token import field. No
             // more Set button — every keystroke that changes the buffer
             // submits immediately if it parses, so the id just stays live.
             let field = link_edit_rect();
@@ -1658,25 +1778,22 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     }
 
     if let Some(export) = &state.island_export {
-        let island_id = export.island_id;
+        let target = export.target;
         if modal_dismiss_clicked(mouse, clicked) {
             state.island_export = None;
             return actions;
         }
         if clicked && point_in(mouse, island_export_image_btn_rect()) {
-            actions.export_island_image = Some(island_id);
+            actions.export_image = Some(target);
             state.island_export = None;
         } else if clicked && point_in(mouse, island_export_gif_btn_rect()) {
-            actions.export_island_gif = Some(island_id);
-            state.island_export = None;
-        } else if clicked && point_in(mouse, island_export_video_btn_rect()) {
-            actions.export_island_video = Some(island_id);
+            actions.export_island_animation = Some(target);
             state.island_export = None;
         }
         return actions;
     }
 
-    // Author follow-up (2026-07-12): admin edit modal — three plain text
+    // Admin edit modal — three plain text
     // fields (name/likes/xp, digits-only for the latter two) committed
     // together by Save, plus a double-click-confirmed Delete (same pattern
     // as `reset_armed_at` above).
@@ -1784,14 +1901,14 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     // Overlay is modal: swallow all remaining input here so the map behind
     // it never sees clicks/drags while it's open (caller still checks
     // `state.overlay_open` before touching camera/paint input). Closes on
-    // its own X button or anywhere outside the panel (F9.6 item 4), via the
+    // its own X button or anywhere outside the panel, via the
     // same `modal_dismiss_clicked` helper the other three modals use.
     if modal_dismiss_clicked(mouse, clicked) {
         state.overlay_open = false;
         state.dragging = Drag::None;
         return actions;
     }
-    // F9.6 item 4: swatches sorted by hue — `draw_overlay` iterates the same
+    // Swatches sorted by hue — `draw_overlay` iterates the same
     // sorted order so swatch indices (and thus `swatch_rect(i)`) line up
     // between the two.
     for (i, &hue) in sorted_hues(info).iter().enumerate() {
@@ -1870,7 +1987,7 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
         draw_title(d, state, mouse);
         return;
     }
-    draw_header(d, info, state.sound_on);
+    draw_header(d, info, state.sound_on, state.tool == Tool::IslandExport);
     draw_footer(d, state, info);
     if state.overlay_open {
         draw_overlay(d, state, info, mouse);
@@ -1898,17 +2015,23 @@ pub fn draw(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse: Vec
     } else if point_in(mouse, eraser_btn_rect()) {
         let (title, lines): (&str, &[&str]) = match state.tool {
             Tool::Paint if info.is_admin => (
-                "Paint",
-                &["Click to cycle: Paint ->", "Eraser -> Move -> Edit"],
+                "Paint  [P]",
+                &["Click or X to cycle: Paint ->", "Eraser -> Move [M] -> Edit"],
             ),
-            Tool::Paint => ("Paint", &["Click to cycle: Paint ->", "Eraser -> Move"]),
+            Tool::Paint => (
+                "Paint  [P]",
+                &["Click or X to cycle: Paint ->", "Eraser -> Move [M]"],
+            ),
             Tool::Erase => ("Eraser", &["Revert a cell to its", "original color"]),
             Tool::Move => (
-                "Move",
+                "Move  [M]",
                 &["Left-drag pans the camera", "instead of painting"],
             ),
             Tool::AdminEdit => ("Edit", &["Tap another island to", "edit its player/stats"]),
-            Tool::IslandExport => ("Export", &["Tap an island to choose", "image or timelapse"]),
+            Tool::IslandExport => (
+                "Export",
+                &["Tap an island, or empty", "map for the whole world"],
+            ),
             Tool::Eyedropper => ("Paint", &["Click to return to", "the paint tool"]),
         };
         draw_button_tooltip(d, title, lines, mouse);
@@ -1987,7 +2110,7 @@ fn draw_hexa_success_popup(d: &mut impl RaylibDraw) {
     );
 }
 
-/// F8/F9: own-island management panel (opened via the "My Isle" footer
+////own-island management panel (opened via the "My Isle" footer
 /// button — a deliberate action, unlike the hover tooltip below) — creator
 /// line, likes, age, and the link edit field/button. Full modal treatment
 /// (backdrop, close button) since it has real form controls to interact
@@ -2010,14 +2133,7 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
     );
 
     let close = overlay_close_rect();
-    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text(
-        "X",
-        close.x as i32 + 11,
-        close.y as i32 + 7,
-        16,
-        Color::RAYWHITE,
-    );
+    draw_close_button(d, close);
 
     d.draw_text(
         &format!("Owner: {}", popup.owner_label),
@@ -2026,7 +2142,7 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
         16,
         Color::RAYWHITE,
     );
-    // F9.6 item 3: heart glyph in place of the old text-only "Likes: N" —
+    // Heart glyph in place of the old text-only "Likes: N" —
     // filled when the viewer (the popup only ever opens on your OWN island,
     // so this is always `false` here in practice, kept for symmetry with
     // the tooltip below which does need it) has already liked it.
@@ -2057,7 +2173,7 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
         Color::LIGHTGRAY,
     );
 
-    // Author-requested: live-updates from the edit field as you type. Grey
+    // Live-updates from the edit field as you type. Grey
     // while empty, blue (same link color as the foreign-island tooltip's
     // "Linked: ..." line) the instant it's a well-formed 7-digit itch.io
     // rate id — and therefore clickable — red while shorter or longer, so
@@ -2091,7 +2207,7 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
         Color::LIGHTGRAY,
     );
 
-    // Author-requested: no Set button — typing submits automatically (see
+    // No Set button — typing submits automatically (see
     // `handle_input`), so the field just fills the row.
     let field = link_edit_rect();
     d.draw_rectangle_rec(field, Color::new(28, 28, 34, 255));
@@ -2117,7 +2233,7 @@ fn draw_island_popup(d: &mut impl RaylibDraw, state: &UiState, popup: &IslandInf
         Color::RAYWHITE,
     );
 
-    // Author-requested: pin the border to the current brush color, or toggle
+    // Pin the border to the current brush color, or toggle
     // it shown/hidden — two separate actions now, so un-hiding never
     // silently repins the color. "Set border to current color" previews the
     // change as [current border] -> [current cursor] rather than a bare
@@ -2214,7 +2330,7 @@ fn draw_admin_field(
     );
 }
 
-/// Author follow-up (2026-07-12): admin-only moderation modal, opened by
+/// Admin-only moderation modal, opened by
 /// `Tool::AdminEdit` (see `open_admin_edit`) instead of the normal foreign-
 /// island tooltip/link. Three plain text fields (name/likes/xp) committed
 /// together by Save, plus a double-click-confirmed destructive Delete.
@@ -2236,14 +2352,7 @@ fn draw_admin_edit(d: &mut impl RaylibDraw, state: &UiState) {
     );
 
     let close = overlay_close_rect();
-    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text(
-        "X",
-        close.x as i32 + 11,
-        close.y as i32 + 7,
-        16,
-        Color::RAYWHITE,
-    );
+    draw_close_button(d, close);
 
     draw_admin_field(
         d,
@@ -2308,9 +2417,10 @@ fn draw_admin_edit(d: &mut impl RaylibDraw, state: &UiState) {
     );
 }
 
-/// Stable, button-driven export panel opened by clicking an island with the
-/// Export tool. Unlike the hover tooltip, it is deliberately a modal so
-/// touch users can choose image versus timelapse reliably.
+/// Stable, button-driven export panel opened by clicking an island (or empty
+/// map, for the whole world) with the Export tool. Unlike the hover tooltip,
+/// it is deliberately a modal so touch users can choose image versus
+/// timelapse reliably.
 fn draw_island_export(d: &mut impl RaylibDraw, export: &IslandExport) {
     d.draw_rectangle_rec(
         Rectangle::new(0.0, 0.0, SCREEN_W, SCREEN_H),
@@ -2320,46 +2430,56 @@ fn draw_island_export(d: &mut impl RaylibDraw, export: &IslandExport) {
     d.draw_rectangle_rec(o, Color::new(24, 24, 30, 250));
     d.draw_rectangle_lines_ex(o, 2.0, Color::new(90, 90, 100, 255));
     d.draw_text(
-        "Export island",
+        match export.target {
+            ExportTarget::Island(_) => "Export island",
+            ExportTarget::World => "Export the whole world",
+        },
         o.x as i32 + 20,
         o.y as i32 + 14,
         18,
         Color::RAYWHITE,
     );
+    // World says everything it needs to in the title; repeating "the whole
+    // world" as a subtitle and again in the prompt below split one short
+    // phrase across three lines.
+    if let ExportTarget::Island(island_id) = export.target {
+        d.draw_text(
+            &format!("{}  ·  island #{island_id}", export.owner_label),
+            o.x as i32 + 20,
+            o.y as i32 + 54,
+            16,
+            Color::LIGHTGRAY,
+        );
+    }
     d.draw_text(
-        &format!("{}  ·  island #{}", export.owner_label, export.island_id),
-        o.x as i32 + 20,
-        o.y as i32 + 54,
-        16,
-        Color::LIGHTGRAY,
-    );
-    d.draw_text(
-        "Choose an export for this island:",
+        "Choose an export:",
         o.x as i32 + 20,
         o.y as i32 + 92,
         14,
         Color::RAYWHITE,
     );
-    for (rect, label, detail, color) in [
+    // GIF and WebM are one "Animation" choice here: both replay the same
+    // history, and picking a container only makes sense once the length and
+    // size are known, which is after the speed and any cut are settled. The
+    // replay overlay's download prompt asks for it then.
+    let buttons: [(Rectangle, &str, &str, Color); 2] = [
         (
             island_export_image_btn_rect(),
             "Image (PNG)",
-            "current island portrait",
+            match export.target {
+                ExportTarget::Island(_) => "current island portrait",
+                ExportTarget::World => "current world portrait",
+            },
             Color::new(40, 70, 48, 255),
         ),
         (
             island_export_gif_btn_rect(),
-            "Timelapse GIF",
-            "compact animated history",
+            "Animation",
+            "timelapse history, WebM or GIF",
             Color::new(64, 56, 102, 255),
         ),
-        (
-            island_export_video_btn_rect(),
-            "Timelapse video",
-            "WebM animated history",
-            Color::new(40, 70, 100, 255),
-        ),
-    ] {
+    ];
+    for (rect, label, detail, color) in buttons {
         d.draw_rectangle_rec(rect, color);
         d.draw_rectangle_lines_ex(rect, 1.0, Color::new(120, 120, 135, 255));
         d.draw_text(
@@ -2378,14 +2498,7 @@ fn draw_island_export(d: &mut impl RaylibDraw, export: &IslandExport) {
         );
     }
     let close = overlay_close_rect();
-    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text(
-        "X",
-        close.x as i32 + 11,
-        close.y as i32 + 7,
-        16,
-        Color::RAYWHITE,
-    );
+    draw_close_button(d, close);
 }
 
 const TOOLTIP_W: f32 = 220.0;
@@ -2393,35 +2506,52 @@ const TOOLTIP_PAD: f32 = 8.0;
 const TOOLTIP_LINE_H: f32 = 18.0;
 const BTN_TOOLTIP_W: f32 = 210.0;
 
-/// Author-requested: hovering a footer button shows a title + short
+/// Hovering a footer button shows a title + short
 /// description — mainly for the icon-only Eraser/Lock buttons, which
 /// otherwise carry no on-screen label at all. The name field is
 /// deliberately excluded (self-explanatory as a text input).
 const BUTTON_TOOLTIPS: &[(fn() -> Rectangle, &str, &[&str])] = &[
-    (center_btn_rect, "Isle Centre", &["Go back to your island"]),
+    (
+        level_readout_rect,
+        "Level & XP",
+        &[
+            "Merging earns XP. XP raises",
+            "how saturated your brush can",
+            "go. At Lv3, HEXA unlocks:",
+            "gather 6 unlocked players at",
+            "the centre of the world.",
+            "Lock mode blocks HEXA.",
+        ],
+    ),
+    (help_hint_rect, "Help", &["Click, or press Escape"]),
+    (
+        center_btn_rect,
+        "Isle Centre  [I]",
+        &["Go back to your island"],
+    ),
     (
         world_centre_btn_rect,
-        "World Centre",
+        "World Centre  [U]",
         &["Zoom out to see", "the whole world"],
     ),
     (
         inventory_btn_rect,
-        "Colors",
+        "Colors  [C]",
         &["Inventory: stores every", "color you've discovered"],
     ),
     (
         recent_btn_rect,
-        "Recent colors",
+        "Recent colors  [R]",
         &["Open your raw HSL", "color history"],
     ),
     (
         lock_btn_rect,
-        "Lock",
+        "Lock  [L]",
         &["Blocks cursor merging", "and central HEXA"],
     ),
     (
         brush_btn_rect,
-        "Eyedropper",
+        "Eyedropper  [F]",
         &[
             "Click or tap, then select",
             "a painted tile",
@@ -2443,7 +2573,7 @@ const BUTTON_TOOLTIPS: &[(fn() -> Rectangle, &str, &[&str])] = &[
         "Account",
         &[
             "Copy or import your ID,",
-            "start a new or delete your account",
+            "new account or delete it",
         ],
     ),
     (
@@ -2475,7 +2605,7 @@ fn hovered_button_tooltip(mouse: Vector2) -> Option<(&'static str, &'static [&'s
         .map(|&(_, title, lines)| (title, lines))
 }
 
-/// Author-requested: the footer's last-3 swatches (`UiState::last3`, most-
+/// The footer's last-3 swatches (`UiState::last3`, most-
 /// recently-used first, see its doc comment) get their own hover title —
 /// "Last color used" for the newest, "Last last ..." for the one before,
 /// "Last last last ..." for the oldest of the three — instead of being
@@ -2521,9 +2651,9 @@ fn draw_button_tooltip(d: &mut impl RaylibDraw, title: &str, lines: &[&str], mou
     }
 }
 
-/// F9.5 item 7 (author-requested redesign): a foreign island's info, as a
+/// A foreign island's info, as a
 /// small, non-interactive tooltip glued to the cursor (offset so it doesn't
-/// sit under it) instead of F8's big centered modal — no backdrop dim, no
+/// sit under it) instead of the big centered modal — no backdrop dim, no
 /// close button (the caller closes it automatically on hover-out), no
 /// buttons at all: a box that continuously re-centers on the mouse can
 /// never contain a clickable target you could actually reach, since moving
@@ -2549,7 +2679,7 @@ fn draw_island_tooltip(d: &mut impl RaylibDraw, popup: &IslandInfo, mouse: Vecto
     let mut ty = rect.y as i32 + TOOLTIP_PAD as i32;
     d.draw_text(&popup.owner_label, tx, ty, 15, Color::RAYWHITE);
     ty += TOOLTIP_LINE_H as i32;
-    // F9.6 item 3: heart glyph (filled = you've already liked this island)
+    // Heart glyph (filled = you've already liked this island)
     // instead of the old text-only "Likes: N".
     let heart_color = if popup.already_liked {
         Color::new(230, 70, 90, 255)
@@ -2584,7 +2714,7 @@ fn draw_island_tooltip(d: &mut impl RaylibDraw, popup: &IslandInfo, mouse: Vecto
     }
 }
 
-/// Author-requested: a floating heart pop where a double-click like/unlike
+/// A floating heart pop where a double-click like/unlike
 /// landed, since that gesture (unlike the popup button) has no other visible
 /// feedback — filled red heart for a like, empty grey outline heart for an
 /// unlike (matching `world::draw_heart`'s filled/outline convention used
@@ -2608,7 +2738,7 @@ fn draw_like_anims(d: &mut impl RaylibDraw, state: &UiState) {
 }
 
 /// Bottom-of-screen banner (own spot, away from the header/toast area) while
-/// `config.next_rerank_at` counts down to an F8 re-rank.
+/// `config.next_rerank_at` counts down to an re-rank.
 fn draw_rerank_banner(d: &mut impl RaylibDraw, secs: i64) {
     let bar = rerank_banner_rect();
     d.draw_rectangle_rec(bar, Color::new(24, 24, 30, 235));
@@ -2688,12 +2818,17 @@ fn draw_toast(d: &mut impl RaylibDraw, toast: &Toast, info: &HudInfo) {
     );
 }
 
-fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo, sound_on: bool) {
+fn draw_header(
+    d: &mut impl RaylibDraw,
+    info: &HudInfo,
+    sound_on: bool,
+    export_armed: bool,
+) {
     d.draw_rectangle_rec(
         Rectangle::new(0.0, 0.0, SCREEN_W, HEADER_H),
         Color::new(10, 10, 14, 235),
     );
-    // Author-requested: the short identity hex used to lead this line, but
+    // The short identity hex used to lead this line, but
     // it's already reachable via the Account overlay ("Signed in as ..."),
     // so the header itself only needs the level/xp readout.
     d.draw_text(
@@ -2703,12 +2838,12 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo, sound_on: bool) {
         16,
         Color::RAYWHITE,
     );
-    // Author-requested: sits in the gap right after the level/xp readout
+    // Sits in the gap right after the level/xp readout
     // (freed up by removing the web-only "ws: ..." debug line that used to
     // live here).
     d.draw_text("PRESS ESC for help", 110, 8, 12, Color::GRAY);
-    d.draw_text("hexel", 338, 6, 16, Color::RAYWHITE);
-    // Author-requested: camera world position, two stacked lines in the gap
+    d.draw_text("hexel", 336, 6, 18, Color::RAYWHITE);
+    // Camera world position, two stacked lines in the gap
     // between the wordmark and the online count.
     d.draw_text(
         &format!("X: {}", info.camera_target.x.round() as i32),
@@ -2731,12 +2866,12 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo, sound_on: bool) {
     // cluster on the right.
     d.draw_text(
         &format!("{} / {} online", info.online, info.total),
-        390,
-        6,
-        14,
+        410,
+        7,
+        13,
         Color::LIGHTGRAY,
     );
-    // Author-requested: moved out of the footer, sitting directly left of
+    // Moved out of the footer, sitting directly left of
     // the Export button.
     let ab = account_btn_rect();
     d.draw_rectangle_rec(ab, Color::new(40, 40, 48, 255));
@@ -2748,7 +2883,7 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo, sound_on: bool) {
         Color::RAYWHITE,
     );
 
-    // Author-requested: sound on/off, directly left of Account. Same
+    // Sound on/off, directly left of Account. Same
     // muted-red-when-off convention as `lock_btn_rect`'s locked state.
     let sb = sound_btn_rect();
     d.draw_rectangle_rec(
@@ -2773,6 +2908,11 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo, sound_on: bool) {
 
     let export = export_btn_rect();
     d.draw_rectangle_rec(export, Color::new(40, 40, 48, 255));
+    // Armed means the next map click exports instead of painting — worth
+    // showing on the button that armed it.
+    if export_armed {
+        d.draw_rectangle_lines_ex(export, 2.0, EXPORT_BLUE);
+    }
     draw_export_icon(d, export);
 }
 
@@ -2780,11 +2920,21 @@ fn draw_header(d: &mut impl RaylibDraw, info: &HudInfo, sound_on: bool) {
 /// image. The map itself is rendered by the caller with the camera snapped to
 /// the player's island; keeping the card here makes native and web exports
 /// visually identical.
-pub fn draw_export_frame(d: &mut impl RaylibDraw, name: &str, link_id: Option<u32>) {
-    let display_name = if name.trim().is_empty() {
-        "My"
-    } else {
-        name.trim()
+pub fn draw_export_frame(d: &mut impl RaylibDraw, subject: &ExportSubject) {
+    let caption = match subject {
+        ExportSubject::Island { owner,.. } => {
+            let display_name = if owner.trim().is_empty() {
+                "My"
+            } else {
+                owner.trim()
+            };
+            format!("{display_name}'s island")
+        }
+        ExportSubject::World => "the whole world".to_string(),
+    };
+    let link_id = match subject {
+        ExportSubject::Island { link_id,.. } => *link_id,
+        ExportSubject::World => None,
     };
 
     let footer_h = if link_id.is_some() { 92.0 } else { 72.0 };
@@ -2805,13 +2955,7 @@ pub fn draw_export_frame(d: &mut impl RaylibDraw, name: &str, link_id: Option<u3
         Color::new(8, 10, 16, 245),
     );
     d.draw_text("hexel", 24, 18, 24, Color::RAYWHITE);
-    d.draw_text(
-        &format!("{}'s island", display_name),
-        24,
-        47,
-        22,
-        Color::new(210, 214, 224, 255),
-    );
+    d.draw_text(&caption, 24, 47, 22, Color::new(210, 214, 224, 255));
     d.draw_text(
         "https://hexel.mister-esman.uk",
         168,
@@ -2819,7 +2963,7 @@ pub fn draw_export_frame(d: &mut impl RaylibDraw, name: &str, link_id: Option<u3
         16,
         Color::RAYWHITE,
     );
-    // Author-requested: the shared image should carry the island's itch.io
+    // The shared image should carry the island's itch.io
     // rate link (if the player set one) so a rater can jump straight to it
     // from a screenshot, not just the app's landing page above. Left-aligned
     // (not centred) like the rest of this card's text — the draw handle has
@@ -2851,9 +2995,9 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     d.draw_rectangle_rec(ib, Color::new(40, 40, 48, 255));
     draw_colors_label(d, ib);
 
-    // Author-requested: icon-only, left of the name field. The icon itself
+    // Icon-only, left of the name field. The icon itself
     // shows which TOOL is active (pencil = painting, eraser = erasing, the
-    // F13 follow-up's 4-arrow glyph = moving) rather than a static "eraser"
+    // follow-up's 4-arrow glyph = moving) rather than a static "eraser"
     // glyph that only ever meant "click to erase" — a colored border is the
     // active-state signal instead of a solid fill, so it reads apart from
     // the Lock button's fill-based signal right next to it.
@@ -2874,7 +3018,7 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
             draw_admin_edit_icon(d, eb);
         }
         Tool::IslandExport => {
-            d.draw_rectangle_lines_ex(eb, 2.0, Color::new(100, 180, 255, 255));
+            d.draw_rectangle_lines_ex(eb, 2.0, EXPORT_BLUE);
             draw_admin_edit_icon(d, eb);
         }
         Tool::Eyedropper => draw_pencil_icon(d, eb),
@@ -2926,7 +3070,7 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
         world::hsv_color(info.brush.0, info.brush.1, info.brush.2),
     );
 
-    // Author-requested: footer quick-access rate-id field, left of My Isle
+    // Footer quick-access rate-id field, left of My Isle
     // (see `footer_link_edit_rect`'s doc comment) — same colored-by-validity
     // convention as the popup's own "Your link" row (`typed_link_id`).
     let fl = footer_link_edit_rect();
@@ -2963,7 +3107,7 @@ fn draw_footer(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo) {
     );
 }
 
-/// Author-requested: each letter of the footer's "Colors" button in its own
+/// Each letter of the footer's "Colors" button in its own
 /// hue, evenly spread around the wheel at the canonical reference sat/val
 /// (`default_sat`/`DEFAULT_VAL`) — a little rainbow that previews the jam's
 /// theme (unlocked colors) right on the button that opens the Inventory.
@@ -3014,7 +3158,7 @@ fn draw_colors_label(d: &mut impl RaylibDraw, r: Rectangle) {
     }
 }
 
-/// Author-requested: geolocation-style "recenter" icon for the Center
+/// Geolocation-style "recenter" icon for the Center
 /// button — a ring with a filled center dot and four short compass ticks
 /// poking out past the ring, the standard "locate me" glyph from map apps.
 fn draw_locate_icon(d: &mut impl RaylibDraw, r: Rectangle) {
@@ -3146,7 +3290,7 @@ fn draw_sound_icon(d: &mut impl RaylibDraw, r: Rectangle, on: bool) {
 /// `Erase`/`Move` (see `draw_footer`), so the button always shows which
 /// tool is currently active.
 ///
-/// Author-caught, twice: two earlier cuts of this used a diagonal
+/// Two earlier cuts of this used a diagonal
 /// (rotated-quad-via-triangles) construction that kept rendering invisible
 /// in practice despite hand-verified, non-degenerate geometry — widening it
 /// and adding a stroke didn't help either time, which pointed at the custom
@@ -3190,7 +3334,7 @@ fn draw_pencil_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     d.draw_rectangle_rounded_lines(cap, 0.5, 4, outline);
 }
 
-/// Author-requested: icon-only Eraser button — classic two-tone (pink cap /
+/// Icon-only Eraser button — classic two-tone (pink cap /
 /// white body) eraser glyph, diagonal cut. Shown only while erasing is
 /// active — the default (paint-mode) icon is `draw_pencil_icon`.
 fn draw_eraser_icon(d: &mut impl RaylibDraw, r: Rectangle) {
@@ -3209,7 +3353,7 @@ fn draw_eraser_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     d.draw_rectangle_rounded_lines(body, 0.3, 4, Color::new(40, 40, 48, 255));
 }
 
-/// F13 follow-up: icon for the new Move tool state — the standard 4-way
+/// Icon for the new Move tool state — the standard 4-way
 /// "pan" glyph (a plus-shaped cross with an arrowhead on each end). Every
 /// arrowhead is axis-aligned (up/down/left/right), so this needs no rotated
 /// geometry — same constraint `draw_pencil_icon`'s doc comment explains.
@@ -3266,7 +3410,7 @@ fn draw_move_icon(d: &mut impl RaylibDraw, r: Rectangle) {
     d.draw_circle_lines(cx as i32, cy as i32, 2.0, outline);
 }
 
-/// Author follow-up (2026-07-12): icon for the admin-only `Tool::AdminEdit`
+/// Icon for the admin-only `Tool::AdminEdit`
 /// state — a magnifying glass ("inspect"), distinct from the paint/erase/
 /// move glyphs. Axis-aligned except for the handle, which is a single line
 /// (not a rotated rect/triangle) — see `draw_pencil_icon`'s doc comment on
@@ -3348,7 +3492,16 @@ pub fn draw_eyedropper_cursor(d: &mut impl RaylibDraw, tip: Vector2, preview: Co
     );
 }
 
-/// Author-requested: icon-only Lock button — padlock glyph, shackle swung
+/// World-cursor version of the header export icon, so the pointer says what
+/// the next click will do instead of showing a brush that would not paint.
+pub fn draw_export_cursor(d: &mut impl RaylibDraw, tip: Vector2) {
+    let icon = Rectangle::new(tip.x, tip.y, 28.0, 22.0);
+    d.draw_rectangle_rec(icon, Color::new(24, 24, 30, 220));
+    d.draw_rectangle_lines_ex(icon, 1.0, EXPORT_BLUE);
+    draw_export_icon(d, icon);
+}
+
+/// Icon-only Lock button — padlock glyph, shackle swung
 /// open when unlocked so the two states read apart even in grayscale.
 fn draw_lock_icon(d: &mut impl RaylibDraw, r: Rectangle, locked: bool) {
     let cx = r.x + r.width / 2.0;
@@ -3382,8 +3535,8 @@ fn draw_lock_icon(d: &mut impl RaylibDraw, r: Rectangle, locked: bool) {
     d.draw_rectangle_rounded(body, 0.25, 4, icon_color);
 }
 
-/// F9.6 item 5: minimal controls list, toggled by Escape (see `handle_input`).
-/// F12 (extends F9.6 item 5's minimal keybindings-only version): explains
+/// Minimal controls list, toggled by Escape (see `handle_input`).
+/// Explains
 /// the actual theme mechanic — merging — above the controls list, since
 /// "how do I even get new colors" was never spelled out anywhere in-game.
 fn draw_help_overlay(d: &mut impl RaylibDraw) {
@@ -3404,14 +3557,7 @@ fn draw_help_overlay(d: &mut impl RaylibDraw) {
     );
 
     let close = overlay_close_rect();
-    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text(
-        "X",
-        close.x as i32 + 11,
-        close.y as i32 + 7,
-        16,
-        Color::RAYWHITE,
-    );
+    draw_close_button(d, close);
 
     let section_color = Color::new(180, 200, 255, 255);
     let mut ty = o.y as i32 + 50;
@@ -3436,10 +3582,10 @@ fn draw_help_overlay(d: &mut impl RaylibDraw) {
     ty += 24;
     const CONTROL_LINES: &[&str] = &[
         "Left-drag on your island or the margin: paint",
+        "P paint    M move    F eyedropper    L lock",
+        "C colors    R recent colors    I isle    U world",
         "X or the tool button: cycle Paint / Eraser / Move",
-        "Move tool: left-drag pans instead of painting",
-        "Eyedropper button, then click/tap a painted tile",
-        "Middle-click is the eyedropper shortcut",
+        "Eyedropper: F, the button, or middle-click",
         "Long-press a foreign tile: merge/take its color",
         "Double-click/-tap a foreign island: like / unlike",
         "Hover (or tap) a foreign island: info",
@@ -3454,7 +3600,7 @@ fn draw_help_overlay(d: &mut impl RaylibDraw) {
     }
 }
 
-/// Author-requested: selection marker for an inventory tile — four small
+/// Selection marker for an inventory tile — four small
 /// white "L" corner brackets (camera-reticle style) instead of a colored
 /// border, since the border is now spoken for by `canonical_color`. Hover
 /// uses the same shape at reduced alpha (pass a translucent/gray `color`).
@@ -3505,16 +3651,9 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse:
     );
 
     let close = overlay_close_rect();
-    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text(
-        "X",
-        close.x as i32 + 11,
-        close.y as i32 + 7,
-        16,
-        Color::RAYWHITE,
-    );
+    draw_close_button(d, close);
 
-    // F9.6 item 4: sorted by hue (see `sorted_hues`), and a hex-code label
+    // Sorted by hue (see `sorted_hues`), and a hex-code label
     // pops up above whichever swatch the mouse is currently over. Author-
     // requested follow-up: the label also names the raw hue degree (the
     // actual unlockable resource, decision 7) alongside the hex code, since
@@ -3522,7 +3661,7 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse:
     let mut hovered_hex: Option<(Rectangle, String)> = None;
     for (i, &hue) in sorted_hues(info).iter().enumerate() {
         let r = swatch_rect(i);
-        // Author-requested: the fill is the tuned "what we'll draw with"
+        // The fill is the tuned "what we'll draw with"
         // color (per-hue sat/val, live for the selected swatch), while the
         // border is always the untouched canonical hue — comparing the two
         // is how the player sees what a tuned swatch actually shifted from.
@@ -3622,14 +3761,7 @@ fn draw_recent_overlay(d: &mut impl RaylibDraw, state: &UiState, mouse: Vector2)
     );
 
     let close = overlay_close_rect();
-    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text(
-        "X",
-        close.x as i32 + 11,
-        close.y as i32 + 7,
-        16,
-        Color::RAYWHITE,
-    );
+    draw_close_button(d, close);
 
     let mut hovered = None;
     for (i, &color) in state.recent_colors.iter().enumerate() {
@@ -3670,14 +3802,7 @@ fn draw_account_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo
     );
 
     let close = overlay_close_rect();
-    d.draw_rectangle_rec(close, Color::new(60, 40, 40, 255));
-    d.draw_text(
-        "X",
-        close.x as i32 + 11,
-        close.y as i32 + 7,
-        16,
-        Color::RAYWHITE,
-    );
+    draw_close_button(d, close);
 
     d.draw_text(
         &format!("Signed in as {}", info.short_id),
@@ -3788,7 +3913,7 @@ fn draw_account_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo
         Color::GRAY,
     );
 
-    // Author follow-up (2026-07-12): non-admin self-service account
+    // Non-admin self-service account
     // deletion — reuses the same double-click-confirm pattern as New
     // Account above (and the admin edit modal's own Delete button).
     if !info.is_admin {
@@ -4123,8 +4248,17 @@ pub fn draw_title(d: &mut impl RaylibDraw, state: &UiState, mouse: Vector2) {
 /// on each beat one slides inward and blends the centre to its hue.  It uses
 /// the same hex primitive and HSV palette as the world and title wordmark,
 /// so the waiting state reads as part of the game rather than generic UI.
+/// How far the incoming tile must have travelled (`merge`, 0..1) before the
+/// centre starts taking on its hue. Tuned by feel: 0.0 changed colour at
+/// departure (too early), 1.0 held until the beat boundary (too late,
+/// because `merge` decelerates and parks the tile on the centre first).
+const HANDOVER_START: f32 = 0.55;
+
 fn draw_startup_loader(d: &mut impl RaylibDraw, state: &UiState, t: f32) {
     let center = Vector2::new(SCREEN_W / 2.0, 510.0);
+    // A hexagon repeats every 60 degrees, so this is one visible turn per
+    // second. Read before `t` is shadowed by the handover fraction below.
+    let spin_degrees = t * 60.0;
     let beat = t / 0.48;
     let active = beat.floor() as i32 % 6;
     let progress = beat.fract();
@@ -4163,14 +4297,27 @@ fn draw_startup_loader(d: &mut impl RaylibDraw, state: &UiState, t: f32) {
         }
     }
 
-    let centre_hue = (active * 60) as u16;
+    // Centre holds the hue that last merged, then blends to the incoming one
+    // across the tile's final approach, finishing as it lands. Switching at
+    // departure read as too early; switching only on arrival read as too
+    // late, because `merge` decelerates and leaves the tile sitting on the
+    // centre for a beat before the boundary. Consecutive beats are always
+    // +60 degrees apart, so blending forward by 60 is the short way round.
+    let previous_hue = (((active + 5) % 6) * 60) as f32;
+    let t = ((merge - HANDOVER_START) / (1.0 - HANDOVER_START)).clamp(0.0, 1.0);
+    let handover = t * t * (3.0 - 2.0 * t);
+    let centre_hue = ((previous_hue + 60.0 * handover) as u16) % 360;
     let pulse = 1.0 + 0.08 * (progress * std::f32::consts::PI).sin();
-    world::draw_hex(
-        d,
+    // Spinning says "still working" on its own, which the
+    // pulse alone did not — it reads as a heartbeat either way, so a stall
+    // and a slow connection looked the same. One turn per two beats, and no
+    // outline: the white ring made it read as a UI chip rather than a tile.
+    d.draw_poly(
         center,
+        6,
         18.0 * pulse,
+        spin_degrees,
         world::hsv_color(centre_hue, 55, (72.0 + merge * 22.0) as u8),
-        Some(Color::new(245, 245, 250, 230)),
     );
 
     let (status, color) = if state.startup_connection_failed {
