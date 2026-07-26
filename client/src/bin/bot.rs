@@ -116,7 +116,7 @@ impl Shape {
     /// to this string is the whole feature, no bot-specific client code.
     fn display_name(self) -> String {
         match self {
-            Self::Heart => "heart-bot".to_string(),
+            Self::Heart => "Merge with me!".to_string(),
             Self::Hexagon => "hexagon-bot".to_string(),
             Self::Center => "Merge with me!".to_string(),
             Self::Assist(n) => format!("Hexa bot {n}"),
