@@ -1324,7 +1324,7 @@ fn main() {
                     && rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT))
                 || (ui_state.tool == ui::Tool::Move
                     && rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)));
-        if panning {
+        if panning && !world::pan_press_frame(&rl) {
             let delta = rl.get_mouse_delta();
             camera.target.x -= delta.x / camera.zoom;
             camera.target.y -= delta.y / camera.zoom;

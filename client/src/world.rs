@@ -319,6 +319,17 @@ pub fn eyedropper_pick(
     }
 }
 
+/// True on the frame a pan button goes down. Touch has no hover, so the
+/// pointer jumps straight to where the finger lands and `get_mouse_delta`
+/// on that frame is the gap from the previous touch rather than a drag —
+/// panning by it throws the camera across the world. A real drag starts
+/// producing usable deltas from the next frame on.
+pub fn pan_press_frame(rl: &RaylibHandle) -> bool {
+    rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+        || rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_MIDDLE)
+        || rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_RIGHT)
+}
+
 /// Ease-in-out-cubic (author-requested for the launch intro: slow start,
 /// accelerating through the middle, slowing again into the landing — not
 /// the ease-OUT-cubic the intro originally shipped with, which was fast at

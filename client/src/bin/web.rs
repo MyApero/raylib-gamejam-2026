@@ -2576,7 +2576,7 @@ fn frame(state: &mut State) {
                 && state
                     .rl
                     .is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT)));
-    if panning {
+    if panning && !world::pan_press_frame(&state.rl) {
         let delta = state.rl.get_mouse_delta();
         state.camera.target.x -= delta.x / state.camera.zoom;
         state.camera.target.y -= delta.y / state.camera.zoom;
