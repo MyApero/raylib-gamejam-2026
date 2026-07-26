@@ -45,31 +45,22 @@
       }
       /* Portrait (i.e. a phone): the square is 100vmin = the full width, so
          all the slack is vertical. Put the game at the BOTTOM, in thumb
-         reach. */
+         reach, and the log above it.
+         Deliberately NO width/height override in here — the 100vmin above is
+         already correct. CSS calls a viewport portrait when height >= width,
+         so itch.io's exactly-720x720 frame matches this query too, and an
+         earlier `min(100vw, 85vh)` cap therefore drew the game at 612px
+         inside it. That cap was reserving 15vh for #output, which the
+         shipped page hides; re-enabling the log means finding it room some
+         other way, not reinstating a cap that also fires on square. */
       @media (orientation: portrait) {
         body { display: flex; flex-direction: column; min-height: 100vh; }
         canvas#canvas { flex: none; margin-top: auto; }
+        #output { order: -1; min-height: 0; }
         /* The square now occupies the bottom of the page, where this panel
            used to sit clear of it — move it into the space above instead of
            over the in-game footer. */
         #export-panel { top: 3vmin; bottom: auto; }
-      }
-      /* Portrait (i.e. a phone): the square is 100vmin = the full width, so
-         all the slack is vertical. Put the game at the BOTTOM, in thumb
-         reach, and push the log above it.
-         The 85vh cap is what keeps the in-game footer on screen: the log
-         above takes up to 15vh, and `body` clips its overflow, so a plain
-         100vmin square would have its bottom strip — the footer — cut off
-         on any viewport less than ~1.18x taller than it is wide. */
-      @media (orientation: portrait) {
-        body { display: flex; flex-direction: column; min-height: 100vh; }
-        #output { order: -1; min-height: 0; }
-        canvas#canvas {
-          flex: none;
-          margin-top: auto;
-          width: min(100vw, 85vh);
-          height: min(100vw, 85vh);
-        }
       }
       /* Export panel. Mirrors the in-game modal in ui.rs `draw_island_export`
          — same panel fill (24,24,30), same 2px (90,90,100) border, same
