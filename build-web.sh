@@ -24,7 +24,11 @@ EMSDK_DIR="${EMSDK_DIR:-./emsdk}"
 # every visitor — including the overwhelming majority who never open a
 # replay at all. Nothing reads it before `RecoveredReplay::open`, so it has
 # no business gating startup.
-HISTORY_SOURCE="tools/history-extractor/output/hexel-tile-history-v3.bin"
+# v4 (17-byte records). The v3 artifact next to it is the pre-conversion
+# original — see tools/history-extractor/convert-v3-to-v4.py. Feeding a v3
+# file to the current parser fails with "replay history has an invalid record
+# length", since 25-byte records don't divide evenly by 17.
+HISTORY_SOURCE="tools/history-extractor/output/hexel-tile-history-v4.bin"
 HISTORY_WEB="client/web/hexel-tile-history.bin"
 if [ ! -f "$HISTORY_SOURCE" ]; then
     echo "Missing recovered history: $HISTORY_SOURCE" >&2
@@ -42,9 +46,13 @@ cp "$HISTORY_SOURCE" "$HISTORY_WEB"
 for ext in zst gz; do
     if [ ! -f "$HISTORY_WEB.$ext" ] || [ "$HISTORY_SOURCE" -nt "$HISTORY_WEB.$ext" ]; then
         echo "Compressing history -> $HISTORY_WEB.$ext (slow, cached until the history changes)"
+        # Compressed from $HISTORY_SOURCE, not from the $HISTORY_WEB copy
+        # made just above: reading the file that was being written in the
+        # same script produced a silently corrupt .gz once ("file size
+        # changed while zipping"). The source never changes during a build.
         case "$ext" in
-            zst) zstd -19 -T0 -q -f -o "$HISTORY_WEB.$ext" "$HISTORY_WEB" ;;
-            gz)  gzip -9 -c "$HISTORY_WEB" > "$HISTORY_WEB.$ext" ;;
+            zst) zstd -19 -T0 -q -f -o "$HISTORY_WEB.$ext" "$HISTORY_SOURCE" ;;
+            gz)  gzip -9 -c "$HISTORY_SOURCE" > "$HISTORY_WEB.$ext" ;;
         esac
     fi
 done
