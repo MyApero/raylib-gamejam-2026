@@ -2853,3 +2853,47 @@ design rationale in plan.md's F15 entry; client-only, no republish.
   an eyeball on backdrop alpha over a real painted map, shimmer/pulse feel,
   and that Draw -> intro ease reads as one continuous motion in both
   clients.
+
+---
+
+**Batch (2026-07-27, chat session): "New account" actually starts a new
+account.** Author report, quoted below.
+
+- **"New account should leave your current account behind and create a new
+  one, right now it only resets"** — it was calling the `reset_account`
+  reducer, which by decision 12 keeps the same identity and only wipes
+  XP/inventory. Since the token IS the account (decision 11), the button now
+  forgets the stored token and reconnects WITHOUT one: the server mints a
+  brand-new identity and `client_connected` seeds it like any first-time
+  player (new id, name, island slot, hue), while the abandoned account keeps
+  its island/XP/colors server-side for whoever still holds its token.
+  Nothing is deleted — "Delete account" is still the destructive button.
+  - Web (`game.html` `newAccount` + `bin/web.rs`): remove `TOKEN_KEY`, drop
+    `ws.onclose` so `connect()`'s 1s retry can't re-save the token we just
+    dropped, then reload. Reload rather than reconnect in place because the
+    wasm latches its identity for the life of the page. The exact inverse of
+    `importToken`.
+  - Native (`main.rs` `start_new_account`): delete the credentials file and
+    re-exec ourselves — the token is a connect-time parameter and
+    `DbConnection` is built once, the same reason native skips token import.
+    `credentials::File` has no delete and keeps `path()` private, so the path
+    is rebuilt via the `home` crate (now a direct dep, already in the
+    lockfile) to resolve exactly as the SDK does. Spawn failure keeps the
+    process running and toasts the reason; the token is gone either way, so
+    the next manual launch lands on the new account.
+  - `ui.rs`: action renamed `reset_account` -> `new_account` (it is no longer
+    a reducer call), `reset_armed_at` -> `new_account_armed_at`,
+    `RESET_CONFIRM_WINDOW` -> `CONFIRM_WINDOW`, and the button's caption now
+    describes starting over rather than wiping stats. Double-click-to-confirm
+    is unchanged. The `reset_account` reducer itself stays — `bin/bot.rs`
+    uses it.
+- **Builds**: `cargo check -p server`, `cargo build -p client --bin client
+  --bin bot`, `cargo test -p client --bin client` (16 passed), `cargo test
+  -p server` (4 passed), `./build-web.sh` all clean, zero warnings
+  (VERIFIED). Web build deployed at author's request — live `game.html`
+  carries `newAccount` and live `web.wasm` is the new bundle (VERIFIED by
+  curl).
+- NOT hand-tested in a GUI/browser (author drives runtime testing): needs an
+  eyeball on New account -> genuinely new id/name/island, the old island
+  still on the map and re-importable from its copied token, and the native
+  re-exec handing the window over cleanly.

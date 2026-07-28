@@ -56,9 +56,57 @@ const WORLD_TABLES: &[&str] = &["SELECT * FROM island_cell", "SELECT * FROM marg
 /// and `HEXEL_PLAYER=p2 ...` in another. Unset defaults to the old
 /// shared single-player key, so solo runs are unaffected. The database name
 /// is mixed in so switching `HEXEL_DB` doesn't reuse the wrong player.
+fn creds_key() -> String {
+    std::env::var("HEXEL_PLAYER").unwrap_or_else(|_| db_name())
+}
+
 fn creds_store() -> credentials::File {
-    let key = std::env::var("HEXEL_PLAYER").unwrap_or_else(|_| db_name());
-    credentials::File::new(key)
+    credentials::File::new(creds_key())
+}
+
+/// The file `creds_store()` reads and writes. `credentials::File` keeps its
+/// own `path()` private and offers no delete, so "New account" has to rebuild
+/// the same path itself — hence the `home` crate rather than
+/// `std::env::home_dir`, so this resolves exactly the way the SDK does.
+fn creds_path() -> Option<std::path::PathBuf> {
+    let mut path = home::home_dir()?;
+    path.push(".spacetimedb_client_credentials");
+    path.push(creds_key());
+    Some(path)
+}
+
+/// The Account overlay's "New account", native side. The saved token IS the
+/// account (decision 11), so starting over means forgetting that token and
+/// connecting again WITHOUT one — the server then mints a brand-new identity
+/// and `client_connected` seeds it like any first-time player, while the
+/// abandoned account keeps its island, XP and colors server-side for whoever
+/// still holds its token. (It used to call the `reset_account` reducer, which
+/// kept the same identity and only wiped stats.)
+///
+/// The token is a connect-time parameter and `DbConnection` is built once at
+/// startup, so there is no in-process hot-swap — the same reason native skips
+/// token import entirely (see the `import_token` call site). Re-exec is the
+/// native equivalent of the web build's page reload: spawn a fresh copy of
+/// ourselves with the same arguments, then let the caller drop this
+/// connection and exit. Returns `Err` with a player-facing message if the
+/// relaunch could not be started, in which case the caller keeps running —
+/// the token is already gone, so the next manual launch starts the new
+/// account anyway.
+fn start_new_account() -> Result<(), String> {
+    match creds_path() {
+        Some(path) => match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Could not forget the saved ID: {e}")),
+        },
+        None => return Err("Could not locate the saved ID to forget it.".to_string()),
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("Could not find the game binary: {e}"))?;
+    std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .spawn()
+        .map_err(|e| format!("New account ready — restart the game to play it ({e})."))?;
+    Ok(())
 }
 
 /// The caller's own island, if the subscription has it yet.
@@ -1152,8 +1200,21 @@ fn main() {
             // restarting the process. `show_token_import: false` above means
             // `ui::handle_input` never actually produces this action here.
             let _ = actions.import_token;
-            if actions.reset_account {
-                let _ = ctx.reducers.reset_account();
+            // Not a reducer call — see `start_new_account`. On success the
+            // replacement process is already starting, so this one hands the
+            // window over and leaves; on failure the token has still been
+            // forgotten, so say so instead of pretending nothing happened.
+            if actions.new_account {
+                match start_new_account() {
+                    Ok(()) => {
+                        let _ = ctx.disconnect();
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        ui_state.show_info_toast(e);
+                    }
+                }
             }
             if actions.delete_account {
                 let _ = ctx.reducers.delete_account();

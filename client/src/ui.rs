@@ -13,9 +13,10 @@ use std::time::{Duration, Instant};
 use crate::world;
 
 const TOAST_DURATION: Duration = Duration::from_millis(2500);
-/// How long the Reset Account button stays armed after a first click, before
-/// a second click is required to actually fire the reducer.
-const RESET_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
+/// How long the Account overlay's New account / Delete account buttons stay
+/// armed after a first click, before a second click is required to actually
+/// fire them.
+const CONFIRM_WINDOW: Duration = Duration::from_secs(4);
 /// Cap on the Account overlay's import field. This used
 /// to be 256, which silently truncated every real SpacetimeDB reconnect token
 /// (observed ~386 chars) into a corrupt JWT — the server then rejected it and
@@ -178,10 +179,10 @@ pub struct UiState {
     import_input: String,
     import_focused: bool,
     /// Set on the first click of "New account"; a second click within
-    /// `RESET_CONFIRM_WINDOW` actually fires it, otherwise it auto-disarms.
-    reset_armed_at: Option<Instant>,
+    /// `CONFIRM_WINDOW` actually fires it, otherwise it auto-disarms.
+    new_account_armed_at: Option<Instant>,
     /// Same double-click-confirm pattern as
-    /// `reset_armed_at`, for the Account overlay's "Delete account" button
+    /// `new_account_armed_at`, for the Account overlay's "Delete account" button
     /// (non-admin self-service, mirrors the admin edit modal's own delete
     /// confirm).
     delete_armed_at: Option<Instant>,
@@ -232,9 +233,9 @@ pub struct UiState {
     admin_likes_input: String,
     admin_xp_input: String,
     admin_edit_focus: AdminEditField,
-    /// Same double-click-confirm pattern as `reset_armed_at`: armed on the
+    /// Same double-click-confirm pattern as `new_account_armed_at`: armed on the
     /// first click of "Delete isle & account", fired on a second click within
-    /// `RESET_CONFIRM_WINDOW`.
+    /// `CONFIRM_WINDOW`.
     admin_delete_armed_at: Option<Instant>,
     /// Header sound on/off toggle. Pure local UI state — the caller
     /// (`main.rs`/`bin/web.rs`) reads it every frame and drives
@@ -357,7 +358,7 @@ impl UiState {
             account_open: false,
             import_input: String::new(),
             import_focused: false,
-            reset_armed_at: None,
+            new_account_armed_at: None,
             delete_armed_at: None,
             copy_clicked_at: None,
             island_popup: None,
@@ -761,7 +762,17 @@ pub struct Actions {
     /// A token pasted into the Account overlay's import field, submitted via
     /// the Import button or Enter.
     pub import_token: Option<String>,
-    pub reset_account: bool,
+    /// The Account overlay's (double-click-confirmed) "New account" button.
+    /// NOT a reducer call: the stored token IS the account (decision 11), so
+    /// starting over means abandoning the current token and reconnecting
+    /// without one — the server then mints a brand-new identity and
+    /// `client_connected` seeds it like any first-time player. The old
+    /// account is left untouched on the server, still reachable by anyone
+    /// holding its token, which is why the button's caption tells you to
+    /// copy yours first. This used to fire the `reset_account` reducer
+    /// instead, which kept the same identity and only wiped XP/inventory —
+    /// "new account" that was really "reset account".
+    pub new_account: bool,
     /// The Account overlay's (double-click-
     /// confirmed) "Delete account" button — non-admin self-service.
     pub delete_account: bool,
@@ -1059,7 +1070,7 @@ fn import_btn_rect() -> Rectangle {
     Rectangle::new(o.x + 350.0, o.y + 180.0, 100.0, 32.0)
 }
 
-fn reset_btn_rect() -> Rectangle {
+fn new_account_btn_rect() -> Rectangle {
     let o = overlay_rect();
     Rectangle::new(o.x + 20.0, o.y + 280.0, 240.0, 36.0)
 }
@@ -1319,14 +1330,14 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         state.pending_select = None;
     }
     if state
-        .reset_armed_at
-        .is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW)
+        .new_account_armed_at
+        .is_some_and(|t| t.elapsed() >= CONFIRM_WINDOW)
     {
-        state.reset_armed_at = None;
+        state.new_account_armed_at = None;
     }
     if state
         .delete_armed_at
-        .is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW)
+        .is_some_and(|t| t.elapsed() >= CONFIRM_WINDOW)
     {
         state.delete_armed_at = None;
     }
@@ -1702,12 +1713,12 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
                 state.import_focused = false;
             }
         }
-        if clicked && point_in(mouse, reset_btn_rect()) {
-            if state.reset_armed_at.is_some() {
-                actions.reset_account = true;
-                state.reset_armed_at = None;
+        if clicked && point_in(mouse, new_account_btn_rect()) {
+            if state.new_account_armed_at.is_some() {
+                actions.new_account = true;
+                state.new_account_armed_at = None;
             } else {
-                state.reset_armed_at = Some(Instant::now());
+                state.new_account_armed_at = Some(Instant::now());
             }
         }
         // Non-admin self-service — admin has
@@ -1797,7 +1808,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     // Admin edit modal — three plain text
     // fields (name/likes/xp, digits-only for the latter two) committed
     // together by Save, plus a double-click-confirmed Delete (same pattern
-    // as `reset_armed_at` above).
+    // as `new_account_armed_at` above).
     if let Some(admin_edit) = &state.admin_edit {
         let island_id = admin_edit.island_id;
         if modal_dismiss_clicked(mouse, clicked) {
@@ -1808,7 +1819,7 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
         }
         if state
             .admin_delete_armed_at
-            .is_some_and(|t| t.elapsed() >= RESET_CONFIRM_WINDOW)
+            .is_some_and(|t| t.elapsed() >= CONFIRM_WINDOW)
         {
             state.admin_delete_armed_at = None;
         }
@@ -3884,8 +3895,8 @@ fn draw_account_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo
         );
     }
 
-    let rb = reset_btn_rect();
-    let armed = state.reset_armed_at.is_some();
+    let rb = new_account_btn_rect();
+    let armed = state.new_account_armed_at.is_some();
     d.draw_rectangle_rec(
         rb,
         if armed {
@@ -3906,7 +3917,7 @@ fn draw_account_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo
         Color::RAYWHITE,
     );
     d.draw_text(
-        "Wipes XP and unlocked colors, rolls a new starting hue.\nKeeps your ID, name, and island art. Copy your token above first.",
+        "Starts over as a brand-new player: new ID, name, island and hue.\nThis account is left as it is — copy its ID above first to come back.",
         rb.x as i32,
         rb.y as i32 + rb.height as i32 + 10,
         12,

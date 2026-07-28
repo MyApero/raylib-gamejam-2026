@@ -2366,8 +2366,11 @@ fn frame(state: &mut State) {
                 "window.stdb && window.stdb.importToken({js_token})"
             ));
         }
-        if actions.reset_account {
-            call_reducer("reset_account", serde_json::json!([]));
+        // Not a reducer: starting a new account means dropping the stored
+        // token and reloading so the server issues a fresh identity (see
+        // `newAccount` in game.html). The old account is left intact.
+        if actions.new_account {
+            run_js("window.stdb && window.stdb.newAccount()");
         }
         if actions.delete_account {
             call_reducer("delete_account", serde_json::json!([]));

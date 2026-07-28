@@ -15,6 +15,11 @@ include_dir = "0.7"
 # publishes up to 2.6.1, which is missing APIs our generated bindings need.
 # Switch back to a plain version once 2.7.0 lands on crates.io. See WORK.md.
 spacetimedb-sdk = { git = "https://github.com/clockworklabs/SpacetimeDB", branch = "master" }
+# Same crate the SDK's `credentials::File` uses to locate
+# `~/.spacetimedb_client_credentials`, so "New account" deletes exactly the
+# file the SDK would have loaded (see `creds_path`). Already in the lockfile
+# as an SDK dependency — this only makes it a direct one.
+home = "0.5"
 
 # Web binary only (src/bin/web.rs) — the SDK's browser support needs
 # wasm-bindgen, which does not support wasm32-unknown-emscripten (raylib's

@@ -60,6 +60,14 @@ next one starts.
 12. Account reset keeps identity + name + island art, but wipes XP and inventory and
     rolls a new random start hue. (ASSUMED: island art survives reset — confirm with
     author at F6.)
+    (Superseded for the button, 2026-07-27: the Account overlay's "New account" no
+    longer calls `reset_account` at all. Author call — "new account should leave your
+    current account behind and create a new one, right now it only resets": since the
+    token IS the account (decision 11), the button now forgets the stored token and
+    reconnects with none, so the server mints a brand-new identity via
+    `client_connected` and the old account is left untouched server-side, recoverable
+    by importing its token. The `reset_account` reducer itself stays — the bots
+    (`client/src/bin/bot.rs`) still use it.)
 13. Admin tooling is minimal for now (P2). Backups = documented CLI dumps on the VPS.
 14. A player's link is island-level (not per-tile) and is stored as just the itch.io
     submission id (`u32`); the client renders it as

@@ -396,6 +396,31 @@
               fallback();
             }
           },
+          // The exact inverse of importToken: forget the stored token so the
+          // next connect() goes out anonymous and the server mints a
+          // brand-new identity, which client_connected then seeds like any
+          // first-time player. Nothing is deleted server-side — the old
+          // account's island, XP and colours stay exactly where they are,
+          // reachable again by importing the token the Account overlay told
+          // the player to copy first. (This used to call the reset_account
+          // reducer, which kept the same identity and only wiped stats, so
+          // "New account" never actually left the old account behind.)
+          // Reload rather than reconnecting in place: the wasm side latches
+          // its identity for the life of the page, so every cached row would
+          // otherwise still be attributed to the abandoned account. Clearing
+          // ws.onclose first stops connect()'s 1s reconnect timer from
+          // racing the reload and re-saving the token we just dropped.
+          newAccount: function () {
+            localStorage.removeItem(TOKEN_KEY);
+            if (ws) {
+              try {
+                ws.onclose = null;
+                ws.onmessage = null;
+                ws.close();
+              } catch (e) { /* closing a dead socket is fine */ }
+            }
+            window.location.reload();
+          },
           // The old version stored the pasted
           // token and reloaded immediately — if the token turned out to be
           // invalid/expired, the reload's own `connect()` would fail twice
