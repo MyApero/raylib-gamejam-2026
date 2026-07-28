@@ -15,7 +15,10 @@
 # two never drift apart. Players see the new backdrop on their next load, with
 # no rebuild and no cache-bust needed — see `hexelLoadTitleMap` in game.html.
 #
-# Run from a systemd user timer every minute; safe to run by hand.
+# Run from a systemd user timer every minute; safe to run by hand. The units
+# and their install steps are in systemd/ and README.md next to this script —
+# they are NOT optional. This script shipped without them once and simply
+# never ran, so the backdrop froze two days out of date.
 
 set -euo pipefail
 

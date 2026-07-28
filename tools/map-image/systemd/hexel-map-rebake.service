@@ -1,0 +1,13 @@
+[Unit]
+Description=Re-bake the Hexel title-screen map when the island layout changes
+Documentation=file:///home/ubuntu/raylib-gamejam-2026/tools/map-image/rebake_on_rerank.sh
+
+[Service]
+Type=oneshot
+# `spacetime` lives in ~/.local/bin, which a systemd unit does not inherit.
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=/home/ubuntu/raylib-gamejam-2026
+ExecStart=/home/ubuntu/raylib-gamejam-2026/tools/map-image/rebake_on_rerank.sh
+# A bake takes ~20s; the timer fires every minute, so a hung render must not
+# pile up behind itself.
+TimeoutStartSec=300

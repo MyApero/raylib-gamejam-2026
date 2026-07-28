@@ -2897,3 +2897,35 @@ account.** Author report, quoted below.
   eyeball on New account -> genuinely new id/name/island, the old island
   still on the map and re-importable from its copied token, and the native
   re-exec handing the window over cleanly.
+
+---
+
+**Batch (2026-07-27, chat session): the title backdrop is un-frozen.** Author
+report, quoted below.
+
+- **"the image is not up to date, the islands are not at the same place when
+  zoomed in and out"** — the stale-backdrop bug that commit 2cf8d9b was
+  written to fix had simply never been switched on. `rebake_on_rerank.sh`
+  documented itself as "run from a systemd user timer every minute", but no
+  timer or cron existed on the box and `render_map.py`'s only dependency
+  (`python3-pil`) was not installed, so the bake froze at the commit that
+  introduced it. Two days of drift, visible exactly where the author saw it:
+  `title_map::blend_alpha` crossfades the baked image into live cells between
+  zoom 4 and 8, so a stale layout reads as islands jumping as you zoom.
+  Confirmed by rendering a probe bake — pose had moved from
+  `(16.50, -23.82) zoom 1.094` to `(12.00, -3.90) zoom 1.030`.
+  - Installed `python3-pil`, re-baked (assets + served copy), and installed
+    the missing units (`tools/map-image/systemd/hexel-map-rebake.{service,
+    timer}`, now tracked, plus `tools/map-image/README.md` with the per-host
+    install and the reason it is not optional). Timer verified firing every
+    minute, service exit 0.
+  - The runtime fetch did its job once the files changed: the live site
+    served the fresh pose with no rebuild needed (VERIFIED by curl).
+- Note for anyone with a checkout on the box: `client/assets/title-map.*` is
+  tracked AND rewritten by the watcher, so `git status` is now dirty within
+  minutes of any commit of it. That is the design (the tracked copy is the
+  compiled-in fallback); it just never showed before, because the watcher
+  never ran.
+- NOT hand-tested in a GUI/browser (author drives runtime testing): needs an
+  eyeball on the intro zoom no longer showing islands shifting as the bake
+  crossfades into the live map.

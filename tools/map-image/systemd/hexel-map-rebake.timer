@@ -1,0 +1,14 @@
+[Unit]
+Description=Check every minute whether the Hexel title map needs re-baking
+
+[Timer]
+# The script is a cheap no-op (one SQL query + a hash) unless the island
+# layout actually changed, so a one-minute tick is what keeps the backdrop at
+# most a minute behind a re-rank.
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
