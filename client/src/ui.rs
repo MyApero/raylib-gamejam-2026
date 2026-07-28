@@ -1024,35 +1024,85 @@ fn modal_dismiss_clicked(mouse: Vector2, clicked: bool) -> bool {
     clicked && (point_in(mouse, overlay_close_rect()) || !point_in(mouse, overlay_rect()))
 }
 
-const SWATCH: f32 = 44.0;
-const SWATCH_GAP: f32 = 8.0;
-const SWATCH_COLS: usize = 10;
+/// Author request ("make lines on 12 on the client, make sure the whole
+/// thing is nicely centered"). The grid used to be 10 fixed 44px columns
+/// pinned 20px from the panel's left edge, which left a 68px gutter on the
+/// right — visibly off-center in a 600px panel — and, past 60 colors, ran a
+/// seventh row straight through the Hue slider's label. Both come from
+/// hardcoding the geometry, so it is derived here instead: a fixed 12
+/// columns, always centered, with the swatch shrinking from `SWATCH_MAX`
+/// once the rows stop fitting the band above the sliders.
+const SWATCH_COLS: usize = 12;
+const SWATCH_GAP: f32 = 6.0;
+/// Cap on one swatch's side. Everything else scales down from here; nothing
+/// ever scales up, so a two-color inventory shows two normal tiles rather
+/// than two enormous ones.
+const SWATCH_MAX: f32 = 40.0;
+/// Floor on the same, so a pathologically large inventory degrades into a
+/// dense grid rather than into invisible (or negative-sized) tiles.
+const SWATCH_MIN: f32 = 8.0;
+/// Top of the grid, below the "Inventory" title.
+const GRID_TOP: f32 = 50.0;
+/// Clearance kept between the bottom of the grid and the Hue slider's TRACK
+/// — the slider's label is drawn above its track, and that label is what the
+/// overflowing row used to collide with.
+const GRID_BOTTOM_CLEARANCE: f32 = 26.0;
 
-fn swatch_rect(i: usize) -> Rectangle {
+/// Width the inventory overlay's content occupies: the swatch grid at full
+/// size. The sliders use it too, so their ends line up with the grid's outer
+/// columns instead of stopping short of them.
+const CONTENT_W: f32 = SWATCH_COLS as f32 * SWATCH_MAX + (SWATCH_COLS - 1) as f32 * SWATCH_GAP;
+
+fn content_x() -> f32 {
     let o = overlay_rect();
+    o.x + (o.width - CONTENT_W) / 2.0
+}
+
+/// Vertical band the grid may use, from `GRID_TOP` down to the clearance
+/// above the Hue slider.
+fn grid_band_height() -> f32 {
+    let o = overlay_rect();
+    (hue_slider_rect().y - o.y) - GRID_TOP - GRID_BOTTOM_CLEARANCE
+}
+
+/// Side of one swatch for an inventory of `count` colors: `SWATCH_MAX` while
+/// the rows still fit the band, then whatever does fit.
+fn swatch_size(count: usize) -> f32 {
+    let rows = count.div_ceil(SWATCH_COLS).max(1) as f32;
+    let fits = (grid_band_height() - (rows - 1.0) * SWATCH_GAP) / rows;
+    SWATCH_MAX.min(fits).max(SWATCH_MIN)
+}
+
+/// `count` is the whole inventory, not just `i`: the swatch size depends on
+/// how many rows the grid comes to, so every caller has to pass the same
+/// total or the hitboxes and the drawn tiles would disagree.
+fn swatch_rect(i: usize, count: usize) -> Rectangle {
+    let o = overlay_rect();
+    let size = swatch_size(count);
+    let grid_w = SWATCH_COLS as f32 * size + (SWATCH_COLS - 1) as f32 * SWATCH_GAP;
     let col = (i % SWATCH_COLS) as f32;
     let row = (i / SWATCH_COLS) as f32;
     Rectangle::new(
-        o.x + 20.0 + col * (SWATCH + SWATCH_GAP),
-        o.y + 50.0 + row * (SWATCH + SWATCH_GAP),
-        SWATCH,
-        SWATCH,
+        o.x + (o.width - grid_w) / 2.0 + col * (size + SWATCH_GAP),
+        o.y + GRID_TOP + row * (size + SWATCH_GAP),
+        size,
+        size,
     )
 }
 
 fn hue_slider_rect() -> Rectangle {
     let o = overlay_rect();
-    Rectangle::new(o.x + 40.0, o.y + o.height - 160.0, 440.0, 16.0)
+    Rectangle::new(content_x(), o.y + o.height - 160.0, CONTENT_W, 16.0)
 }
 
 fn sat_slider_rect() -> Rectangle {
     let o = overlay_rect();
-    Rectangle::new(o.x + 40.0, o.y + o.height - 110.0, 440.0, 16.0)
+    Rectangle::new(content_x(), o.y + o.height - 110.0, CONTENT_W, 16.0)
 }
 
 fn val_slider_rect() -> Rectangle {
     let o = overlay_rect();
-    Rectangle::new(o.x + 40.0, o.y + o.height - 60.0, 440.0, 16.0)
+    Rectangle::new(content_x(), o.y + o.height - 60.0, CONTENT_W, 16.0)
 }
 
 fn copy_btn_rect() -> Rectangle {
@@ -1288,8 +1338,9 @@ fn effective_hue(state: &UiState, info: &HudInfo) -> u16 {
 /// `info.hues` reflects DB iteration order (effectively
 /// insertion order); the inventory grid instead shows them sorted by hue so
 /// nearby colors sit next to each other. Both `handle_input`'s swatch click
-/// loop and `draw_overlay` call this so index `i` -> `swatch_rect(i)` always
-/// means the same hue in both places.
+/// loop and `draw_overlay` call this so index `i` -> `swatch_rect(i, len)`
+/// always means the same hue in both places — and both pass the same `len`,
+/// which is what keeps the hitboxes on top of the drawn tiles.
 fn sorted_hues(info: &HudInfo) -> Vec<u16> {
     let mut hues = info.hues.to_vec();
     hues.sort_unstable();
@@ -1923,10 +1974,11 @@ pub fn handle_input(rl: &mut RaylibHandle, state: &mut UiState, info: &HudInfo) 
     // Swatches sorted by hue — `draw_overlay` iterates the same
     // sorted order so swatch indices (and thus `swatch_rect(i)`) line up
     // between the two.
-    for (i, &hue) in sorted_hues(info).iter().enumerate() {
+    let hues = sorted_hues(info);
+    for (i, &hue) in hues.iter().enumerate() {
         // Re-clicking the ALREADY-selected tile is a no-op — see the last-3
         // click handler above for why (would wipe out a live Hue nudge).
-        if clicked && point_in(mouse, swatch_rect(i)) {
+        if clicked && point_in(mouse, swatch_rect(i, hues.len())) {
             if hue != state.base_hue {
                 // Restore THIS color's own remembered sat/val (F-request: tied
                 // per color) rather than carrying over whatever the sliders were
@@ -3670,15 +3722,20 @@ fn draw_overlay(d: &mut impl RaylibDraw, state: &UiState, info: &HudInfo, mouse:
     // actual unlockable resource, decision 7) alongside the hex code, since
     // two close swatches can look identical at a glance otherwise.
     let mut hovered_hex: Option<(Rectangle, String)> = None;
-    for (i, &hue) in sorted_hues(info).iter().enumerate() {
-        let r = swatch_rect(i);
+    let hues = sorted_hues(info);
+    for (i, &hue) in hues.iter().enumerate() {
+        let r = swatch_rect(i, hues.len());
         // The fill is the tuned "what we'll draw with"
         // color (per-hue sat/val, live for the selected swatch), while the
         // border is always the untouched canonical hue — comparing the two
         // is how the player sees what a tuned swatch actually shifted from.
         let color = swatch_color(hue, state, info);
         d.draw_rectangle_rec(r, color);
-        d.draw_rectangle_lines_ex(r, 5.0, canonical_color(hue));
+        // Border scaled to the tile rather than a flat 5px: the swatch
+        // shrinks once the inventory outgrows the grid band (`swatch_size`),
+        // and a fixed border would eventually be the whole tile, hiding the
+        // tuned fill it exists to be compared against.
+        d.draw_rectangle_lines_ex(r, (r.width * 0.12).clamp(1.0, 5.0), canonical_color(hue));
         // Compare against the Hue slider's anchor, not the live (possibly
         // nudged) brush hue — otherwise dragging the slider away from 0
         // makes every swatch look unselected even though you're still
@@ -4397,5 +4454,44 @@ mod tests {
         assert_eq!(state.recent_colors.front(), Some(&raw_variant));
         state.note_used_color(raw_variant);
         assert_eq!(state.recent_colors.len(), 99);
+    }
+
+    /// The three properties the author asked for, at inventory sizes either
+    /// side of the point where the swatch has to start shrinking: 12 per
+    /// line, centered, and clear of the sliders.
+    #[test]
+    fn inventory_grid_is_twelve_wide_centered_and_clear_of_the_sliders() {
+        let o = overlay_rect();
+        for count in [1usize, 12, 13, 68, 84, 85, 240] {
+            let first = swatch_rect(0, count);
+            let last_in_row = swatch_rect(SWATCH_COLS - 1, count);
+            // Exactly 12 columns: index 12 is the start of the second row,
+            // back under index 0.
+            let wrapped = swatch_rect(SWATCH_COLS, count);
+            assert_eq!(wrapped.x, first.x, "count={count}");
+            assert!(wrapped.y > first.y, "count={count}");
+
+            // Centered: the gutters either side of the grid match.
+            let left = first.x - o.x;
+            let right = (o.x + o.width) - (last_in_row.x + last_in_row.width);
+            assert!((left - right).abs() < 0.01, "count={count}");
+
+            // The last row clears the Hue slider — this is what the old
+            // fixed-size grid stopped doing once a player passed 60 colors.
+            let last = swatch_rect(count - 1, count);
+            assert!(
+                last.y + last.height <= hue_slider_rect().y,
+                "count={count}: grid runs into the sliders"
+            );
+        }
+
+        // The sliders share the grid's outer edges at full size.
+        assert!((hue_slider_rect().x - swatch_rect(0, 12).x).abs() < 0.01);
+        assert!(
+            (hue_slider_rect().x + hue_slider_rect().width
+                - (swatch_rect(SWATCH_COLS - 1, 12).x + swatch_rect(SWATCH_COLS - 1, 12).width))
+                .abs()
+                < 0.01
+        );
     }
 }

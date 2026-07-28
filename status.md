@@ -2929,3 +2929,38 @@ report, quoted below.
 - NOT hand-tested in a GUI/browser (author drives runtime testing): needs an
   eyeball on the intro zoom no longer showing islands shifting as the bake
   crossfades into the live map.
+
+---
+
+**Batch (2026-07-27, chat session): inventory grid to 12 columns, centered.**
+Author request with a screenshot ("Make lines on 12 on the client. Make sure
+the whole thing is nicely centered"). `client/src/ui.rs` only; both clients
+share it, no republish.
+
+- The grid was 10 fixed 44px columns pinned 20px from the panel's left edge.
+  In a 600px panel that left a 68px gutter on the right — the off-centre look
+  in the screenshot — and, since nothing tied the grid to the space it had,
+  the seventh row drew straight through the Hue slider's label once a player
+  passed 60 colors. The screenshot has 68 colors and shows exactly that.
+- Now derived rather than hardcoded (`SWATCH_COLS`/`SWATCH_MAX`/`GRID_TOP`/
+  `GRID_BOTTOM_CLEARANCE`, `swatch_size`, `swatch_rect`): 12 columns, the
+  block centered on the panel, 40px swatches while the rows still fit the
+  band between the title and the Hue slider, shrinking from there (floor
+  `SWATCH_MIN`). 68 colors -> 6 rows at full size, 80px clear of the slider;
+  full size holds to 84, and 150 still fits at ~19px.
+- `swatch_rect` takes the inventory count now, since the size depends on the
+  row count — `handle_input` and `draw_overlay` pass the same `sorted_hues`
+  length, which is what keeps hitboxes on top of drawn tiles.
+- The three sliders moved to the grid's own content column (`content_x`/
+  `CONTENT_W`, 546px centered) instead of 440px pinned at +40, so their ends
+  line up with the outer swatch columns. Swatch border thickness scales with
+  the tile (`* 0.12`, clamped 1..5) so a shrunken tile isn't all border.
+- New test `inventory_grid_is_twelve_wide_centered_and_clear_of_the_sliders`
+  asserts all three properties (12 per row, equal gutters, last row above the
+  Hue track) at 1/12/13/68/84/85/240 colors, plus grid-slider edge alignment.
+- **Builds**: `cargo build -p client --bin client --bin bot`, `cargo test -p
+  client --bin client` (17 passed), `./build-web.sh` clean, zero warnings
+  (VERIFIED). Deployed at author's request; live `web.wasm` is the new bundle
+  (VERIFIED by curl). Geometry also eyeballed offline via a PIL mock of the
+  same maths at 12/68/84/150 colors, the way the F15 wordmark was iterated.
+- NOT hand-tested in a GUI/browser (author drives runtime testing).
