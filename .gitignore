@@ -107,3 +107,7 @@ hexel-itch.zip
 # Secrets (F10: real ADMIN_PASSWORD lives here, never committed — see
 # server/.env.example for the template)
 .env
+
+# Working notes kept for the AI assistant, not part of the project
+plan.md
+status.md
